@@ -36,6 +36,7 @@ ignore = [
 
 # ベースライン script は関数名に B0 等が入るため、命名チェックだけ緩める
 "robust_opt_halbach_gradnorm_minimal.py" = ["N802"]
+"halbach/physics.py" = ["N802"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
