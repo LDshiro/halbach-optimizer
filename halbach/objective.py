@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -9,6 +8,7 @@ from numpy.typing import NDArray
 from halbach.constants import FACTOR, m0, phi0
 from halbach.numba_compat import njit
 from halbach.physics import compute_B_and_B0
+from halbach.types import Geometry
 
 
 @njit(cache=True)
@@ -197,7 +197,7 @@ def grad_alpha_and_radius_fixed(
 def objective_with_grads_fixed(
     alphas: NDArray[np.float64],
     r_bases: NDArray[np.float64],
-    geom: dict[str, Any],
+    geom: Geometry,
     pts: NDArray[np.float64],
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
     """
@@ -206,12 +206,12 @@ def objective_with_grads_fixed(
     Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
         alphas,
         r_bases,
-        geom["theta"],
-        geom["sin2"],
-        geom["cth"],
-        geom["sth"],
-        geom["z_layers"],
-        geom["ring_offsets"],
+        geom.theta,
+        geom.sin2,
+        geom.cth,
+        geom.sth,
+        geom.z_layers,
+        geom.ring_offsets,
         pts,
         FACTOR,
         phi0,
@@ -228,12 +228,12 @@ def objective_with_grads_fixed(
     g_alpha, g_rbase = grad_alpha_and_radius_fixed(
         alphas,
         r_bases,
-        geom["theta"],
-        geom["sin2"],
-        geom["cth"],
-        geom["sth"],
-        geom["z_layers"],
-        geom["ring_offsets"],
+        geom.theta,
+        geom.sin2,
+        geom.cth,
+        geom.sth,
+        geom.z_layers,
+        geom.ring_offsets,
         pts,
         FACTOR,
         phi0,

@@ -33,14 +33,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypedDict, cast
+from typing import Any, TypedDict, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
 from scipy.io import savemat
-from scipy.optimize import minimize
 
 from halbach.constants import FACTOR, m0, mu0, phi0
 from halbach.geom import (
@@ -51,14 +51,13 @@ from halbach.geom import (
     unpack_x,
 )
 from halbach.io import load_nominal_npz
+from halbach.logging_utils import configure_logging
 from halbach.objective import objective_with_grads_fixed
 from halbach.physics import compute_B_and_B0, objective_only
 from halbach.robust import Float1DArray, fun_grad_gradnorm_fixed
-
-if TYPE_CHECKING:
-    from scipy.optimize._minimize import _MinimizeOptions as MinimizeOptions
-else:
-    MinimizeOptions: TypeAlias = dict[str, object]
+from halbach.solvers.lbfgsb import bounds_from_arrays, solve_lbfgsb
+from halbach.solvers.types import LBFGSBOptions
+from halbach.types import Geometry
 
 
 class SummaryStats(TypedDict):
@@ -69,6 +68,9 @@ class SummaryStats(TypedDict):
     p90: float
     p95: float
     p99: float
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------- CLI ----------------
@@ -122,6 +124,12 @@ def parse_args() -> argparse.Namespace:
     # Monte Carlo
     ap.add_argument("--mc_samples", type=int, default=600, help="Monte Carlo samples")
     ap.add_argument("--seed", type=int, default=20250926, help="random seed")
+    ap.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
     return ap.parse_args()
 
 
@@ -133,21 +141,21 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
     """
     # 1) 名目データの読取と幾何セットアップ
     nom = load_nominal_npz(args.in_npz)
-    geom = dict(
-        N=nom["N"],
-        R=nom["R"],
-        K=nom["K"],
-        r0=float(np.median(nom["r_bases"])),
+    r0 = float(np.median(nom["r_bases"]))
+    geom = Geometry(
         theta=nom["theta"],
         sin2=nom["sin2"],
         cth=nom["cth"],
         sth=nom["sth"],
         z_layers=nom["z_layers"],
         ring_offsets=nom["ring_offsets"],
+        N=nom["N"],
+        R=nom["R"],
+        K=nom["K"],
         dz=nom["dz"],
         Lz=nom["Lz"],
     )
-    lower_var, upper_var, _ = build_symmetry_indices(geom["K"])
+    lower_var, upper_var, _ = build_symmetry_indices(geom.K)
 
     # 2) ROI の離散点（目的関数評価用）
     pts = build_roi_points(args.roi_r, args.roi_step)
@@ -161,98 +169,76 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
 
     # 4) Box 制約（半径の下限: 初期値 - min_radius_drop_mm）
     delta_m = args.min_radius_drop_mm * 1e-3
-    P = geom["R"] * geom["K"]
-    bounds: list[tuple[float | None, float | None]] = [(None, None)] * P + [
-        (float(rv0[j] - delta_m), None) for j in range(rv0.size)
-    ]
+    P = geom.R * geom.K
+    lb = np.full(x0.size, -np.inf, dtype=np.float64)
+    ub = np.full(x0.size, np.inf, dtype=np.float64)
+    lb[P:] = rv0 - delta_m
+    bounds = bounds_from_arrays(lb, ub)
 
     # 5) ロバスト正則化の公差・重み（y-space）
     sigma_alpha = np.deg2rad(args.sigma_alpha_deg)  # [rad]
     sigma_r = args.sigma_r_mm * 1e-3  # [m]
 
-    # 6) 最適化履歴の記録
-    J_hist, Jn_hist, B0_hist, gn2_hist = [], [], [], []
-
-    def cb(xk: Float1DArray) -> None:
-        """
-        L-BFGS-B の反復ごとに呼ばれるコールバック。
-        ロバスト目的・名目目的・中心場・勾配ノルムの履歴を記録。
-        """
-        Jk, gk, B0k, Jn, gn2 = fun_grad_gradnorm_fixed(
-            xk,
+    # 6) L-BFGS-B ????????
+    def fun_grad_solver(x: Float1DArray) -> tuple[float, Float1DArray, dict[str, Any]]:
+        Jgn, gx, B0, Jn, gn2 = fun_grad_gradnorm_fixed(
+            x,
             geom,
             pts,
             sigma_alpha,
             sigma_r,
             args.rho_gn,
             args.eps_hvp,
-            geom["r0"],
+            r0,
             lower_var,
             upper_var,
         )
-        J_hist.append(Jk)
-        Jn_hist.append(Jn)
-        B0_hist.append(B0k)
-        gn2_hist.append(gn2)
-        if len(J_hist) % 10 == 0:
-            msg = (
-                f"[iter {len(J_hist):4d}] "
-                f"Jgn={Jk:.6e}  J={Jn:.6e}  "
-                f"||Σ^1/2∇J||^2={gn2:.3e}  "
-                f"|B0|={B0k*1e3:.3f} mT"
+        extras: dict[str, Any] = {"J": float(Jn), "B0": float(B0), "gn2": float(gn2)}
+        return float(Jgn), gx, extras
+
+    def iter_cb(
+        k: int,
+        xk: Float1DArray,
+        fk: float,
+        gk: Float1DArray,
+        extras: dict[str, Any],
+    ) -> None:
+        if k % 10 == 0:
+            logger.info(
+                "iter=%d Jgn=%.6e J=%.6e gn2=%.3e |B0|=%.3f mT gnorm=%.3e",
+                k,
+                fk,
+                float(extras.get("J", np.nan)),
+                float(extras.get("gn2", np.nan)),
+                float(extras.get("B0", np.nan)) * 1e3,
+                float(np.linalg.norm(gk)),
             )
-            print(msg)
 
-    # 7) L-BFGS-B でロバスト最適化
-    def _fun(x: Float1DArray, *fargs: Any, **fkwargs: Any) -> float:
-        return fun_grad_gradnorm_fixed(
-            x,
-            geom,
-            pts,
-            sigma_alpha,
-            sigma_r,
-            args.rho_gn,
-            args.eps_hvp,
-            geom["r0"],
-            lower_var,
-            upper_var,
-        )[0]
-
-    def _jac(x: Float1DArray, *fargs: Any, **fkwargs: Any) -> Float1DArray:
-        return fun_grad_gradnorm_fixed(
-            x,
-            geom,
-            pts,
-            sigma_alpha,
-            sigma_r,
-            args.rho_gn,
-            args.eps_hvp,
-            geom["r0"],
-            lower_var,
-            upper_var,
-        )[1]
-
-    options: MinimizeOptions = dict(
+    opt = LBFGSBOptions(
         maxiter=args.maxiter,
-        ftol=args.ftol,
         gtol=args.gtol,
+        ftol=args.ftol,
         disp=True,
     )
-    method: Literal["L-BFGS-B"] = "L-BFGS-B"
-    res = minimize(
-        _fun,
-        x0,
-        jac=_jac,
-        method=method,
-        bounds=bounds,
-        options=options,
-        callback=cb,
-    )
+    res = solve_lbfgsb(fun_grad_solver, x0, bounds, opt, iter_callback=iter_cb)
 
+    J_hist = np.array(res.trace.f, dtype=float)
+    Jn_hist = np.array(
+        [float(d.get("J", np.nan)) for d in res.trace.extras],
+        dtype=float,
+    )
+    B0_hist = np.array(
+        [float(d.get("B0", np.nan)) for d in res.trace.extras],
+        dtype=float,
+    )
+    gn2_hist = np.array(
+        [float(d.get("gn2", np.nan)) for d in res.trace.extras],
+        dtype=float,
+    )
     # 8) 出力整形
     x_opt = res.x
-    al_opt, rv_opt = unpack_x(x_opt, geom["R"], geom["K"])
-    rb_opt = build_r_bases_from_vars(rv_opt, geom["K"], geom["r0"], lower_var, upper_var)
+    al_opt, rv_opt = unpack_x(x_opt, geom.R, geom.K)
+    rb_opt = build_r_bases_from_vars(rv_opt, geom.K, r0, lower_var, upper_var)
 
     Jgn_f, _, B0_f, Jn_f, gn2_f = fun_grad_gradnorm_fixed(
         x_opt,
@@ -262,11 +248,11 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         sigma_r,
         args.rho_gn,
         args.eps_hvp,
-        geom["r0"],
+        r0,
         lower_var,
         upper_var,
     )
-    print(
+    logger.info(
         f"[done] success={res.success}, iters={res.nit}, Jgn={Jgn_f:.6e}, "
         f"J={Jn_f:.6e}, ||Σ^1/2∇J||^2={gn2_f:.3e}, |B0|={B0_f*1e3:.3f} mT"
     )
@@ -280,10 +266,10 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         robust_npz,
         alphas_opt=al_opt,
         r_bases_opt=rb_opt,
-        theta=geom["theta"],
-        sin2=geom["sin2"],
-        z_layers=geom["z_layers"],
-        ring_offsets=geom["ring_offsets"],
+        theta=geom.theta,
+        sin2=geom.sin2,
+        z_layers=geom.z_layers,
+        ring_offsets=geom.ring_offsets,
         J_hist=np.array(J_hist),
         Jn_hist=np.array(Jn_hist),
         B0_hist=np.array(B0_hist),
@@ -291,14 +277,14 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
     )
 
     meta = dict(
-        N=int(geom["N"]),
-        K=int(geom["K"]),
-        R=int(geom["R"]),
-        r0=float(geom["r0"]),
-        ring_offsets=geom["ring_offsets"].tolist(),
-        z_layers=geom["z_layers"].tolist(),
-        Lz=float(geom["Lz"]),
-        dz=float(geom["dz"]),
+        N=int(geom.N),
+        K=int(geom.K),
+        R=int(geom.R),
+        r0=float(r0),
+        ring_offsets=geom.ring_offsets.tolist(),
+        z_layers=geom.z_layers.tolist(),
+        Lz=float(geom.Lz),
+        dz=float(geom.dz),
         phi0=float(phi0),
         m0=float(m0),
         roi_r=float(args.roi_r),
@@ -319,11 +305,11 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         ),
         scipy_result=dict(
             success=bool(res.success),
-            status=int(res.status),
+            status=0 if res.success else 1,
             message=str(res.message),
             nit=int(res.nit),
-            nfev=int(getattr(res, "nfev", -1)),
-            njev=-1,
+            nfev=int(res.nfev),
+            njev=-1 if res.njev is None else int(res.njev),
         ),
     )
     with open(robust_meta, "w", encoding="utf-8") as f:
@@ -336,10 +322,10 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         std_npz,
         alphas_opt=al_opt,
         r_bases_opt=rb_opt,
-        theta=geom["theta"],
-        sin2=geom["sin2"],
-        z_layers=geom["z_layers"],
-        ring_offsets=geom["ring_offsets"],
+        theta=geom.theta,
+        sin2=geom.sin2,
+        z_layers=geom.z_layers,
+        ring_offsets=geom.ring_offsets,
         J_hist=np.array(J_hist),
         Jn_hist=np.array(Jn_hist),
         B0_hist=np.array(B0_hist),
@@ -377,10 +363,10 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         {
             "alphas_opt": al_opt,
             "r_bases_opt": rb_opt.reshape(-1, 1),
-            "theta": geom["theta"].reshape(-1, 1),
-            "sin2th": geom["sin2"].reshape(-1, 1),
-            "z_layers": geom["z_layers"].reshape(-1, 1),
-            "ring_offsets": geom["ring_offsets"].reshape(-1, 1),
+            "theta": geom.theta.reshape(-1, 1),
+            "sin2th": geom.sin2.reshape(-1, 1),
+            "z_layers": geom.z_layers.reshape(-1, 1),
+            "ring_offsets": geom.ring_offsets.reshape(-1, 1),
             "J_hist": np.array(J_hist).reshape(-1, 1),
             "Jn_hist": np.array(Jn_hist).reshape(-1, 1),
             "B0_hist": np.array(B0_hist).reshape(-1, 1),
@@ -389,16 +375,16 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         do_compression=True,
     )
 
-    print("Saved robust results:")
-    print("  ", robust_npz)
-    print("  ", robust_meta)
-    print("  ", std_npz)
-    print("  ", std_meta)
-    print("  ", hist_png)
-    print("  ", mat_path)
+    logger.info("Saved robust results:")
+    logger.info("  %s", robust_npz)
+    logger.info("  %s", robust_meta)
+    logger.info("  %s", std_npz)
+    logger.info("  %s", std_meta)
+    logger.info("  %s", hist_png)
+    logger.info("  %s", mat_path)
 
     # 12) Monte Carlo（名目 vs ロバスト） … 同一サンプルの共通乱数で公平比較
-    print("Running Monte Carlo evaluation ...")
+    logger.info("Running Monte Carlo evaluation ...")
     pts_mc = pts  # 同一 ROI サンプルをそのまま流用
 
     def mc_eval(
@@ -415,17 +401,17 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         rng = np.random.default_rng(seed)
         out = np.zeros(S, dtype=np.float64)
         for s in range(S):
-            dA = rng.standard_normal(size=(geom["R"], geom["K"])) * sigma_alpha
-            dR = rng.standard_normal(size=(geom["K"],)) * sigma_r
+            dA = rng.standard_normal(size=(geom.R, geom.K)) * sigma_alpha
+            dR = rng.standard_normal(size=(geom.K,)) * sigma_r
             out[s] = objective_only(
                 alphas_base + dA,
                 r_bases_base + dR,
-                geom["theta"],
-                geom["sin2"],
-                geom["cth"],
-                geom["sth"],
-                geom["z_layers"],
-                geom["ring_offsets"],
+                geom.theta,
+                geom.sin2,
+                geom.cth,
+                geom.sth,
+                geom.z_layers,
+                geom.ring_offsets,
                 pts_mc,
                 FACTOR,
                 phi0,
@@ -506,9 +492,9 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
     plt.savefig(mc_png, dpi=180)
     plt.close()
 
-    print("MC files saved:")
-    print("  ", sum_json)
-    print("  ", mc_png)
+    logger.info("MC files saved:")
+    logger.info("  %s", sum_json)
+    logger.info("  %s", mc_png)
 
 
 # ---- Public API for tests (no runtime behavior change) ----
@@ -527,4 +513,5 @@ __all__ = [
 # ---------------- Main ----------------
 if __name__ == "__main__":
     args = parse_args()
+    configure_logging(args.log_level)
     run_robust_from_nominal(args)

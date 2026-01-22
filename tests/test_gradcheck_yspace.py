@@ -1,8 +1,7 @@
-from typing import Any
-
 import numpy as np
 from numpy.typing import NDArray
 
+from halbach.types import Geometry
 from robust_opt_halbach_gradnorm_minimal import (
     FACTOR,
     build_roi_points,
@@ -16,7 +15,7 @@ from robust_opt_halbach_gradnorm_minimal import (
 def fd_grad_yspace(
     alphas: NDArray[np.float64],
     r_bases: NDArray[np.float64],
-    geom: dict[str, Any],
+    geom: Geometry,
     pts: NDArray[np.float64],
     eps: float,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -42,30 +41,30 @@ def fd_grad_yspace(
             fp = objective_only(
                 ap,
                 r_bases,
-                geom["theta"],
-                geom["sin2"],
-                geom["cth"],
-                geom["sth"],
-                geom["z_layers"],
-                geom["ring_offsets"],
+                geom.theta,
+                geom.sin2,
+                geom.cth,
+                geom.sth,
+                geom.z_layers,
+                geom.ring_offsets,
                 pts,
-                geom["FACTOR"],
-                geom["phi0"],
-                geom["m0"],
+                FACTOR,
+                phi0,
+                m0,
             )
             fm = objective_only(
                 am,
                 r_bases,
-                geom["theta"],
-                geom["sin2"],
-                geom["cth"],
-                geom["sth"],
-                geom["z_layers"],
-                geom["ring_offsets"],
+                geom.theta,
+                geom.sin2,
+                geom.cth,
+                geom.sth,
+                geom.z_layers,
+                geom.ring_offsets,
                 pts,
-                geom["FACTOR"],
-                geom["phi0"],
-                geom["m0"],
+                FACTOR,
+                phi0,
+                m0,
             )
             gA[r, k] = (fp - fm) / (2.0 * eps)
 
@@ -78,30 +77,30 @@ def fd_grad_yspace(
         fp = objective_only(
             alphas,
             rp,
-            geom["theta"],
-            geom["sin2"],
-            geom["cth"],
-            geom["sth"],
-            geom["z_layers"],
-            geom["ring_offsets"],
+            geom.theta,
+            geom.sin2,
+            geom.cth,
+            geom.sth,
+            geom.z_layers,
+            geom.ring_offsets,
             pts,
-            geom["FACTOR"],
-            geom["phi0"],
-            geom["m0"],
+            FACTOR,
+            phi0,
+            m0,
         )
         fm = objective_only(
             alphas,
             rm,
-            geom["theta"],
-            geom["sin2"],
-            geom["cth"],
-            geom["sth"],
-            geom["z_layers"],
-            geom["ring_offsets"],
+            geom.theta,
+            geom.sin2,
+            geom.cth,
+            geom.sth,
+            geom.z_layers,
+            geom.ring_offsets,
             pts,
-            geom["FACTOR"],
-            geom["phi0"],
-            geom["m0"],
+            FACTOR,
+            phi0,
+            m0,
         )
         gR[k] = (fp - fm) / (2.0 * eps)
 
@@ -133,21 +132,21 @@ def test_gradcheck_yspace_matches_fd() -> None:
 
     pts = build_roi_points(roi_r=0.03, roi_step=0.03)
 
-    # Pack geom in the same schema objective_with_grads_fixed expects
-    # We also pass constants through this dict for FD helper.
-
-    geom = dict(
+    dzs = np.diff(z_layers)
+    dz = float(np.median(np.abs(dzs))) if dzs.size > 0 else 0.01
+    Lz = dz * K
+    geom = Geometry(
         theta=theta,
         sin2=sin2,
         cth=cth,
         sth=sth,
         z_layers=z_layers,
         ring_offsets=ring_offsets,
-        R=R,
+        N=N,
         K=K,
-        FACTOR=FACTOR,
-        phi0=phi0,
-        m0=m0,
+        R=R,
+        dz=dz,
+        Lz=Lz,
     )
 
     J, gA_ana, gR_ana, B0n = objective_with_grads_fixed(alphas, r_bases, geom, pts)

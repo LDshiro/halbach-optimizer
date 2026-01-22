@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeAlias, cast
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from halbach.geom import build_r_bases_from_vars, unpack_x
 from halbach.objective import objective_with_grads_fixed
+from halbach.types import Geometry
 
 if TYPE_CHECKING:
     import optype.numpy as onp
@@ -19,7 +20,7 @@ else:
 def hvp_y(
     alphas: NDArray[np.float64],
     r_bases: NDArray[np.float64],
-    geom: dict[str, Any],
+    geom: Geometry,
     pts: NDArray[np.float64],
     v_y: NDArray[np.float64],
     eps_hvp: float,
@@ -27,8 +28,8 @@ def hvp_y(
     """
     y-space Hessian-vector product via central differences.
     """
-    P_A = geom["R"] * geom["K"]
-    vA = v_y[:P_A].reshape(geom["R"], geom["K"])
+    P_A = geom.R * geom.K
+    vA = v_y[:P_A].reshape(geom.R, geom.K)
     vR = v_y[P_A:]
 
     vmax = float(np.max(np.abs(v_y)) + 1e-16)
@@ -49,7 +50,7 @@ def hvp_y(
 
 def fun_grad_gradnorm_fixed(
     x: Float1DArray,
-    geom: dict[str, Any],
+    geom: Geometry,
     pts: NDArray[np.float64],
     sigma_alpha: float,
     sigma_r: float,
@@ -62,13 +63,13 @@ def fun_grad_gradnorm_fixed(
     """
     Robust objective and x-space gradient using y-space GN formulation.
     """
-    alphas, r_vars = unpack_x(x, geom["R"], geom["K"])
-    r_bases = build_r_bases_from_vars(r_vars, geom["K"], r0, lower_var, upper_var)
+    alphas, r_vars = unpack_x(x, geom.R, geom.K)
+    r_bases = build_r_bases_from_vars(r_vars, geom.K, r0, lower_var, upper_var)
 
     J, gA_y, gRb_y, B0n = objective_with_grads_fixed(alphas, r_bases, geom, pts)
 
     g_y = np.concatenate([gA_y.ravel(), gRb_y])
-    P_A = geom["R"] * geom["K"]
+    P_A = geom.R * geom.K
     gn2 = (sigma_alpha**2) * np.dot(g_y[:P_A], g_y[:P_A]) + (sigma_r**2) * np.dot(
         g_y[P_A:], g_y[P_A:]
     )
