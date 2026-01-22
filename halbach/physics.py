@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 
-F = TypeVar("F", bound=Callable[..., Any])
-if TYPE_CHECKING:
-
-    def njit(*args: Any, **kwargs: Any) -> Callable[[F], F]: ...
-
-else:
-    from numba import njit  # type: ignore[import-untyped]
+from halbach.numba_compat import njit
 
 
 @njit(cache=True)
