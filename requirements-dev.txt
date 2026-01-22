@@ -1,0 +1,14 @@
+numpy
+scipy
+numba
+matplotlib
+
+pytest
+black
+isort
+ruff
+mypy
+types-setuptools
+
+pre-commit
+scipy-stubs

@@ -7,3 +7,11 @@ Windows + PowerShell + VS Code + Codex を前提にした開発ワークフロ�
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
+
+### Formatting / Lint / Typecheck
+```powershell
+black .
+isort .
+ruff check .
+mypy .
+pytest

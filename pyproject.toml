@@ -1,0 +1,56 @@
+[project]
+name = "halbach-optimizer"
+version = "0.0.0"
+description = "Halbach array optimization (dipole model) tools"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { file = "LICENSE" }
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["halbach"]
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+  "E", "F",      # pycodestyle errors / pyflakes
+  "I",           # isort
+  "B",           # flake8-bugbear
+  "UP",          # pyupgrade
+  "N",           # pep8-naming
+  "W",           # pycodestyle warnings
+]
+ignore = [
+  "N803", "N806",  # 数学系の大文字変数などを許容
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["N802", "N803", "N806"]
+
+# ベースライン script は関数名に B0 等が入るため、命名チェックだけ緩める
+"robust_opt_halbach_gradnorm_minimal.py" = ["N802"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+
+# Numbaは型の都合でmypy strictと相性が悪い部分が出やすいので、
+# まずは「Numba自体は無視しない」が、必要に応じて段階的に緩める。
+# 例：numbaの型推論に依存する関数は後で "type: ignore[misc]" を付けるなど。
