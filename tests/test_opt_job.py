@@ -21,7 +21,7 @@ def test_build_command_basic(tmp_path: Path) -> None:
         mc_samples=10,
     )
     assert cmd[0] == sys.executable
-    assert cmd[1:3] == ["-m", "halbach.cli.optimize_run"]
+    assert cmd[1:4] == ["-u", "-m", "halbach.cli.optimize_run"]
     assert "--in" in cmd
     assert "--out" in cmd
     assert "--run-mc" in cmd

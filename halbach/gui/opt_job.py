@@ -31,6 +31,7 @@ def build_command(
 ) -> list[str]:
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         "halbach.cli.optimize_run",
         "--in",

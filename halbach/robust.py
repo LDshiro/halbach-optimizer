@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, TypeAlias, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from halbach.constants import FACTOR
 from halbach.geom import build_r_bases_from_vars, unpack_x
 from halbach.objective import objective_with_grads_fixed
 from halbach.types import Geometry
@@ -24,6 +25,7 @@ def hvp_y(
     pts: NDArray[np.float64],
     v_y: NDArray[np.float64],
     eps_hvp: float,
+    factor: float = FACTOR,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """
     y-space Hessian-vector product via central differences.
@@ -40,8 +42,8 @@ def hvp_y(
     a_m = alphas - h * vA
     r_m = r_bases - h * vR
 
-    _, gA_p, gR_p, _ = objective_with_grads_fixed(a_p, r_p, geom, pts)
-    _, gA_m, gR_m, _ = objective_with_grads_fixed(a_m, r_m, geom, pts)
+    _, gA_p, gR_p, _ = objective_with_grads_fixed(a_p, r_p, geom, pts, factor=factor)
+    _, gA_m, gR_m, _ = objective_with_grads_fixed(a_m, r_m, geom, pts, factor=factor)
 
     hvA = (gA_p - gA_m) / (2.0 * h)
     hvR = (gR_p - gR_m) / (2.0 * h)
@@ -59,6 +61,7 @@ def fun_grad_gradnorm_fixed(
     r0: float,
     lower_var: NDArray[np.int_],
     upper_var: NDArray[np.int_],
+    factor: float = FACTOR,
 ) -> tuple[float, Float1DArray, float, float, float]:
     """
     Robust objective and x-space gradient using y-space GN formulation.
@@ -66,7 +69,7 @@ def fun_grad_gradnorm_fixed(
     alphas, r_vars = unpack_x(x, geom.R, geom.K)
     r_bases = build_r_bases_from_vars(r_vars, geom.K, r0, lower_var, upper_var)
 
-    J, gA_y, gRb_y, B0n = objective_with_grads_fixed(alphas, r_bases, geom, pts)
+    J, gA_y, gRb_y, B0n = objective_with_grads_fixed(alphas, r_bases, geom, pts, factor=factor)
 
     g_y = np.concatenate([gA_y.ravel(), gRb_y])
     P_A = geom.R * geom.K
@@ -75,15 +78,17 @@ def fun_grad_gradnorm_fixed(
     )
     v_y = np.concatenate([(sigma_alpha**2) * g_y[:P_A], (sigma_r**2) * g_y[P_A:]])
 
-    hvA, hvR = hvp_y(alphas, r_bases, geom, pts, v_y, eps_hvp)
+    hvA, hvR = hvp_y(alphas, r_bases, geom, pts, v_y, eps_hvp, factor=factor)
 
-    Jgn = J + 0.5 * rho_gn * gn2
+    scale = factor / FACTOR if FACTOR != 0.0 else 1.0
+    rho_gn_eff = rho_gn / (scale * scale)
+    Jgn = J + 0.5 * rho_gn_eff * gn2
 
-    gA_x = gA_y.ravel() + rho_gn * hvA
+    gA_x = gA_y.ravel() + rho_gn_eff * hvA
     gR_x = np.zeros_like(r_vars)
     for j, k_low in enumerate(lower_var):
         k_up = upper_var[j]
-        gR_x[j] = (gRb_y[k_low] + gRb_y[k_up]) + rho_gn * (hvR[k_low] + hvR[k_up])
+        gR_x[j] = (gRb_y[k_low] + gRb_y[k_up]) + rho_gn_eff * (hvR[k_low] + hvR[k_up])
 
     grad_x = cast(Float1DArray, np.concatenate([gA_x, gR_x]))
     return float(Jgn), grad_x, float(B0n), float(J), float(gn2)

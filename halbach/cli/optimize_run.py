@@ -16,8 +16,9 @@ from typing import Any, TypedDict, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from halbach.constants import FACTOR, m0, phi0
+from halbach.constants import FACTOR, FIELD_SCALE_DEFAULT, m0, phi0
 from halbach.geom import (
+    RoiMode,
     build_r_bases_from_vars,
     build_roi_points,
     build_symmetry_indices,
@@ -53,8 +54,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--maxiter", type=int, default=900, help="L-BFGS-B maxiter")
     ap.add_argument("--gtol", type=float, default=1e-12, help="L-BFGS-B gtol")
     ap.add_argument("--log-every", type=int, default=10, help="log every N iterations")
+    ap.add_argument(
+        "--log-precision",
+        type=int,
+        default=3,
+        help="numeric precision for iteration logs",
+    )
     ap.add_argument("--roi-r", type=float, default=0.14, help="ROI radius [m]")
     ap.add_argument("--roi-step", type=float, default=0.02, help="ROI grid step [m]")
+    ap.add_argument(
+        "--roi-mode",
+        type=str,
+        default="surface-fibonacci",
+        choices=[
+            "volume-grid",
+            "volume-subsample",
+            "surface-fibonacci",
+            "surface-random",
+        ],
+        help="ROI sampling mode",
+    )
+    ap.add_argument("--roi-samples", type=int, default=300, help="ROI sample count")
+    ap.add_argument("--roi-seed", type=int, default=20250924, help="ROI sampling seed")
+    ap.add_argument("--roi-half-x", action="store_true", help="Reflect ROI points to x>=0")
     ap.add_argument(
         "--roi-max-points",
         type=int,
@@ -62,6 +84,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="downsample ROI points to at most M (0 disables)",
     )
     ap.add_argument("--rho-gn", type=float, default=1e-4, help="GN weight in y-space")
+    ap.add_argument(
+        "--field-scale",
+        type=float,
+        default=FIELD_SCALE_DEFAULT,
+        help="field scaling factor for objective stability",
+    )
     ap.add_argument("--sigma-alpha-deg", type=float, default=0.5, help="1-sigma alpha [deg]")
     ap.add_argument("--sigma-r-mm", type=float, default=0.2, help="1-sigma r [mm]")
     ap.add_argument("--eps-hvp", type=float, default=1e-6, help="HVP step base")
@@ -166,6 +194,26 @@ def _summarize(arr: NDArray[np.float64], name: str) -> SummaryStats:
     )
 
 
+def _format_iter_log(
+    k: int,
+    J: float,
+    gnorm: float,
+    B0_mT: float,
+    dt_eval: float,
+    *,
+    precision: int,
+    iter_width: int,
+) -> str:
+    prec = max(0, precision)
+    return (
+        f"[iter {k:0{iter_width}d}] "
+        f"J={J:.{prec}e} "
+        f"gnorm={gnorm:.{prec}e} "
+        f"|B0|={B0_mT:.{prec}f} mT "
+        f"dt_eval={dt_eval:.{prec}f}s"
+    )
+
+
 @dataclass(frozen=True)
 class RoiSamplingResult:
     pts: NDArray[np.float64]
@@ -203,6 +251,7 @@ def _mc_eval(
     alphas_base: NDArray[np.float64],
     r_bases_base: NDArray[np.float64],
     pts: NDArray[np.float64],
+    factor: float,
     sigma_alpha: float,
     sigma_r: float,
     samples: int,
@@ -229,7 +278,7 @@ def _mc_eval(
             geom_z_layers,
             geom_ring_offsets,
             pts,
-            FACTOR,
+            factor,
             phi0,
             m0,
         )
@@ -250,12 +299,35 @@ def run_optimize(args: argparse.Namespace) -> int:
     r0 = float(np.median(run.results.r_bases))
     lower_var, upper_var, _ = build_symmetry_indices(geom.K)
 
-    logger.info("ROI build start (roi_r=%.4f, roi_step=%.4f)", args.roi_r, args.roi_step)
+    roi_mode = cast(RoiMode, args.roi_mode)
+    logger.info(
+        "ROI build start (mode=%s, roi_r=%.4f, roi_step=%.4f, samples=%d, seed=%d, half_x=%s)",
+        roi_mode,
+        args.roi_r,
+        args.roi_step,
+        args.roi_samples,
+        args.roi_seed,
+        args.roi_half_x,
+    )
+    if roi_mode.startswith("surface"):
+        logger.info("ROI mode %s ignores roi_step", roi_mode)
     t_roi = perf_counter()
-    pts = build_roi_points(args.roi_r, args.roi_step)
+    pts = build_roi_points(
+        args.roi_r,
+        args.roi_step,
+        mode=roi_mode,
+        n_samples=args.roi_samples,
+        seed=args.roi_seed,
+        half_x=args.roi_half_x,
+    )
     roi_elapsed = perf_counter() - t_roi
     npts = int(pts.shape[0])
-    logger.info("ROI build done in %.3fs (npts=%d)", roi_elapsed, npts)
+    logger.info(
+        "ROI build done in %.3fs (npts=%d, mode=%s)",
+        roi_elapsed,
+        npts,
+        roi_mode,
+    )
     if _roi_point_warning(npts, ROI_WARN_THRESHOLD):
         logger.warning(
             "ROI points=%d exceed threshold (%d). Consider increasing roi_step.",
@@ -284,47 +356,51 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     sigma_alpha = np.deg2rad(args.sigma_alpha_deg)
     sigma_r = args.sigma_r_mm * 1e-3
+    field_scale = float(args.field_scale)
+    if field_scale <= 0.0:
+        raise ValueError("field_scale must be positive")
+    factor = FACTOR * field_scale
 
     first_eval_done = False
+    state: dict[str, float] = {}
 
     def fun_grad_solver(x: Float1DArray) -> tuple[float, Float1DArray, dict[str, Any]]:
         nonlocal first_eval_done
         if not first_eval_done:
             logger.info("first eval start")
-            t_eval = perf_counter()
-            Jgn, gx, B0, Jn, gn2 = fun_grad_gradnorm_fixed(
-                x,
-                geom,
-                pts,
-                sigma_alpha,
-                sigma_r,
-                args.rho_gn,
-                args.eps_hvp,
-                r0,
-                lower_var,
-                upper_var,
-            )
-            logger.info("first eval done in %.3fs", perf_counter() - t_eval)
+        t_eval = perf_counter()
+        Jgn, gx, B0, Jn, gn2 = fun_grad_gradnorm_fixed(
+            x,
+            geom,
+            pts,
+            sigma_alpha,
+            sigma_r,
+            args.rho_gn,
+            args.eps_hvp,
+            r0,
+            lower_var,
+            upper_var,
+            factor,
+        )
+        dt_eval = perf_counter() - t_eval
+        if not first_eval_done:
+            logger.info("first eval done in %.3fs", dt_eval)
             first_eval_done = True
-        else:
-            Jgn, gx, B0, Jn, gn2 = fun_grad_gradnorm_fixed(
-                x,
-                geom,
-                pts,
-                sigma_alpha,
-                sigma_r,
-                args.rho_gn,
-                args.eps_hvp,
-                r0,
-                lower_var,
-                upper_var,
-            )
-        extras: dict[str, Any] = {"J": float(Jn), "B0": float(B0), "gn2": float(gn2)}
+        state["J"] = float(Jn)
+        state["gnorm"] = float(np.linalg.norm(gx))
+        B0_T = float(B0) / field_scale
+        state["B0"] = B0_T
+        state["t_last_eval"] = float(dt_eval)
+        extras: dict[str, Any] = {"J": float(Jn), "B0": B0_T, "gn2": float(gn2)}
         return float(Jgn), gx, extras
 
     log_every = max(1, int(args.log_every))
     if log_every != args.log_every:
         logger.warning("log-every adjusted to %d", log_every)
+    log_precision = max(0, int(args.log_precision))
+    if log_precision != args.log_precision:
+        logger.warning("log-precision adjusted to %d", log_precision)
+    iter_width = max(4, len(str(args.maxiter)))
 
     def iter_cb(
         k: int,
@@ -334,15 +410,22 @@ def run_optimize(args: argparse.Namespace) -> int:
         extras: dict[str, Any],
     ) -> None:
         if k % log_every == 0:
-            logger.info(
-                "iter=%d Jgn=%.6e J=%.6e gn2=%.3e |B0|=%.3f mT gnorm=%.3e",
+            J_val = float(state.get("J", fk))
+            gnorm_val = state.get("gnorm")
+            if gnorm_val is None:
+                gnorm_val = float(np.linalg.norm(gk))
+            B0_val = float(state.get("B0", np.nan))
+            dt_eval = float(state.get("t_last_eval", np.nan))
+            line = _format_iter_log(
                 k,
-                fk,
-                float(extras.get("J", np.nan)),
-                float(extras.get("gn2", np.nan)),
-                float(extras.get("B0", np.nan)) * 1e3,
-                float(np.linalg.norm(gk)),
+                J_val,
+                gnorm_val,
+                B0_val * 1e3,
+                dt_eval,
+                precision=log_precision,
+                iter_width=iter_width,
             )
+            logger.info(line)
 
     if args.dry_run:
         Jgn, g0, extras_eval = fun_grad_solver(x0)
@@ -360,12 +443,22 @@ def run_optimize(args: argparse.Namespace) -> int:
             start_time=start_time.isoformat(),
             end_time=datetime.now(UTC).isoformat(),
             git_hash=_git_hash(Path(__file__).resolve().parents[2]),
-            roi=dict(roi_r=float(args.roi_r), roi_step=float(args.roi_step)),
+            roi=dict(
+                roi_r=float(args.roi_r),
+                roi_step=float(args.roi_step),
+                roi_mode=roi_mode,
+                roi_samples=int(args.roi_samples),
+                roi_seed=int(args.roi_seed),
+                roi_half_x=bool(args.roi_half_x),
+            ),
             robust=dict(
                 rho_gn=float(args.rho_gn),
                 eps_hvp=float(args.eps_hvp),
                 sigma_alpha_deg=float(args.sigma_alpha_deg),
                 sigma_r_mm=float(args.sigma_r_mm),
+            ),
+            scaling=dict(
+                field_scale=float(field_scale),
             ),
             optimizer=dict(
                 method="L-BFGS-B",
@@ -386,6 +479,14 @@ def run_optimize(args: argparse.Namespace) -> int:
     logger.info("solver start (maxiter=%d, gtol=%.3e)", args.maxiter, args.gtol)
     opt = LBFGSBOptions(maxiter=args.maxiter, gtol=args.gtol, disp=True)
     res = solve_lbfgsb(fun_grad_solver, x0, bounds, opt, iter_callback=iter_cb)
+    logger.info(
+        "solver done: success=%s message=%s nit=%d nfev=%d njev=%s",
+        res.success,
+        res.message,
+        res.nit,
+        res.nfev,
+        res.njev,
+    )
 
     al_opt, rv_opt = unpack_x(res.x, geom.R, geom.K)
     rb_opt = build_r_bases_from_vars(rv_opt, geom.K, r0, lower_var, upper_var)
@@ -401,7 +502,9 @@ def run_optimize(args: argparse.Namespace) -> int:
         r0,
         lower_var,
         upper_var,
+        factor,
     )
+    B0_f_T = B0_f / field_scale
     logger.info(
         "[done] success=%s iters=%d Jgn=%.6e J=%.6e gn2=%.3e |B0|=%.3f mT",
         res.success,
@@ -409,7 +512,7 @@ def run_optimize(args: argparse.Namespace) -> int:
         Jgn_f,
         Jn_f,
         gn2_f,
-        B0_f * 1e3,
+        B0_f_T * 1e3,
     )
 
     extras = res.trace.extras
@@ -443,12 +546,22 @@ def run_optimize(args: argparse.Namespace) -> int:
         start_time=start_time.isoformat(),
         end_time=datetime.now(UTC).isoformat(),
         git_hash=_git_hash(Path(__file__).resolve().parents[2]),
-        roi=dict(roi_r=float(args.roi_r), roi_step=float(args.roi_step)),
+        roi=dict(
+            roi_r=float(args.roi_r),
+            roi_step=float(args.roi_step),
+            roi_mode=roi_mode,
+            roi_samples=int(args.roi_samples),
+            roi_seed=int(args.roi_seed),
+            roi_half_x=bool(args.roi_half_x),
+        ),
         robust=dict(
             rho_gn=float(args.rho_gn),
             eps_hvp=float(args.eps_hvp),
             sigma_alpha_deg=float(args.sigma_alpha_deg),
             sigma_r_mm=float(args.sigma_r_mm),
+        ),
+        scaling=dict(
+            field_scale=float(field_scale),
         ),
         optimizer=dict(
             method="L-BFGS-B",
@@ -479,6 +592,7 @@ def run_optimize(args: argparse.Namespace) -> int:
             run.results.alphas,
             run.results.r_bases,
             pts,
+            factor,
             sigma_alpha,
             sigma_r,
             args.mc_samples,
@@ -494,6 +608,7 @@ def run_optimize(args: argparse.Namespace) -> int:
             al_opt,
             rb_opt,
             pts,
+            factor,
             sigma_alpha,
             sigma_r,
             args.mc_samples,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -471,6 +472,16 @@ def main() -> None:
             stop_opt_job(job)
             st.warning("Terminate signal sent.")
 
+        auto_refresh = False
+        refresh_secs = 1.0
+        if job_running:
+            auto_refresh = st.checkbox("Auto-refresh log", value=True)
+            refresh_secs = float(
+                st.number_input(
+                    "Log refresh (s)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
+                )
+            )
+
         if job is not None:
             exit_code = poll_opt_job(job)
             st.write(f"Status: {'running' if exit_code is None else f'exit {exit_code}'}")
@@ -503,6 +514,10 @@ def main() -> None:
                 with set_cols[1]:
                     if st.button("Clear job"):
                         st.session_state["opt_job"] = None
+
+        if job_running and auto_refresh:
+            time.sleep(max(0.1, refresh_secs))
+            st.rerun()
 
 
 if __name__ == "__main__":

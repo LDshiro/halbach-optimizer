@@ -79,10 +79,16 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         maxiter=50,
         gtol=1e-12,
         log_every=10,
+        log_precision=3,
         roi_r=0.05,
         roi_step=0.05,
+        roi_mode="volume-grid",
+        roi_samples=10,
+        roi_seed=0,
+        roi_half_x=False,
         roi_max_points=0,
         rho_gn=0.0,
+        field_scale=1e6,
         sigma_alpha_deg=0.5,
         sigma_r_mm=0.2,
         eps_hvp=1e-6,
@@ -97,3 +103,20 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
     code = opt.run_optimize(args)
     assert code == 0
     assert calls["count"] == 1
+
+
+def test_format_iter_log() -> None:
+    line = opt._format_iter_log(
+        10,
+        1.2345,
+        2.3456,
+        3.4,
+        0.0123,
+        precision=3,
+        iter_width=4,
+    )
+    assert line.startswith("[iter 0010]")
+    assert "J=1.234e+00" in line
+    assert "gnorm=2.346e+00" in line
+    assert "|B0|=3.400 mT" in line
+    assert "dt_eval=0.012s" in line
