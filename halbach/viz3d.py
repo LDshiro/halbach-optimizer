@@ -11,7 +11,7 @@ from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
 PlotlyFigure: TypeAlias = Any
-PlotlyMode = Literal["fast", "pretty"]
+PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
 
 
 @dataclass(frozen=True)
@@ -131,6 +131,194 @@ def _estimate_arrow_scale(centers: FloatArray) -> float:
     return max(0.01, 0.1 * max_r)
 
 
+def build_magnetization_arrows(
+    centers: FloatArray,
+    phi: FloatArray,
+    length_m: float,
+    head_angle_deg: float,
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    if centers.size == 0:
+        empty = np.array([], dtype=np.float64)
+        return empty, empty, empty
+
+    length = float(max(length_m, 0.0))
+    if length == 0.0:
+        empty = np.array([], dtype=np.float64)
+        return empty, empty, empty
+
+    head_length = max(1e-6, 0.25 * length)
+    half_angle = 0.5 * np.deg2rad(head_angle_deg)
+
+    dir_x = np.cos(phi)
+    dir_y = np.sin(phi)
+    tip = centers + np.column_stack([dir_x, dir_y, np.zeros_like(dir_x)]) * length
+
+    back_angle = phi + np.pi
+    a1 = back_angle - half_angle
+    a2 = back_angle + half_angle
+    hx1 = np.cos(a1) * head_length
+    hy1 = np.sin(a1) * head_length
+    hx2 = np.cos(a2) * head_length
+    hy2 = np.sin(a2) * head_length
+
+    head1 = tip + np.column_stack([hx1, hy1, np.zeros_like(hx1)])
+    head2 = tip + np.column_stack([hx2, hy2, np.zeros_like(hx2)])
+
+    n = centers.shape[0]
+    xs = np.empty(n * 9, dtype=np.float64)
+    ys = np.empty_like(xs)
+    zs = np.empty_like(xs)
+    cursor = 0
+    for idx in range(n):
+        xs[cursor] = centers[idx, 0]
+        xs[cursor + 1] = tip[idx, 0]
+        xs[cursor + 2] = np.nan
+        ys[cursor] = centers[idx, 1]
+        ys[cursor + 1] = tip[idx, 1]
+        ys[cursor + 2] = np.nan
+        zs[cursor] = centers[idx, 2]
+        zs[cursor + 1] = tip[idx, 2]
+        zs[cursor + 2] = np.nan
+        cursor += 3
+
+        xs[cursor] = tip[idx, 0]
+        xs[cursor + 1] = head1[idx, 0]
+        xs[cursor + 2] = np.nan
+        ys[cursor] = tip[idx, 1]
+        ys[cursor + 1] = head1[idx, 1]
+        ys[cursor + 2] = np.nan
+        zs[cursor] = tip[idx, 2]
+        zs[cursor + 1] = head1[idx, 2]
+        zs[cursor + 2] = np.nan
+        cursor += 3
+
+        xs[cursor] = tip[idx, 0]
+        xs[cursor + 1] = head2[idx, 0]
+        xs[cursor + 2] = np.nan
+        ys[cursor] = tip[idx, 1]
+        ys[cursor + 1] = head2[idx, 1]
+        ys[cursor + 2] = np.nan
+        zs[cursor] = tip[idx, 2]
+        zs[cursor + 1] = head2[idx, 2]
+        zs[cursor + 2] = np.nan
+        cursor += 3
+
+    return xs, ys, zs
+
+
+def build_cubes_mesh(
+    centers: FloatArray, phi: FloatArray, size_m: float, thickness_m: float
+) -> tuple[
+    FloatArray,
+    FloatArray,
+    FloatArray,
+    NDArray[np.int_],
+    NDArray[np.int_],
+    NDArray[np.int_],
+    FloatArray,
+    FloatArray,
+    FloatArray,
+]:
+    if centers.size == 0:
+        empty_f = np.array([], dtype=np.float64)
+        empty_i = np.array([], dtype=np.int_)
+        return empty_f, empty_f, empty_f, empty_i, empty_i, empty_i, empty_f, empty_f, empty_f
+
+    hx = 0.5 * size_m
+    hy = 0.5 * size_m
+    hz = 0.5 * thickness_m
+    local = np.array(
+        [
+            [-hx, -hy, -hz],
+            [hx, -hy, -hz],
+            [hx, hy, -hz],
+            [-hx, hy, -hz],
+            [-hx, -hy, hz],
+            [hx, -hy, hz],
+            [hx, hy, hz],
+            [-hx, hy, hz],
+        ],
+        dtype=np.float64,
+    )
+    lx = local[:, 0]
+    ly = local[:, 1]
+    lz = local[:, 2]
+
+    c = np.cos(phi)
+    s = np.sin(phi)
+    x = c[:, None] * lx[None, :] - s[:, None] * ly[None, :]
+    y = s[:, None] * lx[None, :] + c[:, None] * ly[None, :]
+    z = np.broadcast_to(lz, x.shape).astype(np.float64, copy=True)
+
+    x += centers[:, 0, None]
+    y += centers[:, 1, None]
+    z += centers[:, 2, None]
+
+    vx = x.reshape(-1)
+    vy = y.reshape(-1)
+    vz = z.reshape(-1)
+
+    faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ],
+        dtype=np.int_,
+    )
+    offsets = (np.arange(centers.shape[0], dtype=np.int_) * 8)[:, None, None]
+    faces_full = faces[None, :, :] + offsets
+    i = faces_full[:, :, 0].reshape(-1)
+    j = faces_full[:, :, 1].reshape(-1)
+    k = faces_full[:, :, 2].reshape(-1)
+
+    edges = np.array(
+        [
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 0],
+            [4, 5],
+            [5, 6],
+            [6, 7],
+            [7, 4],
+            [0, 4],
+            [1, 5],
+            [2, 6],
+            [3, 7],
+        ],
+        dtype=np.int_,
+    )
+    n_edges = edges.shape[0]
+    ex = np.empty(centers.shape[0] * n_edges * 3, dtype=np.float64)
+    ey = np.empty_like(ex)
+    ez = np.empty_like(ex)
+    cursor = 0
+    for m in range(centers.shape[0]):
+        for a, b in edges:
+            ex[cursor] = x[m, a]
+            ex[cursor + 1] = x[m, b]
+            ex[cursor + 2] = np.nan
+            ey[cursor] = y[m, a]
+            ey[cursor + 1] = y[m, b]
+            ey[cursor + 2] = np.nan
+            ez[cursor] = z[m, a]
+            ez[cursor + 1] = z[m, b]
+            ez[cursor + 2] = np.nan
+            cursor += 3
+
+    return vx, vy, vz, i, j, k, ex, ey, ez
+
+
 def build_magnet_figure(
     run: RunBundle,
     *,
@@ -139,10 +327,13 @@ def build_magnet_figure(
     mode: PlotlyMode = "fast",
     magnet_size_m: float | None = None,
     magnet_thickness_m: float | None = None,
+    arrow_length_m: float | None = None,
+    arrow_head_angle_deg: float = 30.0,
+    height: int | None = None,
     compare: RunBundle | None = None,
 ) -> PlotlyFigure:
     """
-    Build a Plotly figure with magnet centers and optional magnetization vectors.
+    Build a Plotly figure with magnet centers, optional magnetization vectors, or cubes.
     """
     go = _require_plotly()
     fig = go.Figure()
@@ -153,6 +344,67 @@ def build_magnet_figure(
         )
         if centers.size == 0:
             return
+        if mode in ("cubes", "cubes_arrows"):
+            size_m = 0.02 if magnet_size_m is None else magnet_size_m
+            thickness_m = size_m
+            vx, vy, vz, i, j, k, ex, ey, ez = build_cubes_mesh(centers, phi, size_m, thickness_m)
+            fig.add_trace(
+                go.Mesh3d(
+                    x=vx,
+                    y=vy,
+                    z=vz,
+                    i=i,
+                    j=j,
+                    k=k,
+                    name=name,
+                    color="rgb(160,160,160)",
+                    opacity=1.0,
+                    flatshading=True,
+                    lighting={
+                        "ambient": 0.3,
+                        "diffuse": 0.7,
+                        "specular": 0.2,
+                        "roughness": 0.9,
+                        "fresnel": 0.2,
+                    },
+                    lightposition={"x": 0.0, "y": 0.0, "z": 2.0},
+                    showscale=False,
+                )
+            )
+            fig.add_trace(
+                go.Scatter3d(
+                    x=ex,
+                    y=ey,
+                    z=ez,
+                    mode="lines",
+                    name=f"{name} edges",
+                    line={"color": "black", "width": 3},
+                    showlegend=False,
+                )
+            )
+            if mode == "cubes_arrows":
+                length = arrow_length_m
+                if length is None:
+                    length = max(0.01, 1.5 * size_m)
+                ax, ay, az = build_magnetization_arrows(
+                    centers,
+                    phi,
+                    length_m=length,
+                    head_angle_deg=arrow_head_angle_deg,
+                )
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=ax,
+                        y=ay,
+                        z=az,
+                        mode="lines",
+                        name=f"{name} arrows",
+                        line={"color": "red", "width": 4},
+                        showlegend=False,
+                    )
+                )
+            return
+
         if compare is None:
             marker_color = layer_id.astype(float)
             marker_kwargs = {
@@ -203,17 +455,28 @@ def build_magnet_figure(
     if compare is not None:
         add_run(compare, compare.name, "#ff7f0e")
 
-    fig.update_layout(
-        scene={
+    layout: dict[str, Any] = {
+        "scene": {
             "aspectmode": "data",
             "xaxis": {"title": "x"},
             "yaxis": {"title": "y"},
             "zaxis": {"title": "z"},
         },
-        margin={"l": 0, "r": 0, "b": 0, "t": 30},
-        legend={"orientation": "h"},
+        "margin": {"l": 0, "r": 0, "b": 0, "t": 30},
+        "legend": {"orientation": "h"},
+    }
+    if height is not None:
+        layout["height"] = height
+    fig.update_layout(
+        **layout,
     )
     return fig
 
 
-__all__ = ["MagnetGeometry", "enumerate_magnets", "build_magnet_figure"]
+__all__ = [
+    "MagnetGeometry",
+    "enumerate_magnets",
+    "build_cubes_mesh",
+    "build_magnetization_arrows",
+    "build_magnet_figure",
+]

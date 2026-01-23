@@ -62,3 +62,23 @@ def test_build_magnet_figure_runs(tmp_path: Path) -> None:
 
     fig = build_magnet_figure(run, stride=2, mode="fast")
     assert fig is not None
+
+    fig_cubes = build_magnet_figure(
+        run,
+        stride=2,
+        mode="cubes",
+        magnet_size_m=0.02,
+        magnet_thickness_m=0.01,
+    )
+    assert fig_cubes is not None
+
+    fig_cubes_arrows = build_magnet_figure(
+        run,
+        stride=2,
+        mode="cubes_arrows",
+        magnet_size_m=0.02,
+        magnet_thickness_m=0.01,
+        arrow_length_m=0.03,
+        arrow_head_angle_deg=30.0,
+    )
+    assert fig_cubes_arrows is not None

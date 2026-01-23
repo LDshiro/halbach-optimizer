@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from halbach.run_types import RunBundle
     from halbach.viz2d import ErrorMap2D
 
-PlotlyMode = Literal["fast", "pretty"]
+PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -77,6 +77,21 @@ def _results_mtime(path: Path) -> float:
     return float(results_path.stat().st_mtime)
 
 
+def _apply_pending_selection_updates() -> None:
+    pending_init_select = st.session_state.pop("pending_init_select", None)
+    if pending_init_select is not None:
+        st.session_state["init_select"] = pending_init_select
+    pending_init_path = st.session_state.pop("pending_init_path", None)
+    if pending_init_path is not None:
+        st.session_state["init_path"] = pending_init_path
+    pending_opt_select = st.session_state.pop("pending_opt_select", None)
+    if pending_opt_select is not None:
+        st.session_state["opt_select"] = pending_opt_select
+    pending_opt_path = st.session_state.pop("pending_opt_path", None)
+    if pending_opt_path is not None:
+        st.session_state["opt_path"] = pending_opt_path
+
+
 @st.cache_data(show_spinner=False)
 def _cached_load_run(path_text: str, mtime: float) -> RunBundle:
     from halbach.run_io import load_run
@@ -133,6 +148,16 @@ def _ppm_stats(m: ErrorMap2D) -> tuple[float, float]:
     return float(np.nanmean(m.ppm)), float(np.nanmax(np.abs(m.ppm)))
 
 
+def _sample_colorscale(name: str, levels: int) -> list[tuple[float, str]]:
+    import plotly.colors as pc
+
+    steps = max(2, int(levels))
+    scale = pc.get_colorscale(name)
+    values = [i / (steps - 1) for i in range(steps)]
+    colors = pc.sample_colorscale(scale, values)
+    return list(zip(values, colors, strict=True))
+
+
 def _plot_error_map(
     m: ErrorMap2D, vmin: float, vmax: float, contour_level: float, title: str
 ) -> go.Figure:
@@ -149,17 +174,19 @@ def _plot_error_map(
             zmin=vmin,
             zmax=vmax,
             zmid=0.0,
-            colorscale="RdBu",
+            colorscale=_sample_colorscale("RdBu", 50),
             colorbar={"title": "ppm"},
         )
     )
     level_neg, level_pos = contour_levels_ppm(contour_level)
+    contour_steps = 50
+    contour_size = (level_pos - level_neg) / contour_steps
     fig.add_trace(
         go.Contour(
             x=xs_mm,
             y=ys_mm,
             z=m.ppm,
-            contours={"start": level_neg, "end": level_pos, "size": level_pos - level_neg},
+            contours={"start": level_neg, "end": level_pos, "size": contour_size},
             line={"color": "black", "width": 1},
             showscale=False,
             hoverinfo="skip",
@@ -201,6 +228,14 @@ def main() -> None:
 
     if "opt_job" not in st.session_state:
         st.session_state["opt_job"] = None
+    if "gen_run_code" not in st.session_state:
+        st.session_state["gen_run_code"] = None
+        st.session_state["gen_run_output"] = ""
+        st.session_state["gen_run_dir"] = ""
+    if "flash_message" not in st.session_state:
+        st.session_state["flash_message"] = ""
+
+    _apply_pending_selection_updates()
 
     with st.sidebar:
         st.header("Run Selection")
@@ -229,26 +264,46 @@ def main() -> None:
         else:
             ppm_limit = float(
                 st.number_input(
-                    "PPM limit", min_value=500.0, max_value=20000.0, value=5000.0, step=500.0
+                    "PPM limit", min_value=5.0, max_value=20000.0, value=5000.0, step=500.0
                 )
             )
         contour_level = float(
             st.number_input(
-                "Contour level (ppm)", min_value=100.0, max_value=20000.0, value=1000.0, step=100.0
+                "Contour level (ppm)", min_value=1.0, max_value=20000.0, value=1000.0, step=100.0
             )
         )
 
         st.header("3D Settings")
         view_target = st.radio("3D run", ["initial", "optimized"], index=1)
-        mode = cast(PlotlyMode, st.selectbox("Mode", ["fast", "pretty"], index=0))
+        mode = cast(
+            PlotlyMode, st.selectbox("Mode", ["fast", "pretty", "cubes", "cubes_arrows"], index=0)
+        )
         stride = int(st.number_input("Stride", min_value=1, max_value=64, value=2, step=1))
         hide_x_negative = st.checkbox("Hide x < 0", value=False)
         magnet_size_mm = float(
-            st.number_input("Magnet size (mm)", min_value=1.0, max_value=50.0, value=10.0, step=1.0)
+            st.number_input("Magnet size (mm)", min_value=1.0, max_value=50.0, value=20.0, step=1.0)
         )
         magnet_thickness_mm = float(
             st.number_input(
-                "Magnet thickness (mm)", min_value=0.5, max_value=20.0, value=2.0, step=0.5
+                "Magnet thickness (mm)", min_value=0.5, max_value=20.0, value=10.0, step=0.5
+            )
+        )
+        arrow_length_mm = float(
+            st.number_input(
+                "Arrow length (mm)",
+                min_value=1.0,
+                max_value=200.0,
+                value=30.0,
+                step=1.0,
+            )
+        )
+        arrow_head_angle_deg = float(
+            st.number_input(
+                "Arrow head angle (deg)",
+                min_value=5.0,
+                max_value=90.0,
+                value=30.0,
+                step=1.0,
             )
         )
 
@@ -371,6 +426,9 @@ def main() -> None:
                 mode=mode,
                 magnet_size_m=magnet_size_mm / 1000.0,
                 magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                arrow_length_m=arrow_length_mm / 1000.0,
+                arrow_head_angle_deg=arrow_head_angle_deg,
+                height=700,
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -378,11 +436,19 @@ def main() -> None:
         st.subheader("Optimize (L-BFGS-B)")
         from halbach.gui.opt_job import (
             build_command,
+            build_generate_command,
+            build_generate_out_dir,
             poll_opt_job,
+            run_generate_command,
             start_opt_job,
             stop_opt_job,
             tail_log,
         )
+
+        flash_message = st.session_state.get("flash_message", "")
+        if flash_message:
+            st.success(flash_message)
+            st.session_state["flash_message"] = ""
 
         job = st.session_state.get("opt_job")
         exit_code = poll_opt_job(job) if job is not None else None
@@ -412,6 +478,14 @@ def main() -> None:
             st.number_input("ROI step (m)", min_value=0.001, max_value=0.02, value=0.02, step=0.001)
         )
         rho_gn = float(st.number_input("rho_gn", min_value=0.0, max_value=1.0, value=1e-4))
+        fix_center_radius_layers = int(
+            st.selectbox(
+                "Fixed center radius layers (z≈0)",
+                [0, 2, 4],
+                index=1,
+                key="fix_center_radius_layers",
+            )
+        )
 
         with st.expander("Advanced (sigma / MC)", expanded=False):
             sigma_alpha_deg = float(
@@ -435,6 +509,124 @@ def main() -> None:
         preview_dir = _default_out_dir(tag)
         st.caption(f"Output dir: {preview_dir}")
 
+        with st.expander("Generate initial run", expanded=False):
+            gen_cols = st.columns(3)
+            with gen_cols[0]:
+                gen_N = int(
+                    st.number_input("N", min_value=1, max_value=512, value=48, step=1, key="gen_N")
+                )
+                gen_Lz = float(
+                    st.number_input(
+                        "Lz (m)", min_value=0.1, max_value=2.0, value=0.64, step=0.01, key="gen_Lz"
+                    )
+                )
+            with gen_cols[1]:
+                gen_R = int(
+                    st.number_input("R", min_value=1, max_value=32, value=3, step=1, key="gen_R")
+                )
+                gen_diameter_mm = float(
+                    st.number_input(
+                        "Diameter (mm)",
+                        min_value=10.0,
+                        max_value=2000.0,
+                        value=400.0,
+                        step=10.0,
+                        key="gen_diameter_mm",
+                    )
+                )
+            with gen_cols[2]:
+                gen_K = int(
+                    st.number_input("K", min_value=1, max_value=256, value=24, step=1, key="gen_K")
+                )
+                gen_ring_offset_step_mm = float(
+                    st.number_input(
+                        "Ring offset step (mm)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=12.0,
+                        step=1.0,
+                        key="gen_ring_offset_step_mm",
+                    )
+                )
+
+            gen_tag = st.text_input("Generate output tag", value="init", key="gen_tag")
+            gen_use_as_input = st.checkbox(
+                "Use generated run as input", value=True, key="gen_use_as_input"
+            )
+            gen_start_opt = st.checkbox(
+                "Generate and start optimization", value=False, key="gen_start_opt"
+            )
+
+            gen_out_dir = build_generate_out_dir(
+                ROOT / "runs", tag=gen_tag, N=gen_N, R=gen_R, K=gen_K
+            )
+            st.caption(f"Output dir: {gen_out_dir}")
+
+            gen_clicked = st.button("Generate", key="gen_button")
+            if gen_clicked:
+                cmd = build_generate_command(
+                    gen_out_dir,
+                    N=gen_N,
+                    R=gen_R,
+                    K=gen_K,
+                    Lz=gen_Lz,
+                    diameter_mm=gen_diameter_mm,
+                    ring_offset_step_mm=gen_ring_offset_step_mm,
+                )
+                code, output = run_generate_command(cmd, cwd=ROOT)
+                st.session_state["gen_run_code"] = code
+                st.session_state["gen_run_output"] = output
+                st.session_state["gen_run_dir"] = str(gen_out_dir)
+                if code != 0:
+                    st.error(f"Generate failed (exit {code}).")
+                else:
+                    if gen_use_as_input:
+                        try:
+                            rel_path = str(gen_out_dir.relative_to(ROOT))
+                        except ValueError:
+                            rel_path = str(gen_out_dir)
+                        st.session_state["pending_init_select"] = rel_path
+                        st.session_state["pending_init_path"] = ""
+                    if gen_start_opt:
+                        if job_running:
+                            st.error("Optimization is already running.")
+                        else:
+                            opt_out_dir = _default_out_dir(f"{gen_tag}_opt")
+                            try:
+                                job = start_opt_job(
+                                    gen_out_dir,
+                                    opt_out_dir,
+                                    maxiter=maxiter,
+                                    gtol=gtol,
+                                    roi_r=roi_r_opt,
+                                    roi_step=roi_step_opt,
+                                    rho_gn=rho_gn,
+                                    fix_center_radius_layers=fix_center_radius_layers,
+                                    sigma_alpha_deg=sigma_alpha_deg,
+                                    sigma_r_mm=sigma_r_mm,
+                                    run_mc=run_mc,
+                                    mc_samples=mc_samples,
+                                    repo_root=ROOT,
+                                )
+                                st.session_state["opt_job"] = job
+                                st.session_state["opt_job_fix_center_radius_layers"] = (
+                                    fix_center_radius_layers
+                                )
+                                st.success(f"Started optimization: {job.out_dir}")
+                            except Exception as exc:
+                                st.error(f"Failed to start optimization: {exc}")
+                    st.rerun()
+
+            gen_code = st.session_state.get("gen_run_code")
+            if gen_code is not None:
+                if gen_code == 0:
+                    st.success(f"Generated run: {st.session_state.get('gen_run_dir')}")
+                else:
+                    st.error(f"Generate failed (exit {gen_code}).")
+            gen_output = st.session_state.get("gen_run_output", "")
+            if gen_output:
+                st.text_area("generate_run output", gen_output, height=160)
+
         start_cols = st.columns(2)
         with start_cols[0]:
             start_clicked = st.button("Start")
@@ -457,6 +649,7 @@ def main() -> None:
                         roi_r=roi_r_opt,
                         roi_step=roi_step_opt,
                         rho_gn=rho_gn,
+                        fix_center_radius_layers=fix_center_radius_layers,
                         sigma_alpha_deg=sigma_alpha_deg,
                         sigma_r_mm=sigma_r_mm,
                         run_mc=run_mc,
@@ -464,6 +657,7 @@ def main() -> None:
                         repo_root=ROOT,
                     )
                     st.session_state["opt_job"] = job
+                    st.session_state["opt_job_fix_center_radius_layers"] = fix_center_radius_layers
                     st.success(f"Started optimization: {job.out_dir}")
                 except Exception as exc:
                     st.error(f"Failed to start optimization: {exc}")
@@ -494,12 +688,17 @@ def main() -> None:
                 roi_r=roi_r_opt,
                 roi_step=roi_step_opt,
                 rho_gn=rho_gn,
+                fix_center_radius_layers=fix_center_radius_layers,
                 sigma_alpha_deg=sigma_alpha_deg,
                 sigma_r_mm=sigma_r_mm,
                 run_mc=run_mc,
                 mc_samples=mc_samples,
             )
             st.code(" ".join(cmd))
+
+            fixed_layers = st.session_state.get("opt_job_fix_center_radius_layers")
+            if fixed_layers is not None:
+                st.write(f"Fixed center radius layers: {fixed_layers}")
 
             log_text = tail_log(job.log_path, n_lines=200)
             st.text_area("opt.log (tail)", log_text, height=240)
@@ -508,9 +707,10 @@ def main() -> None:
                 set_cols = st.columns(2)
                 with set_cols[0]:
                     if st.button("Set optimized run"):
-                        st.session_state["opt_path"] = str(job.out_dir)
-                        st.session_state["opt_select"] = ""
-                        st.success("Optimized run path updated.")
+                        st.session_state["pending_opt_path"] = str(job.out_dir)
+                        st.session_state["pending_opt_select"] = ""
+                        st.session_state["flash_message"] = "Optimized run path updated."
+                        st.rerun()
                 with set_cols[1]:
                     if st.button("Clear job"):
                         st.session_state["opt_job"] = None

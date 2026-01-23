@@ -1,7 +1,9 @@
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import pytest
 
 import halbach.cli.optimize_run as opt
@@ -61,7 +63,7 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
 
     def fake_fun_grad(
         *args: object, **kwargs: object
-    ) -> tuple[float, np.ndarray, float, float, float]:
+    ) -> tuple[float, npt.NDArray[np.floating[Any]], float, float, float]:
         x = args[0]
         calls["count"] += 1
         return 0.0, np.zeros_like(x), 1.0, 0.0, 0.0
@@ -93,6 +95,7 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         sigma_r_mm=0.2,
         eps_hvp=1e-6,
         min_radius_drop_mm=20.0,
+        fix_center_radius_layers=2,
         mc_samples=10,
         run_mc=False,
         log_level="INFO",

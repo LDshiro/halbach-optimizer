@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -9,9 +10,13 @@ from numpy.typing import NDArray
 from halbach.types import FloatArray
 
 __all__ = [
+    "ParamMap",
+    "build_param_map",
     "build_symmetry_indices",
+    "center_layer_indices",
     "build_roi_points",
     "build_r_bases_from_vars",
+    "pack_grad",
     "pack_x",
     "unpack_x",
     "sample_sphere_surface_fibonacci",
@@ -19,14 +24,74 @@ __all__ = [
 ]
 
 
+def center_layer_indices(K: int, n_fix: int) -> NDArray[np.int_]:
+    """Return the center layer indices to fix."""
+    if n_fix < 0 or n_fix > K:
+        raise ValueError(f"n_fix must be between 0 and K, got {n_fix}")
+    if n_fix % 2 != 0:
+        raise ValueError(f"n_fix must be even, got {n_fix}")
+    if n_fix == 0:
+        return np.array([], dtype=np.int_)
+    if K % 2 != 0:
+        raise ValueError("K must be even when fixing center layers")
+    half = K // 2
+    start = half - n_fix // 2
+    end = half + n_fix // 2
+    return np.arange(start, end, dtype=np.int_)
+
+
 def build_symmetry_indices(
     K: int,
+    *,
+    n_fix: int = 4,
 ) -> tuple[NDArray[np.int_], NDArray[np.int_], NDArray[np.int_]]:
-    """Build z-symmetry indices (central 4 layers fixed)."""
-    fixed_center = np.arange(K // 2 - 2, K // 2 + 2)
-    lower_var = np.arange(0, K // 2 - 2)
+    """Build z-symmetry indices with fixed center layers."""
+    fixed_center = center_layer_indices(K, n_fix)
+    half = K // 2
+    lower_end = half - n_fix // 2
+    if lower_end < 0:
+        raise ValueError(f"Invalid n_fix={n_fix} for K={K}")
+    lower_var = np.arange(0, lower_end)
     upper_var = (K - 1) - lower_var
     return lower_var, upper_var, fixed_center
+
+
+@dataclass(frozen=True)
+class ParamMap:
+    free_alpha_idx: NDArray[np.int_]
+    free_r_idx: NDArray[np.int_]
+    free_alpha_mask: NDArray[np.bool_]
+    free_r_mask: NDArray[np.bool_]
+    lower_var: NDArray[np.int_]
+    upper_var: NDArray[np.int_]
+    lower_to_upper: NDArray[np.int_]
+    fixed_k_radius: NDArray[np.int_]
+
+
+def build_param_map(R: int, K: int, *, n_fix_radius: int) -> ParamMap:
+    lower_var, upper_var, fixed_k = build_symmetry_indices(K, n_fix=n_fix_radius)
+    free_alpha_mask = np.ones(R * K, dtype=bool)
+    free_alpha_idx = np.arange(R * K, dtype=np.int_)
+
+    free_r_mask = np.ones(K, dtype=bool)
+    if fixed_k.size:
+        free_r_mask[fixed_k] = False
+    free_r_idx = lower_var[free_r_mask[lower_var]]
+
+    lower_to_upper = np.full(K, -1, dtype=np.int_)
+    if lower_var.size:
+        lower_to_upper[lower_var] = upper_var
+
+    return ParamMap(
+        free_alpha_idx=free_alpha_idx,
+        free_r_idx=free_r_idx,
+        free_alpha_mask=free_alpha_mask,
+        free_r_mask=free_r_mask,
+        lower_var=lower_var,
+        upper_var=upper_var,
+        lower_to_upper=lower_to_upper,
+        fixed_k_radius=fixed_k,
+    )
 
 
 def sample_sphere_surface_fibonacci(
@@ -128,18 +193,52 @@ def build_r_bases_from_vars(
     return r
 
 
-def pack_x(alphas: NDArray[np.float64], r_vars: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Concatenate x = [alphas(:); r_vars]."""
-    return np.concatenate([alphas.ravel(), r_vars])
+def pack_x(
+    alphas: NDArray[np.float64],
+    r_bases: NDArray[np.float64],
+    param_map: ParamMap,
+) -> NDArray[np.float64]:
+    """Concatenate x from all alphas and symmetric r_bases variables."""
+    alpha_free = alphas.ravel()[param_map.free_alpha_idx]
+    r_free = r_bases[param_map.free_r_idx]
+    return np.concatenate([alpha_free, r_free])
 
 
 def unpack_x(
     x: NDArray[np.float64],
-    R: int,
-    K: int,
+    alphas0: NDArray[np.float64],
+    r_bases0: NDArray[np.float64],
+    param_map: ParamMap,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Split x into alphas (R, K) and r_vars."""
-    P = R * K
-    al = x[:P].reshape(R, K)
-    rv = x[P:]
-    return al, rv
+    """Reconstruct full arrays while keeping fixed layers at baseline values."""
+    alphas = np.array(alphas0, dtype=np.float64, copy=True)
+    r_bases = np.array(r_bases0, dtype=np.float64, copy=True)
+    n_alpha = int(param_map.free_alpha_idx.size)
+    al_flat = alphas.ravel()
+    al_flat[param_map.free_alpha_idx] = x[:n_alpha]
+    r_vars = x[n_alpha:]
+    if r_vars.size != param_map.free_r_idx.size:
+        raise ValueError("x size does not match parameter map")
+    for idx, k_low in enumerate(param_map.free_r_idx):
+        r_bases[k_low] = r_vars[idx]
+        k_up = param_map.lower_to_upper[k_low]
+        if k_up >= 0:
+            r_bases[k_up] = r_vars[idx]
+    return alphas, r_bases
+
+
+def pack_grad(
+    grad_alphas: NDArray[np.float64],
+    grad_r_bases: NDArray[np.float64],
+    param_map: ParamMap,
+) -> NDArray[np.float64]:
+    """Pack full gradients into reduced x-space."""
+    g_alpha = grad_alphas.ravel()[param_map.free_alpha_idx]
+    g_r = np.zeros(param_map.free_r_idx.size, dtype=np.float64)
+    for idx, k_low in enumerate(param_map.free_r_idx):
+        k_up = param_map.lower_to_upper[k_low]
+        if k_up >= 0:
+            g_r[idx] = grad_r_bases[k_low] + grad_r_bases[k_up]
+        else:
+            g_r[idx] = grad_r_bases[k_low]
+    return np.concatenate([g_alpha, g_r])
