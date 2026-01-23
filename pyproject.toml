@@ -55,3 +55,12 @@ pretty = true
 # Numbaは型の都合でmypy strictと相性が悪い部分が出やすいので、
 # まずは「Numba自体は無視しない」が、必要に応じて段階的に緩める。
 # 例：numbaの型推論に依存する関数は後で "type: ignore[misc]" を付けるなど。
+
+[[tool.mypy.overrides]]
+module = ["streamlit_app"]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = ["streamlit", "plotly", "plotly.*"]
+ignore_missing_imports = true
+
