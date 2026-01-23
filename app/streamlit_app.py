@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -39,6 +41,17 @@ def _resolve_path(selected: str, manual: str) -> str:
     if manual_clean:
         return manual_clean
     return selected.strip()
+
+
+def _sanitize_tag(tag: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", tag.strip())
+    cleaned = cleaned.strip("_")
+    return cleaned or "run"
+
+
+def _default_out_dir(tag: str) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return ROOT / "runs" / f"{stamp}_{_sanitize_tag(tag)}"
 
 
 def _resolve_results_path(path: Path) -> Path:
@@ -185,6 +198,9 @@ def main() -> None:
     runs_dir = ROOT / "runs"
     candidates = _scan_runs(runs_dir)
 
+    if "opt_job" not in st.session_state:
+        st.session_state["opt_job"] = None
+
     with st.sidebar:
         st.header("Run Selection")
         if candidates:
@@ -265,7 +281,7 @@ def main() -> None:
 
         vmin, vmax = common_ppm_limits([init_map, opt_map], limit_ppm=ppm_limit, symmetric=True)
 
-    tabs = st.tabs(["Overview", "2D", "3D"])
+    tabs = st.tabs(["Overview", "2D", "3D", "Optimize"])
 
     with tabs[0]:
         st.subheader("Runs")
@@ -356,6 +372,137 @@ def main() -> None:
                 magnet_thickness_m=magnet_thickness_mm / 1000.0,
             )
             st.plotly_chart(fig, use_container_width=True)
+
+    with tabs[3]:
+        st.subheader("Optimize (L-BFGS-B)")
+        from halbach.gui.opt_job import (
+            build_command,
+            poll_opt_job,
+            start_opt_job,
+            stop_opt_job,
+            tail_log,
+        )
+
+        job = st.session_state.get("opt_job")
+        exit_code = poll_opt_job(job) if job is not None else None
+        job_running = job is not None and exit_code is None
+
+        input_choice = st.radio("Input run", ["initial", "optimized", "custom"], index=0)
+        custom_input = ""
+        if input_choice == "custom":
+            custom_input = st.text_input("Custom input path", value="")
+        if input_choice == "initial":
+            opt_in_path = init_path
+        elif input_choice == "optimized":
+            opt_in_path = opt_path
+        else:
+            opt_in_path = custom_input.strip()
+
+        st.caption(f"Input run: {opt_in_path or '(not set)'}")
+
+        maxiter = int(st.number_input("maxiter", min_value=50, max_value=2000, value=900, step=50))
+        gtol = float(
+            st.number_input("gtol", min_value=1e-16, max_value=1e-6, value=1e-12, format="%.1e")
+        )
+        roi_r_opt = float(
+            st.number_input("ROI radius (m)", min_value=0.05, max_value=0.2, value=0.14, step=0.01)
+        )
+        roi_step_opt = float(
+            st.number_input("ROI step (m)", min_value=0.001, max_value=0.02, value=0.02, step=0.001)
+        )
+        rho_gn = float(st.number_input("rho_gn", min_value=0.0, max_value=1.0, value=1e-4))
+
+        with st.expander("Advanced (sigma / MC)", expanded=False):
+            sigma_alpha_deg = float(
+                st.number_input(
+                    "sigma_alpha_deg",
+                    min_value=0.0,
+                    max_value=5.0,
+                    value=0.5,
+                    step=0.1,
+                )
+            )
+            sigma_r_mm = float(
+                st.number_input("sigma_r_mm", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
+            )
+            run_mc = st.checkbox("Run MC", value=False)
+            mc_samples = int(
+                st.number_input("MC samples", min_value=10, max_value=5000, value=600, step=50)
+            )
+
+        tag = st.text_input("Output tag", value="opt")
+        preview_dir = _default_out_dir(tag)
+        st.caption(f"Output dir: {preview_dir}")
+
+        start_cols = st.columns(2)
+        with start_cols[0]:
+            start_clicked = st.button("Start")
+        with start_cols[1]:
+            stop_clicked = st.button("Stop", disabled=not job_running)
+
+        if start_clicked:
+            if job_running:
+                st.error("Optimization is already running.")
+            elif not opt_in_path:
+                st.error("Input run path is empty.")
+            else:
+                out_dir = _default_out_dir(tag)
+                try:
+                    job = start_opt_job(
+                        opt_in_path,
+                        out_dir,
+                        maxiter=maxiter,
+                        gtol=gtol,
+                        roi_r=roi_r_opt,
+                        roi_step=roi_step_opt,
+                        rho_gn=rho_gn,
+                        sigma_alpha_deg=sigma_alpha_deg,
+                        sigma_r_mm=sigma_r_mm,
+                        run_mc=run_mc,
+                        mc_samples=mc_samples,
+                        repo_root=ROOT,
+                    )
+                    st.session_state["opt_job"] = job
+                    st.success(f"Started optimization: {job.out_dir}")
+                except Exception as exc:
+                    st.error(f"Failed to start optimization: {exc}")
+
+        if stop_clicked and job is not None:
+            stop_opt_job(job)
+            st.warning("Terminate signal sent.")
+
+        if job is not None:
+            exit_code = poll_opt_job(job)
+            st.write(f"Status: {'running' if exit_code is None else f'exit {exit_code}'}")
+            st.write(f"Out dir: `{job.out_dir}`")
+            cmd = build_command(
+                opt_in_path,
+                job.out_dir,
+                maxiter=maxiter,
+                gtol=gtol,
+                roi_r=roi_r_opt,
+                roi_step=roi_step_opt,
+                rho_gn=rho_gn,
+                sigma_alpha_deg=sigma_alpha_deg,
+                sigma_r_mm=sigma_r_mm,
+                run_mc=run_mc,
+                mc_samples=mc_samples,
+            )
+            st.code(" ".join(cmd))
+
+            log_text = tail_log(job.log_path, n_lines=200)
+            st.text_area("opt.log (tail)", log_text, height=240)
+
+            if exit_code is not None:
+                set_cols = st.columns(2)
+                with set_cols[0]:
+                    if st.button("Set optimized run"):
+                        st.session_state["opt_path"] = str(job.out_dir)
+                        st.session_state["opt_select"] = ""
+                        st.success("Optimized run path updated.")
+                with set_cols[1]:
+                    if st.button("Clear job"):
+                        st.session_state["opt_job"] = None
 
 
 if __name__ == "__main__":
