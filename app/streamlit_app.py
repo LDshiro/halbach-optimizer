@@ -413,24 +413,91 @@ def main() -> None:
 
     with tabs[2]:
         st.subheader("3D Magnet View")
-        target_run = init_run if view_target == "initial" else opt_run
-        if target_run is None:
-            st.info("Select a run for 3D rendering.")
-        else:
-            from halbach.viz3d import build_magnet_figure
+        view_tabs = st.tabs(["Single", "Compare"])
+        with view_tabs[0]:
+            target_run = init_run if view_target == "initial" else opt_run
+            if target_run is None:
+                st.info("Select a run for 3D rendering.")
+            else:
+                from halbach.viz3d import build_magnet_figure
 
-            fig = build_magnet_figure(
-                target_run,
-                stride=stride,
-                hide_x_negative=hide_x_negative,
-                mode=mode,
-                magnet_size_m=magnet_size_mm / 1000.0,
-                magnet_thickness_m=magnet_thickness_mm / 1000.0,
-                arrow_length_m=arrow_length_mm / 1000.0,
-                arrow_head_angle_deg=arrow_head_angle_deg,
-                height=700,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                fig = build_magnet_figure(
+                    target_run,
+                    stride=stride,
+                    hide_x_negative=hide_x_negative,
+                    mode=mode,
+                    magnet_size_m=magnet_size_mm / 1000.0,
+                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                    arrow_length_m=arrow_length_mm / 1000.0,
+                    arrow_head_angle_deg=arrow_head_angle_deg,
+                    height=700,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        with view_tabs[1]:
+            if init_run is None or opt_run is None:
+                st.info("Both initial and optimized runs are required for 3D comparison.")
+            else:
+                from halbach.viz3d import (
+                    build_magnet_figure,
+                    compute_scene_ranges,
+                    enumerate_magnets,
+                )
+
+                camera_presets = {
+                    "Isometric": {"eye": {"x": 1.25, "y": 1.25, "z": 1.25}},
+                    "Top": {"eye": {"x": 0.0, "y": 0.0, "z": 2.0}},
+                    "Side +X": {"eye": {"x": 2.0, "y": 0.0, "z": 0.0}},
+                    "Side +Y": {"eye": {"x": 0.0, "y": 2.0, "z": 0.0}},
+                }
+                preset = st.selectbox(
+                    "Camera preset",
+                    list(camera_presets.keys()),
+                    index=0,
+                    key="compare_camera_preset",
+                )
+                scene_camera = camera_presets[preset]
+
+                centers_init, _phi_init, _ring_init, _layer_init = enumerate_magnets(
+                    init_run, stride=stride, hide_x_negative=hide_x_negative
+                )
+                centers_opt, _phi_opt, _ring_opt, _layer_opt = enumerate_magnets(
+                    opt_run, stride=stride, hide_x_negative=hide_x_negative
+                )
+                scene_ranges = compute_scene_ranges([centers_init, centers_opt])
+
+                fig_init = build_magnet_figure(
+                    init_run,
+                    stride=stride,
+                    hide_x_negative=hide_x_negative,
+                    mode=mode,
+                    magnet_size_m=magnet_size_mm / 1000.0,
+                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                    arrow_length_m=arrow_length_mm / 1000.0,
+                    arrow_head_angle_deg=arrow_head_angle_deg,
+                    scene_camera=scene_camera,
+                    scene_ranges=scene_ranges,
+                    height=700,
+                )
+                fig_opt = build_magnet_figure(
+                    opt_run,
+                    stride=stride,
+                    hide_x_negative=hide_x_negative,
+                    mode=mode,
+                    magnet_size_m=magnet_size_mm / 1000.0,
+                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                    arrow_length_m=arrow_length_mm / 1000.0,
+                    arrow_head_angle_deg=arrow_head_angle_deg,
+                    scene_camera=scene_camera,
+                    scene_ranges=scene_ranges,
+                    height=700,
+                )
+                compare_cols = st.columns(2)
+                with compare_cols[0]:
+                    st.caption("Initial")
+                    st.plotly_chart(fig_init, use_container_width=True)
+                with compare_cols[1]:
+                    st.caption("Optimized")
+                    st.plotly_chart(fig_opt, use_container_width=True)
 
     with tabs[3]:
         st.subheader("Optimize (L-BFGS-B)")

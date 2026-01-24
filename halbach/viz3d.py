@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
@@ -12,6 +13,7 @@ from halbach.types import FloatArray
 
 PlotlyFigure: TypeAlias = Any
 PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
+SceneRanges: TypeAlias = tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,36 @@ def enumerate_magnets(
         layer_id = layer_id[mask]
 
     return centers, phi, ring_id, layer_id
+
+
+def compute_scene_ranges(
+    centers_list: Sequence[FloatArray], *, margin: float = 0.05
+) -> SceneRanges:
+    mins: list[FloatArray] = []
+    maxs: list[FloatArray] = []
+    for centers in centers_list:
+        if centers.size == 0:
+            continue
+        mins.append(np.min(centers, axis=0))
+        maxs.append(np.max(centers, axis=0))
+    if not mins:
+        return ((-1.0, 1.0), (-1.0, 1.0), (-1.0, 1.0))
+
+    min_all = np.min(np.stack(mins, axis=0), axis=0)
+    max_all = np.max(np.stack(maxs, axis=0), axis=0)
+
+    ranges: list[tuple[float, float]] = []
+    fallback_pad = 0.01
+    for axis in range(3):
+        min_val = float(min_all[axis])
+        max_val = float(max_all[axis])
+        span = max_val - min_val
+        if span <= 0.0:
+            pad = fallback_pad
+        else:
+            pad = float(span * margin)
+        ranges.append((min_val - pad, max_val + pad))
+    return (ranges[0], ranges[1], ranges[2])
 
 
 def _require_plotly() -> Any:
@@ -329,6 +361,8 @@ def build_magnet_figure(
     magnet_thickness_m: float | None = None,
     arrow_length_m: float | None = None,
     arrow_head_angle_deg: float = 30.0,
+    scene_camera: dict[str, Any] | None = None,
+    scene_ranges: SceneRanges | None = None,
     height: int | None = None,
     compare: RunBundle | None = None,
 ) -> PlotlyFigure:
@@ -347,6 +381,11 @@ def build_magnet_figure(
         if mode in ("cubes", "cubes_arrows"):
             size_m = 0.02 if magnet_size_m is None else magnet_size_m
             thickness_m = size_m
+            edge_width = max(1, int(round((size_m * 1000.0) / 7.5)))
+            size_mm = size_m * 1000.0
+            ambient = 0.3
+            if size_mm < 15.0:
+                ambient = 0.3 + 0.7 * (15.0 - size_mm) / 15.0
             vx, vy, vz, i, j, k, ex, ey, ez = build_cubes_mesh(centers, phi, size_m, thickness_m)
             fig.add_trace(
                 go.Mesh3d(
@@ -357,11 +396,11 @@ def build_magnet_figure(
                     j=j,
                     k=k,
                     name=name,
-                    color="rgb(160,160,160)",
+                    color="rgb(229,229,229)",
                     opacity=1.0,
                     flatshading=True,
                     lighting={
-                        "ambient": 0.3,
+                        "ambient": ambient,
                         "diffuse": 0.7,
                         "specular": 0.2,
                         "roughness": 0.9,
@@ -378,7 +417,7 @@ def build_magnet_figure(
                     z=ez,
                     mode="lines",
                     name=f"{name} edges",
-                    line={"color": "black", "width": 3},
+                    line={"color": "black", "width": edge_width},
                     showlegend=False,
                 )
             )
@@ -465,6 +504,12 @@ def build_magnet_figure(
         "margin": {"l": 0, "r": 0, "b": 0, "t": 30},
         "legend": {"orientation": "h"},
     }
+    if scene_ranges is not None:
+        layout["scene"]["xaxis"]["range"] = list(scene_ranges[0])
+        layout["scene"]["yaxis"]["range"] = list(scene_ranges[1])
+        layout["scene"]["zaxis"]["range"] = list(scene_ranges[2])
+    if scene_camera is not None:
+        layout["scene_camera"] = scene_camera
     if height is not None:
         layout["height"] = height
     fig.update_layout(
@@ -476,6 +521,7 @@ def build_magnet_figure(
 __all__ = [
     "MagnetGeometry",
     "enumerate_magnets",
+    "compute_scene_ranges",
     "build_cubes_mesh",
     "build_magnetization_arrows",
     "build_magnet_figure",
