@@ -199,6 +199,7 @@ def objective_with_grads_fixed(
     r_bases: NDArray[np.float64],
     geom: Geometry,
     pts: NDArray[np.float64],
+    factor: float = FACTOR,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
     """
     Objective J and y-space gradients, plus |B0|.
@@ -213,7 +214,7 @@ def objective_with_grads_fixed(
         geom.z_layers,
         geom.ring_offsets,
         pts,
-        FACTOR,
+        factor,
         phi0,
         m0,
     )
@@ -235,7 +236,7 @@ def objective_with_grads_fixed(
         geom.z_layers,
         geom.ring_offsets,
         pts,
-        FACTOR,
+        factor,
         phi0,
         m0,
         DBx,

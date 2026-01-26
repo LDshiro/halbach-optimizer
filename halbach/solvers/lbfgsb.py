@@ -20,6 +20,8 @@ else:
     Float1DArray: TypeAlias = NDArray[np.float64]
     MinimizeOptions: TypeAlias = dict[str, object]
 
+Bounds: TypeAlias = list[tuple[float | None, float | None]]
+
 
 @dataclass
 class _Cache:
@@ -54,7 +56,17 @@ class _Cache:
         return g
 
 
-def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> list[tuple[float, float]]:
+def _callback_payload(
+    cache: _Cache, xk: Float1DArray
+) -> tuple[float, Float1DArray, dict[str, Any]]:
+    if cache.f_last is None or cache.g_last is None or cache.extra_last is None:
+        fk = float("nan")
+        gk = cast(Float1DArray, np.zeros_like(xk, dtype=np.float64))
+        return fk, gk, {}
+    return float(cache.f_last), cast(Float1DArray, cache.g_last), dict(cache.extra_last)
+
+
+def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> Bounds:
     if lb.shape != ub.shape:
         raise ValueError("lb and ub must have the same shape")
     return [(float(a), float(b)) for a, b in zip(lb, ub, strict=True)]
@@ -63,7 +75,7 @@ def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> list[tuple[float, floa
 def solve_lbfgsb(
     fun_grad: FunGrad,
     x0: FloatArray,
-    bounds: list[tuple[float, float]] | None,
+    bounds: Bounds | None,
     options: LBFGSBOptions,
     *,
     iter_callback: (
@@ -86,7 +98,7 @@ def solve_lbfgsb(
     def cb(xk: Float1DArray) -> None:
         k = len(trace.iters)  # iteration count (approx)
         xk_f = cast(Float1DArray, np.asarray(xk, dtype=np.float64))
-        fk, gk, ek = cache.eval(xk_f)
+        fk, gk, ek = _callback_payload(cache, xk_f)
 
         trace.iters.append(k)
         trace.f.append(float(fk))
@@ -94,7 +106,7 @@ def solve_lbfgsb(
         trace.extras.append(record_extras(ek) if record_extras is not None else dict(ek))
 
         if iter_callback is not None:
-            iter_callback(k, xk_f, float(fk), gk, ek)
+            iter_callback(k, xk_f, float(fk), gk, dict(ek))
 
     scipy_options: MinimizeOptions = {
         "maxiter": options.maxiter,

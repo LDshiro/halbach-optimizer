@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from halbach.run_io import load_run
 from halbach.tools.normalize_run import normalize_run
@@ -68,7 +70,7 @@ def test_load_run_builds_geometry(tmp_path: Path) -> None:
     assert rb.geometry.sin2.shape == (rb.geometry.N,)
 
 
-def _make_arrays(R: int = 1, K: int = 4, N: int = 6) -> dict[str, np.ndarray]:
+def _make_arrays(R: int = 1, K: int = 4, N: int = 6) -> dict[str, npt.NDArray[np.floating[Any]]]:
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
     sin2th = np.sin(2.0 * theta)
     cth = np.cos(theta)
