@@ -252,10 +252,24 @@ def main() -> None:
 
         st.header("2D Settings")
         roi_r = float(
-            st.number_input("ROI radius (m)", min_value=0.05, max_value=0.2, value=0.14, step=0.01)
+            st.number_input(
+                "ROI radius (m)",
+                min_value=0.001,
+                max_value=0.2,
+                value=0.14,
+                step=0.001,
+                format="%.4f",
+            )
         )
         step = float(
-            st.number_input("Step (m)", min_value=0.001, max_value=0.02, value=0.002, step=0.001)
+            st.number_input(
+                "Step (m)",
+                min_value=0.001,
+                max_value=0.02,
+                value=0.002,
+                step=0.001,
+                format="%.4f",
+            )
         )
         auto_limit = st.checkbox("Auto ppm limit", value=False)
         ppm_limit: float | None
@@ -539,10 +553,24 @@ def main() -> None:
             st.number_input("gtol", min_value=1e-16, max_value=1e-6, value=1e-12, format="%.1e")
         )
         roi_r_opt = float(
-            st.number_input("ROI radius (m)", min_value=0.05, max_value=0.2, value=0.14, step=0.01)
+            st.number_input(
+                "ROI radius (m)",
+                min_value=0.001,
+                max_value=0.2,
+                value=0.14,
+                step=0.001,
+                format="%.4f",
+            )
         )
         roi_step_opt = float(
-            st.number_input("ROI step (m)", min_value=0.001, max_value=0.02, value=0.02, step=0.001)
+            st.number_input(
+                "ROI step (m)",
+                min_value=0.001,
+                max_value=0.02,
+                value=0.02,
+                step=0.001,
+                format="%.4f",
+            )
         )
         rho_gn = float(st.number_input("rho_gn", min_value=0.0, max_value=1.0, value=1e-4))
         fix_center_radius_layers = int(
@@ -553,6 +581,72 @@ def main() -> None:
                 key="fix_center_radius_layers",
             )
         )
+
+        st.markdown("**Radius bounds**")
+        r_bounds_enabled = st.checkbox("Enable radius bounds", value=True, key="r_bounds_enabled")
+        if r_bounds_enabled:
+            r_bound_mode = st.radio(
+                "Radius bounds mode",
+                ["relative", "absolute"],
+                index=0,
+                horizontal=True,
+                key="r_bound_mode",
+            )
+            if r_bound_mode == "relative":
+                r_lower_delta_mm = float(
+                    st.number_input(
+                        "Lower delta (mm)",
+                        min_value=0.0,
+                        max_value=200.0,
+                        value=30.0,
+                        step=1.0,
+                        key="r_lower_delta_mm",
+                    )
+                )
+                r_upper_delta_mm = float(
+                    st.number_input(
+                        "Upper delta (mm)",
+                        min_value=0.0,
+                        max_value=200.0,
+                        value=30.0,
+                        step=1.0,
+                        key="r_upper_delta_mm",
+                    )
+                )
+                r_no_upper = st.checkbox("No upper bound", value=False, key="r_no_upper")
+                r_min_mm = 0.0
+                r_max_mm = 1e9
+            else:
+                r_min_mm = float(
+                    st.number_input(
+                        "Min radius (mm)",
+                        min_value=0.0,
+                        max_value=1e9,
+                        value=0.0,
+                        step=1.0,
+                        key="r_min_mm",
+                    )
+                )
+                r_max_mm = float(
+                    st.number_input(
+                        "Max radius (mm)",
+                        min_value=0.0,
+                        max_value=1e9,
+                        value=1e9,
+                        step=1.0,
+                        key="r_max_mm",
+                    )
+                )
+                r_lower_delta_mm = 30.0
+                r_upper_delta_mm = 30.0
+                r_no_upper = False
+        else:
+            r_bound_mode = "none"
+            r_lower_delta_mm = 30.0
+            r_upper_delta_mm = 30.0
+            r_no_upper = False
+            r_min_mm = 0.0
+            r_max_mm = 1e9
 
         with st.expander("Advanced (sigma / MC)", expanded=False):
             sigma_alpha_deg = float(
@@ -584,7 +678,7 @@ def main() -> None:
                 )
                 gen_Lz = float(
                     st.number_input(
-                        "Lz (m)", min_value=0.1, max_value=2.0, value=0.64, step=0.01, key="gen_Lz"
+                        "Lz (m)", min_value=0.01, max_value=2.0, value=0.64, step=0.01, key="gen_Lz"
                     )
                 )
             with gen_cols[1]:
@@ -668,6 +762,12 @@ def main() -> None:
                                     roi_r=roi_r_opt,
                                     roi_step=roi_step_opt,
                                     rho_gn=rho_gn,
+                                    r_bound_mode=r_bound_mode,
+                                    r_lower_delta_mm=r_lower_delta_mm,
+                                    r_upper_delta_mm=r_upper_delta_mm,
+                                    r_no_upper=r_no_upper,
+                                    r_min_mm=r_min_mm,
+                                    r_max_mm=r_max_mm,
                                     fix_center_radius_layers=fix_center_radius_layers,
                                     sigma_alpha_deg=sigma_alpha_deg,
                                     sigma_r_mm=sigma_r_mm,
@@ -716,6 +816,12 @@ def main() -> None:
                         roi_r=roi_r_opt,
                         roi_step=roi_step_opt,
                         rho_gn=rho_gn,
+                        r_bound_mode=r_bound_mode,
+                        r_lower_delta_mm=r_lower_delta_mm,
+                        r_upper_delta_mm=r_upper_delta_mm,
+                        r_no_upper=r_no_upper,
+                        r_min_mm=r_min_mm,
+                        r_max_mm=r_max_mm,
                         fix_center_radius_layers=fix_center_radius_layers,
                         sigma_alpha_deg=sigma_alpha_deg,
                         sigma_r_mm=sigma_r_mm,
@@ -755,6 +861,12 @@ def main() -> None:
                 roi_r=roi_r_opt,
                 roi_step=roi_step_opt,
                 rho_gn=rho_gn,
+                r_bound_mode=r_bound_mode,
+                r_lower_delta_mm=r_lower_delta_mm,
+                r_upper_delta_mm=r_upper_delta_mm,
+                r_no_upper=r_no_upper,
+                r_min_mm=r_min_mm,
+                r_max_mm=r_max_mm,
                 fix_center_radius_layers=fix_center_radius_layers,
                 sigma_alpha_deg=sigma_alpha_deg,
                 sigma_r_mm=sigma_r_mm,

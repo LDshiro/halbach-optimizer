@@ -7,6 +7,7 @@ import numpy.typing as npt
 import pytest
 
 import halbach.cli.optimize_run as opt
+from halbach.geom import build_param_map
 
 
 def _write_min_run(tmp_path: Path) -> Path:
@@ -94,7 +95,13 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         sigma_alpha_deg=0.5,
         sigma_r_mm=0.2,
         eps_hvp=1e-6,
-        min_radius_drop_mm=20.0,
+        r_bound_mode="relative",
+        r_lower_delta_mm=30.0,
+        r_upper_delta_mm=30.0,
+        r_no_upper=False,
+        r_min_mm=0.0,
+        r_max_mm=1e9,
+        min_radius_drop_mm=None,
         fix_center_radius_layers=2,
         mc_samples=10,
         run_mc=False,
@@ -123,3 +130,42 @@ def test_format_iter_log() -> None:
     assert "gnorm=2.346e+00" in line
     assert "|B0|=3.400 mT" in line
     assert "dt_eval=0.012s" in line
+
+
+def test_build_bounds_relative_and_fixed_layers() -> None:
+    R = 2
+    K = 6
+    r_bases0 = np.array([0.20, 0.21, 0.22, 0.23, 0.24, 0.25], dtype=float)
+
+    param_map = build_param_map(R, K, n_fix_radius=0)
+    bounds = opt.build_bounds(
+        param_map,
+        r_bases0,
+        mode="relative",
+        dl_mm=10.0,
+        du_mm=20.0,
+        rmin_mm=0.0,
+        rmax_mm=1e9,
+        no_upper=False,
+    )
+    n_alpha = R * K
+    assert len(bounds) == n_alpha + int(param_map.free_r_idx.size)
+    assert all(b == (None, None) for b in bounds[:n_alpha])
+    lb0, ub0 = bounds[n_alpha]
+    assert lb0 == pytest.approx(r_bases0[param_map.free_r_idx[0]] - 0.01)
+    assert ub0 == pytest.approx(r_bases0[param_map.free_r_idx[0]] + 0.02)
+
+    param_map_fix = build_param_map(R, K, n_fix_radius=4)
+    bounds_fix = opt.build_bounds(
+        param_map_fix,
+        r_bases0,
+        mode="relative",
+        dl_mm=10.0,
+        du_mm=20.0,
+        rmin_mm=0.0,
+        rmax_mm=1e9,
+        no_upper=False,
+    )
+    assert len(bounds_fix) == n_alpha + int(param_map_fix.free_r_idx.size)
+    assert int(param_map_fix.free_r_idx.size) < int(param_map.free_r_idx.size)
+    assert all(b == (None, None) for b in bounds_fix[:n_alpha])

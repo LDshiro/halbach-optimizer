@@ -21,6 +21,12 @@ def test_build_command_basic(tmp_path: Path) -> None:
         roi_r=0.14,
         roi_step=0.02,
         rho_gn=0.0,
+        r_bound_mode="relative",
+        r_lower_delta_mm=25.0,
+        r_upper_delta_mm=35.0,
+        r_no_upper=True,
+        r_min_mm=0.0,
+        r_max_mm=1000.0,
         sigma_alpha_deg=0.5,
         sigma_r_mm=0.2,
         run_mc=True,
@@ -30,6 +36,12 @@ def test_build_command_basic(tmp_path: Path) -> None:
     assert cmd[1:4] == ["-u", "-m", "halbach.cli.optimize_run"]
     assert "--in" in cmd
     assert "--out" in cmd
+    assert "--r-bound-mode" in cmd
+    assert "--r-lower-delta-mm" in cmd
+    assert "--r-upper-delta-mm" in cmd
+    assert "--r-no-upper" in cmd
+    assert "--r-min-mm" in cmd
+    assert "--r-max-mm" in cmd
     assert "--fix-center-radius-layers" in cmd
     assert "--run-mc" in cmd
 
