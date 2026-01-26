@@ -20,6 +20,8 @@ else:
     Float1DArray: TypeAlias = NDArray[np.float64]
     MinimizeOptions: TypeAlias = dict[str, object]
 
+Bounds: TypeAlias = list[tuple[float | None, float | None]]
+
 
 @dataclass
 class _Cache:
@@ -64,7 +66,7 @@ def _callback_payload(
     return float(cache.f_last), cast(Float1DArray, cache.g_last), dict(cache.extra_last)
 
 
-def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> list[tuple[float, float]]:
+def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> Bounds:
     if lb.shape != ub.shape:
         raise ValueError("lb and ub must have the same shape")
     return [(float(a), float(b)) for a, b in zip(lb, ub, strict=True)]
@@ -73,7 +75,7 @@ def bounds_from_arrays(lb: FloatArray, ub: FloatArray) -> list[tuple[float, floa
 def solve_lbfgsb(
     fun_grad: FunGrad,
     x0: FloatArray,
-    bounds: list[tuple[float, float]] | None,
+    bounds: Bounds | None,
     options: LBFGSBOptions,
     *,
     iter_callback: (

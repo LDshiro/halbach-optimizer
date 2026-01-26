@@ -11,17 +11,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, FIELD_SCALE_DEFAULT, m0, phi0
-from halbach.geom import RoiMode, build_param_map, build_roi_points, pack_x, unpack_x
+from halbach.geom import ParamMap, RoiMode, build_param_map, build_roi_points, pack_x, unpack_x
 from halbach.physics import objective_only
 from halbach.robust import Float1DArray, fun_grad_gradnorm_fixed
 from halbach.run_io import load_run
-from halbach.solvers.lbfgsb import bounds_from_arrays, solve_lbfgsb
+from halbach.solvers.lbfgsb import solve_lbfgsb
 from halbach.solvers.types import LBFGSBOptions, SolveResult
 
 logger = logging.getLogger(__name__)
@@ -87,10 +87,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--sigma-r-mm", type=float, default=0.2, help="1-sigma r [mm]")
     ap.add_argument("--eps-hvp", type=float, default=1e-6, help="HVP step base")
     ap.add_argument(
+        "--r-bound-mode",
+        type=str,
+        choices=["none", "relative", "absolute"],
+        default="relative",
+        help="radius bounds mode (none, relative, absolute)",
+    )
+    ap.add_argument(
+        "--r-lower-delta-mm",
+        type=float,
+        default=30.0,
+        help="relative lower delta for r_bases [mm]",
+    )
+    ap.add_argument(
+        "--r-upper-delta-mm",
+        type=float,
+        default=30.0,
+        help="relative upper delta for r_bases [mm]",
+    )
+    ap.add_argument(
+        "--r-no-upper",
+        action="store_true",
+        help="disable upper bound in relative mode",
+    )
+    ap.add_argument("--r-min-mm", type=float, default=0.0, help="absolute min r [mm]")
+    ap.add_argument("--r-max-mm", type=float, default=1e9, help="absolute max r [mm]")
+    ap.add_argument(
         "--min-radius-drop-mm",
         type=float,
-        default=20.0,
-        help="lower bound: r_vars >= r_init - this [mm]",
+        default=None,
+        help="deprecated (use --r-lower-delta-mm)",
     )
     ap.add_argument(
         "--fix-center-radius-layers",
@@ -116,6 +142,53 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--dry-run", action="store_true", help="evaluate once and exit")
     return ap.parse_args(argv)
+
+
+BoundMode = Literal["none", "relative", "absolute"]
+Bounds = list[tuple[float | None, float | None]]
+
+
+def build_bounds(
+    param_map: ParamMap,
+    r_bases0: NDArray[np.float64],
+    *,
+    mode: BoundMode,
+    dl_mm: float,
+    du_mm: float,
+    rmin_mm: float,
+    rmax_mm: float,
+    no_upper: bool,
+) -> Bounds:
+    n_alpha = int(param_map.free_alpha_idx.size)
+    n_r = int(param_map.free_r_idx.size)
+    bounds: Bounds = [(None, None) for _ in range(n_alpha)]
+
+    if mode == "none":
+        bounds.extend((None, None) for _ in range(n_r))
+        return bounds
+
+    if mode == "relative":
+        if dl_mm < 0.0 or du_mm < 0.0:
+            raise ValueError("relative radius deltas must be >= 0")
+        dl_m = dl_mm * 1e-3
+        du_m = du_mm * 1e-3
+        for k_low in param_map.free_r_idx:
+            r0 = float(r_bases0[k_low])
+            lb = r0 - dl_m
+            ub = None if no_upper else r0 + du_m
+            bounds.append((lb, ub))
+        return bounds
+
+    if mode == "absolute":
+        rmin_m = rmin_mm * 1e-3
+        rmax_m = rmax_mm * 1e-3
+        if rmax_m < rmin_m:
+            raise ValueError("r_max_mm must be >= r_min_mm")
+        for _k_low in param_map.free_r_idx:
+            bounds.append((rmin_m, rmax_m))
+        return bounds
+
+    raise ValueError(f"Unsupported bound mode: {mode}")
 
 
 def _opt_log_path(out_dir: Path) -> Path:
@@ -347,13 +420,21 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     x0 = cast(Float1DArray, pack_x(alphas0, r_bases0, param_map))
 
-    delta_m = args.min_radius_drop_mm * 1e-3
-    lb = np.full(x0.size, -np.inf, dtype=np.float64)
-    ub = np.full(x0.size, np.inf, dtype=np.float64)
-    n_alpha = int(param_map.free_alpha_idx.size)
-    rv0 = r_bases0[param_map.free_r_idx]
-    lb[n_alpha:] = rv0 - delta_m
-    bounds = bounds_from_arrays(lb, ub)
+    r_bound_mode = cast(BoundMode, args.r_bound_mode)
+    r_lower_delta_mm = float(args.r_lower_delta_mm)
+    if args.min_radius_drop_mm is not None and r_bound_mode == "relative":
+        logger.warning("min-radius-drop-mm is deprecated; use r-lower-delta-mm")
+        r_lower_delta_mm = float(args.min_radius_drop_mm)
+    bounds = build_bounds(
+        param_map,
+        r_bases0,
+        mode=r_bound_mode,
+        dl_mm=r_lower_delta_mm,
+        du_mm=float(args.r_upper_delta_mm),
+        rmin_mm=float(args.r_min_mm),
+        rmax_mm=float(args.r_max_mm),
+        no_upper=bool(args.r_no_upper),
+    )
 
     angle_dim = geom.R * geom.K
     radius_dim_free = int(param_map.free_r_idx.size)
@@ -364,6 +445,27 @@ def run_optimize(args: argparse.Namespace) -> int:
         radius_dim_free,
         param_map.fixed_k_radius.tolist(),
     )
+    logger.info(
+        "radius bounds: mode=%s lower_delta_mm=%.3f upper_delta_mm=%.3f no_upper=%s min_mm=%.3f max_mm=%.3f",
+        r_bound_mode,
+        r_lower_delta_mm,
+        float(args.r_upper_delta_mm),
+        bool(args.r_no_upper),
+        float(args.r_min_mm),
+        float(args.r_max_mm),
+    )
+    if radius_dim_free > 0:
+        sample_count = min(3, radius_dim_free)
+        samples: list[str] = []
+        n_alpha = int(param_map.free_alpha_idx.size)
+        for idx in range(sample_count):
+            k_low = int(param_map.free_r_idx[idx])
+            r0_mm = float(r_bases0[k_low] * 1e3)
+            lb, ub = bounds[n_alpha + idx]
+            lb_text = "None" if lb is None else f"{lb * 1e3:.3f}mm"
+            ub_text = "None" if ub is None else f"{ub * 1e3:.3f}mm"
+            samples.append(f"k={k_low} r0={r0_mm:.3f}mm lb={lb_text} ub={ub_text}")
+        logger.info("radius bounds sample: %s", "; ".join(samples))
 
     sigma_alpha = np.deg2rad(args.sigma_alpha_deg)
     sigma_r = args.sigma_r_mm * 1e-3
@@ -475,7 +577,12 @@ def run_optimize(args: argparse.Namespace) -> int:
                 method="L-BFGS-B",
                 maxiter=int(args.maxiter),
                 gtol=float(args.gtol),
-                min_radius_drop_mm=float(args.min_radius_drop_mm),
+                r_bound_mode=str(r_bound_mode),
+                r_lower_delta_mm=float(r_lower_delta_mm),
+                r_upper_delta_mm=float(args.r_upper_delta_mm),
+                r_no_upper=bool(args.r_no_upper),
+                r_min_mm=float(args.r_min_mm),
+                r_max_mm=float(args.r_max_mm),
             ),
             fix_center_radius_layers=int(args.fix_center_radius_layers),
             fixed_k_radius=param_map.fixed_k_radius.tolist(),
@@ -579,7 +686,12 @@ def run_optimize(args: argparse.Namespace) -> int:
             method="L-BFGS-B",
             maxiter=int(args.maxiter),
             gtol=float(args.gtol),
-            min_radius_drop_mm=float(args.min_radius_drop_mm),
+            r_bound_mode=str(r_bound_mode),
+            r_lower_delta_mm=float(r_lower_delta_mm),
+            r_upper_delta_mm=float(args.r_upper_delta_mm),
+            r_no_upper=bool(args.r_no_upper),
+            r_min_mm=float(args.r_min_mm),
+            r_max_mm=float(args.r_max_mm),
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
         fixed_k_radius=param_map.fixed_k_radius.tolist(),
