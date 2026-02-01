@@ -132,6 +132,35 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="initialize angle variables from run or zeros",
     )
     ap.add_argument(
+        "--mag-model",
+        type=str,
+        choices=["fixed", "self-consistent-easy-axis"],
+        default="fixed",
+        help="magnetization model (self-consistent is not executed yet)",
+    )
+    ap.add_argument("--sc-chi", type=float, default=0.0, help="self-consistent chi")
+    ap.add_argument("--sc-Nd", type=float, default=1.0 / 3.0, help="self-consistent Nd")
+    ap.add_argument("--sc-p0", type=float, default=1.0, help="self-consistent p0")
+    ap.add_argument(
+        "--sc-volume-mm3",
+        type=float,
+        default=1000.0,
+        help="self-consistent magnet volume [mm^3]",
+    )
+    ap.add_argument("--sc-iters", type=int, default=30, help="self-consistent iterations")
+    ap.add_argument("--sc-omega", type=float, default=0.6, help="self-consistent mixing")
+    ap.add_argument("--sc-near-wr", type=int, default=0, help="near window wr")
+    ap.add_argument("--sc-near-wz", type=int, default=1, help="near window wz")
+    ap.add_argument("--sc-near-wphi", type=int, default=2, help="near window wphi")
+    ap.add_argument(
+        "--sc-near-kernel",
+        type=str,
+        choices=["dipole", "multi-dipole"],
+        default="dipole",
+        help="near-field kernel model",
+    )
+    ap.add_argument("--sc-subdip-n", type=int, default=2, help="sub-dipole grid size")
+    ap.add_argument(
         "--r-bound-mode",
         type=str,
         choices=["none", "relative", "absolute"],
@@ -442,6 +471,44 @@ def run_optimize(args: argparse.Namespace) -> int:
     if angle_model in ("delta-rep-x0", "fourier-x0") and geom.N % 2 != 0:
         raise ValueError("N must be even for delta/fourier angle models")
 
+    mag_model_requested = str(args.mag_model)
+    mag_model_effective = "fixed"
+    if mag_model_requested == "self-consistent-easy-axis":
+        if angle_model == "legacy-alpha":
+            if grad_backend == "jax":
+                mag_model_effective = "self-consistent-easy-axis"
+            else:
+                logger.warning(
+                    "mag-model %s requested but only supported for legacy-alpha + jax; running fixed model",
+                    mag_model_requested,
+                )
+        elif angle_model in ("delta-rep-x0", "fourier-x0"):
+            mag_model_effective = "self-consistent-easy-axis"
+        else:
+            logger.warning(
+                "mag-model %s requested but not supported; running fixed model",
+                mag_model_requested,
+            )
+    elif mag_model_requested != "fixed":
+        logger.warning(
+            "mag-model %s requested but not supported; running fixed model",
+            mag_model_requested,
+        )
+
+    if int(args.sc_near_wr) < 0 or int(args.sc_near_wz) < 0 or int(args.sc_near_wphi) < 0:
+        raise ValueError("self-consistent near window must be >= 0")
+    if int(args.sc_iters) < 1:
+        raise ValueError("self-consistent iters must be >= 1")
+    if float(args.sc_omega) <= 0.0 or float(args.sc_omega) > 1.0:
+        raise ValueError("self-consistent omega must be in (0, 1]")
+    if float(args.sc_volume_mm3) <= 0.0:
+        raise ValueError("self-consistent volume_mm3 must be > 0")
+    if float(args.sc_Nd) < 0.0 or float(args.sc_Nd) > 1.0:
+        raise ValueError("self-consistent Nd must be in [0, 1]")
+    if str(args.sc_near_kernel) == "multi-dipole" and int(args.sc_subdip_n) < 2:
+        raise ValueError("self-consistent subdip_n must be >= 2 for multi-dipole")
+
+    sc_final_extras: dict[str, Any] | None = None
     if angle_model == "legacy-alpha":
         if angle_init == "zeros":
             alphas0 = np.zeros_like(alphas0)
@@ -583,6 +650,22 @@ def run_optimize(args: argparse.Namespace) -> int:
         raise ValueError("field_scale must be positive")
     factor = FACTOR * field_scale
 
+    sc_volume_m3 = float(args.sc_volume_mm3) * 1e-9
+    sc_nbr_idx: NDArray[np.int32] | None = None
+    sc_nbr_mask: NDArray[np.bool_] | None = None
+    sc_logged_kernel_info = False
+    if mag_model_effective == "self-consistent-easy-axis":
+        from halbach.near import NearWindow, build_near_graph
+
+        window = NearWindow(
+            wr=int(args.sc_near_wr),
+            wz=int(args.sc_near_wz),
+            wphi=int(args.sc_near_wphi),
+        )
+        near = build_near_graph(int(geom.R), int(geom.K), int(geom.N), window)
+        sc_nbr_idx = near.nbr_idx
+        sc_nbr_mask = near.nbr_mask
+
     first_eval_done = False
     state: dict[str, float] = {}
     n_rep = delta_rep0.shape[1] if delta_rep0 is not None else 0
@@ -592,10 +675,12 @@ def run_optimize(args: argparse.Namespace) -> int:
     )
 
     def fun_grad_solver(x: Float1DArray) -> tuple[float, Float1DArray, dict[str, Any]]:
+        nonlocal sc_logged_kernel_info
         nonlocal first_eval_done
         if not first_eval_done:
             logger.info("first eval start")
         t_eval = perf_counter()
+        sc_extras: dict[str, Any] | None = None
 
         if angle_model == "legacy-alpha":
             if grad_backend == "analytic":
@@ -606,12 +691,40 @@ def run_optimize(args: argparse.Namespace) -> int:
                 gx = pack_grad(gA_y, gRb_y, param_map)
                 J_total = float(J_data)
             else:
-                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
-
                 alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
-                J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
-                    alphas, r_bases, geom, pts, factor=factor
-                )
+                if mag_model_effective == "self-consistent-easy-axis":
+                    from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                        objective_with_grads_self_consistent_legacy_jax,
+                    )
+
+                    if sc_nbr_idx is None or sc_nbr_mask is None:
+                        raise ValueError("self-consistent near graph is missing")
+                    J_data, gA_y, gRb_y, B0n, sc_extras = (
+                        objective_with_grads_self_consistent_legacy_jax(
+                            alphas,
+                            r_bases,
+                            geom,
+                            pts,
+                            sc_nbr_idx,
+                            sc_nbr_mask,
+                            chi=float(args.sc_chi),
+                            Nd=float(args.sc_Nd),
+                            p0=float(args.sc_p0),
+                            volume_m3=sc_volume_m3,
+                            near_kernel=str(args.sc_near_kernel),
+                            subdip_n=int(args.sc_subdip_n),
+                            iters=int(args.sc_iters),
+                            omega=float(args.sc_omega),
+                            factor=factor,
+                            phi0_val=phi0,
+                        )
+                    )
+                else:
+                    from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                    J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
+                        alphas, r_bases, geom, pts, factor=factor
+                    )
                 gx = pack_grad(gA_y, gRb_y, param_map)
                 J_total = float(J_data)
         elif angle_model == "delta-rep-x0":
@@ -623,18 +736,49 @@ def run_optimize(args: argparse.Namespace) -> int:
             r_vars = np.asarray(x[angle_dim:], dtype=np.float64)
             delta_rep = delta_flat.reshape((geom.K, n_rep))
             r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
-            J_total, g_delta, g_r_bases, B0n = objective_with_grads_delta_phi_x0_jax(
-                delta_rep,
-                r_bases,
-                geom,
-                pts,
-                lambda0=float(args.lambda0),
-                lambda_theta=float(args.lambda_theta),
-                lambda_z=float(args.lambda_z),
-                factor=factor,
-                phi0=phi0,
-                m0=m0,
-            )
+            if mag_model_effective == "self-consistent-easy-axis":
+                from halbach.autodiff.jax_objective_self_consistent_delta_phi import (
+                    objective_with_grads_self_consistent_delta_phi_x0_jax,
+                )
+
+                if sc_nbr_idx is None or sc_nbr_mask is None:
+                    raise ValueError("self-consistent near graph is missing")
+                J_total, g_delta, g_r_bases, B0n, sc_extras = (
+                    objective_with_grads_self_consistent_delta_phi_x0_jax(
+                        delta_rep,
+                        r_bases,
+                        geom,
+                        pts,
+                        sc_nbr_idx,
+                        sc_nbr_mask,
+                        chi=float(args.sc_chi),
+                        Nd=float(args.sc_Nd),
+                        p0=float(args.sc_p0),
+                        volume_m3=sc_volume_m3,
+                        iters=int(args.sc_iters),
+                        omega=float(args.sc_omega),
+                        near_kernel=str(args.sc_near_kernel),
+                        subdip_n=int(args.sc_subdip_n),
+                        lambda0=float(args.lambda0),
+                        lambda_theta=float(args.lambda_theta),
+                        lambda_z=float(args.lambda_z),
+                        factor=factor,
+                        phi0=phi0,
+                    )
+                )
+            else:
+                J_total, g_delta, g_r_bases, B0n = objective_with_grads_delta_phi_x0_jax(
+                    delta_rep,
+                    r_bases,
+                    geom,
+                    pts,
+                    lambda0=float(args.lambda0),
+                    lambda_theta=float(args.lambda_theta),
+                    lambda_z=float(args.lambda_z),
+                    factor=factor,
+                    phi0=phi0,
+                    m0=m0,
+                )
             gx = cast(
                 Float1DArray,
                 np.concatenate([g_delta.ravel(), _pack_r_grad(g_r_bases, param_map)]),
@@ -649,19 +793,51 @@ def run_optimize(args: argparse.Namespace) -> int:
             r_vars = np.asarray(x[angle_dim:], dtype=np.float64)
             coeffs = coeffs_flat.reshape((geom.K, 2 * fourier_H))
             r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
-            J_total, g_coeffs, g_r_bases, B0n = objective_with_grads_delta_phi_fourier_x0_jax(
-                coeffs,
-                r_bases,
-                geom,
-                pts,
-                H=fourier_H,
-                lambda0=float(args.lambda0),
-                lambda_theta=float(args.lambda_theta),
-                lambda_z=float(args.lambda_z),
-                factor=factor,
-                phi0=phi0,
-                m0=m0,
-            )
+            if mag_model_effective == "self-consistent-easy-axis":
+                from halbach.autodiff.jax_objective_self_consistent_delta_phi_fourier import (
+                    objective_with_grads_self_consistent_delta_phi_fourier_x0_jax,
+                )
+
+                if sc_nbr_idx is None or sc_nbr_mask is None:
+                    raise ValueError("self-consistent near graph is missing")
+                J_total, g_coeffs, g_r_bases, B0n, sc_extras = (
+                    objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
+                        coeffs,
+                        r_bases,
+                        geom,
+                        pts,
+                        sc_nbr_idx,
+                        sc_nbr_mask,
+                        H=fourier_H,
+                        chi=float(args.sc_chi),
+                        Nd=float(args.sc_Nd),
+                        p0=float(args.sc_p0),
+                        volume_m3=sc_volume_m3,
+                        iters=int(args.sc_iters),
+                        omega=float(args.sc_omega),
+                        near_kernel=str(args.sc_near_kernel),
+                        subdip_n=int(args.sc_subdip_n),
+                        lambda0=float(args.lambda0),
+                        lambda_theta=float(args.lambda_theta),
+                        lambda_z=float(args.lambda_z),
+                        factor=factor,
+                        phi0=phi0,
+                    )
+                )
+            else:
+                J_total, g_coeffs, g_r_bases, B0n = objective_with_grads_delta_phi_fourier_x0_jax(
+                    coeffs,
+                    r_bases,
+                    geom,
+                    pts,
+                    H=fourier_H,
+                    lambda0=float(args.lambda0),
+                    lambda_theta=float(args.lambda_theta),
+                    lambda_z=float(args.lambda_z),
+                    factor=factor,
+                    phi0=phi0,
+                    m0=m0,
+                )
             gx = cast(
                 Float1DArray,
                 np.concatenate([g_coeffs.ravel(), _pack_r_grad(g_r_bases, param_map)]),
@@ -678,6 +854,24 @@ def run_optimize(args: argparse.Namespace) -> int:
         state["B0"] = B0_T
         state["t_last_eval"] = float(dt_eval)
         extras: dict[str, Any] = {"J": float(J_data), "B0": B0_T}
+        if mag_model_effective == "self-consistent-easy-axis" and sc_extras is not None:
+            extras.update(sc_extras)
+            if not sc_logged_kernel_info:
+                deg = int(sc_extras.get("sc_near_deg_max", 0))
+                subdip_n = int(sc_extras.get("sc_subdip_n", 1))
+                S = subdip_n**3 if str(args.sc_near_kernel) == "multi-dipole" else 1
+                M = int(geom.R * geom.K * geom.N)
+                approx_pairs = M * deg
+                approx_evals = approx_pairs * S
+                logger.info(
+                    "self-consistent near kernel=%s deg=%d subdip=%d (S=%d) approx_evals_per_iter=%d",
+                    args.sc_near_kernel,
+                    deg,
+                    subdip_n,
+                    S,
+                    approx_evals,
+                )
+                sc_logged_kernel_info = True
         return float(J_total), gx, extras
 
     log_every = max(1, int(args.log_every))
@@ -760,6 +954,25 @@ def run_optimize(args: argparse.Namespace) -> int:
                 lambda_theta=float(args.lambda_theta),
                 lambda_z=float(args.lambda_z),
             ),
+            magnetization=dict(
+                model_requested=mag_model_requested,
+                model_effective=mag_model_effective,
+                self_consistent=dict(
+                    chi=float(args.sc_chi),
+                    Nd=float(args.sc_Nd),
+                    p0=float(args.sc_p0),
+                    volume_mm3=float(args.sc_volume_mm3),
+                    iters=int(args.sc_iters),
+                    omega=float(args.sc_omega),
+                    near_window=dict(
+                        wr=int(args.sc_near_wr),
+                        wz=int(args.sc_near_wz),
+                        wphi=int(args.sc_near_wphi),
+                    ),
+                    near_kernel=str(args.sc_near_kernel),
+                    subdip_n=int(args.sc_subdip_n),
+                ),
+            ),
             fix_center_radius_layers=int(args.fix_center_radius_layers),
             fixed_k_radius=param_map.fixed_k_radius.tolist(),
             dry_run=True,
@@ -789,11 +1002,39 @@ def run_optimize(args: argparse.Namespace) -> int:
     if angle_model == "legacy-alpha":
         al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
         if grad_backend == "jax":
-            from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+            if mag_model_effective == "self-consistent-easy-axis":
+                from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                    objective_with_grads_self_consistent_legacy_jax,
+                )
 
-            Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
-                al_opt, rb_opt, geom, pts, factor=factor
-            )
+                if sc_nbr_idx is None or sc_nbr_mask is None:
+                    raise ValueError("self-consistent near graph is missing")
+                Jn_f, _gA, _gR, B0_f, sc_final_extras = (
+                    objective_with_grads_self_consistent_legacy_jax(
+                        al_opt,
+                        rb_opt,
+                        geom,
+                        pts,
+                        sc_nbr_idx,
+                        sc_nbr_mask,
+                        chi=float(args.sc_chi),
+                        Nd=float(args.sc_Nd),
+                        p0=float(args.sc_p0),
+                        volume_m3=sc_volume_m3,
+                        near_kernel=str(args.sc_near_kernel),
+                        subdip_n=int(args.sc_subdip_n),
+                        iters=int(args.sc_iters),
+                        omega=float(args.sc_omega),
+                        factor=factor,
+                        phi0_val=phi0,
+                    )
+                )
+            else:
+                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
+                    al_opt, rb_opt, geom, pts, factor=factor
+                )
         else:
             Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
                 al_opt, rb_opt, geom, pts, factor=factor
@@ -804,43 +1045,108 @@ def run_optimize(args: argparse.Namespace) -> int:
         delta_rep_opt = delta_flat.reshape((geom.K, n_rep))
         rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
         al_opt = np.zeros((geom.R, geom.K), dtype=np.float64)
-        from halbach.autodiff.jax_objective_delta_phi import objective_with_grads_delta_phi_x0_jax
+        if mag_model_effective == "self-consistent-easy-axis":
+            from halbach.autodiff.jax_objective_self_consistent_delta_phi import (
+                objective_with_grads_self_consistent_delta_phi_x0_jax,
+            )
 
-        Jn_f, _gD, _gR, B0_f = objective_with_grads_delta_phi_x0_jax(
-            delta_rep_opt,
-            rb_opt,
-            geom,
-            pts,
-            lambda0=float(args.lambda0),
-            lambda_theta=float(args.lambda_theta),
-            lambda_z=float(args.lambda_z),
-            factor=factor,
-            phi0=phi0,
-            m0=m0,
-        )
+            if sc_nbr_idx is None or sc_nbr_mask is None:
+                raise ValueError("self-consistent near graph is missing")
+            Jn_f, _gD, _gR, B0_f, sc_final_extras = (
+                objective_with_grads_self_consistent_delta_phi_x0_jax(
+                    delta_rep_opt,
+                    rb_opt,
+                    geom,
+                    pts,
+                    sc_nbr_idx,
+                    sc_nbr_mask,
+                    chi=float(args.sc_chi),
+                    Nd=float(args.sc_Nd),
+                    p0=float(args.sc_p0),
+                    volume_m3=sc_volume_m3,
+                    iters=int(args.sc_iters),
+                    omega=float(args.sc_omega),
+                    near_kernel=str(args.sc_near_kernel),
+                    subdip_n=int(args.sc_subdip_n),
+                    lambda0=float(args.lambda0),
+                    lambda_theta=float(args.lambda_theta),
+                    lambda_z=float(args.lambda_z),
+                    factor=factor,
+                    phi0=phi0,
+                )
+            )
+        else:
+            from halbach.autodiff.jax_objective_delta_phi import (
+                objective_with_grads_delta_phi_x0_jax,
+            )
+
+            Jn_f, _gD, _gR, B0_f = objective_with_grads_delta_phi_x0_jax(
+                delta_rep_opt,
+                rb_opt,
+                geom,
+                pts,
+                lambda0=float(args.lambda0),
+                lambda_theta=float(args.lambda_theta),
+                lambda_z=float(args.lambda_z),
+                factor=factor,
+                phi0=phi0,
+                m0=m0,
+            )
     else:
         coeffs_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
         r_vars = np.asarray(res.x[angle_dim:], dtype=np.float64)
         coeffs_opt = coeffs_flat.reshape((geom.K, 2 * fourier_H))
         rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
         al_opt = np.zeros((geom.R, geom.K), dtype=np.float64)
-        from halbach.autodiff.jax_objective_delta_phi_fourier import (
-            objective_with_grads_delta_phi_fourier_x0_jax,
-        )
+        if mag_model_effective == "self-consistent-easy-axis":
+            from halbach.autodiff.jax_objective_self_consistent_delta_phi_fourier import (
+                objective_with_grads_self_consistent_delta_phi_fourier_x0_jax,
+            )
 
-        Jn_f, _gC, _gR, B0_f = objective_with_grads_delta_phi_fourier_x0_jax(
-            coeffs_opt,
-            rb_opt,
-            geom,
-            pts,
-            H=fourier_H,
-            lambda0=float(args.lambda0),
-            lambda_theta=float(args.lambda_theta),
-            lambda_z=float(args.lambda_z),
-            factor=factor,
-            phi0=phi0,
-            m0=m0,
-        )
+            if sc_nbr_idx is None or sc_nbr_mask is None:
+                raise ValueError("self-consistent near graph is missing")
+            Jn_f, _gC, _gR, B0_f, sc_final_extras = (
+                objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
+                    coeffs_opt,
+                    rb_opt,
+                    geom,
+                    pts,
+                    sc_nbr_idx,
+                    sc_nbr_mask,
+                    H=fourier_H,
+                    chi=float(args.sc_chi),
+                    Nd=float(args.sc_Nd),
+                    p0=float(args.sc_p0),
+                    volume_m3=sc_volume_m3,
+                    iters=int(args.sc_iters),
+                    omega=float(args.sc_omega),
+                    near_kernel=str(args.sc_near_kernel),
+                    subdip_n=int(args.sc_subdip_n),
+                    lambda0=float(args.lambda0),
+                    lambda_theta=float(args.lambda_theta),
+                    lambda_z=float(args.lambda_z),
+                    factor=factor,
+                    phi0=phi0,
+                )
+            )
+        else:
+            from halbach.autodiff.jax_objective_delta_phi_fourier import (
+                objective_with_grads_delta_phi_fourier_x0_jax,
+            )
+
+            Jn_f, _gC, _gR, B0_f = objective_with_grads_delta_phi_fourier_x0_jax(
+                coeffs_opt,
+                rb_opt,
+                geom,
+                pts,
+                H=fourier_H,
+                lambda0=float(args.lambda0),
+                lambda_theta=float(args.lambda_theta),
+                lambda_z=float(args.lambda_z),
+                factor=factor,
+                phi0=phi0,
+                m0=m0,
+            )
 
     B0_f_T = B0_f / field_scale
     logger.info(
@@ -872,6 +1178,8 @@ def run_optimize(args: argparse.Namespace) -> int:
         Jn_hist=Jn_hist,
         B0_hist=B0_hist,
     )
+    if mag_model_effective == "self-consistent-easy-axis" and sc_final_extras is not None:
+        save_payload["extras_sc_stats"] = dict(sc_final_extras)
     if delta_rep_opt is not None:
         save_payload["delta_rep_opt"] = delta_rep_opt
     if coeffs_opt is not None:
@@ -914,6 +1222,25 @@ def run_optimize(args: argparse.Namespace) -> int:
             lambda0=float(args.lambda0),
             lambda_theta=float(args.lambda_theta),
             lambda_z=float(args.lambda_z),
+        ),
+        magnetization=dict(
+            model_requested=mag_model_requested,
+            model_effective=mag_model_effective,
+            self_consistent=dict(
+                chi=float(args.sc_chi),
+                Nd=float(args.sc_Nd),
+                p0=float(args.sc_p0),
+                volume_mm3=float(args.sc_volume_mm3),
+                iters=int(args.sc_iters),
+                omega=float(args.sc_omega),
+                near_window=dict(
+                    wr=int(args.sc_near_wr),
+                    wz=int(args.sc_near_wz),
+                    wphi=int(args.sc_near_wphi),
+                ),
+                near_kernel=str(args.sc_near_kernel),
+                subdip_n=int(args.sc_subdip_n),
+            ),
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
         fixed_k_radius=param_map.fixed_k_radius.tolist(),
