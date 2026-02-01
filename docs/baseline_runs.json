@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-02-01T14:06:00.630937+00:00",
+  "cases": [
+    {
+      "name": "baseline_tiny_legacy_analytic",
+      "angle_model": "legacy-alpha",
+      "grad_backend": "analytic",
+      "roi_seed": 20250924,
+      "input_dir": "runs\\baseline_tiny_legacy_analytic",
+      "opt_dir": "runs\\baseline_tiny_legacy_analytic_opt",
+      "status": "ok",
+      "metrics": {
+        "J": 4515.922446830117,
+        "B0": 0.005695224417430627,
+        "iters": 3
+      }
+    },
+    {
+      "name": "baseline_tiny_legacy_jax",
+      "angle_model": "legacy-alpha",
+      "grad_backend": "jax",
+      "roi_seed": 20250924,
+      "input_dir": "runs\\baseline_tiny_legacy_jax",
+      "opt_dir": "runs\\baseline_tiny_legacy_jax_opt",
+      "status": "ok",
+      "metrics": {
+        "J": 4515.922446830338,
+        "B0": 0.0056952244174306235,
+        "iters": 3
+      }
+    },
+    {
+      "name": "baseline_tiny_delta_rep",
+      "angle_model": "delta-rep-x0",
+      "grad_backend": null,
+      "roi_seed": 20250924,
+      "input_dir": "runs\\baseline_tiny_delta_rep",
+      "opt_dir": "runs\\baseline_tiny_delta_rep_opt",
+      "status": "ok",
+      "metrics": {
+        "J": 4510.1210861336685,
+        "B0": 0.005695243988431098,
+        "iters": 3
+      }
+    }
+  ]
+}

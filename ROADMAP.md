@@ -79,3 +79,11 @@
 - [ ] pytest ãŒãƒ­ãƒ¼ã‚«ãƒ«ã§é€šã‚‹
 - [ ] mypy strict ãŒï¼ˆnumbaå¢ƒç•Œã‚’é™¤ãï¼‰é€šã‚‹
 - [ ] æœ€é©åŒ–ãƒ»MCãƒ»ä¿å­˜ãŒå¾“æ¥ã¨åŒæ§˜ã«å®Ÿè¡Œã§ãã‚‹
+
+---
+
+## Œ»ó‚Ì•ûjiƒƒ‚j
+- near W‡‚Í‹——£è‡’l‚ÅØ‘Ö‚µ‚È‚¢BƒCƒ“ƒfƒbƒNƒX‘‹‚ÅŒÅ’èiˆÄBjB
+  - —á: Wz=1, Wphi=2, Wr=0 ‚ðƒfƒtƒHƒ‹ƒgŒó•âi«—ˆ’²®jB
+- cube ‹ßŽ—‚Í“––Ê multi-dipoleiƒTƒu‘o‹ÉŽqW‡j‚ÅŽÀ‘•‚µA«—ˆu—§•û‘Ì•½‹Ïƒeƒ“ƒ\ƒ‹v‚É’uŠ·‚·‚é TODO ‚ð•ÛŽB
+- DC/CCP ‚ÍŠù‘¶ L-BFGS-B ƒtƒŒ[ƒ€‚É¬‚º‚¸A•Êƒ\ƒ‹ƒoƒoƒbƒNƒGƒ“ƒh‚Æ‚µ‚Ä’Ç‰ÁiÕ“Ë‰ñ”ðjB
