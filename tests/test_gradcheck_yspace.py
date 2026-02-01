@@ -1,15 +1,11 @@
 import numpy as np
 from numpy.typing import NDArray
 
+from halbach.constants import FACTOR, m0, phi0
+from halbach.geom import build_roi_points
+from halbach.objective import objective_with_grads_fixed
+from halbach.physics import objective_only
 from halbach.types import Geometry
-from robust_opt_halbach_gradnorm_minimal import (
-    FACTOR,
-    build_roi_points,
-    m0,
-    objective_only,
-    objective_with_grads_fixed,
-    phi0,
-)
 
 
 def fd_grad_yspace(

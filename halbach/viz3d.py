@@ -7,6 +7,7 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from halbach.angles_runtime import phi_rkn_from_run
 from halbach.constants import phi0
 from halbach.run_types import RunBundle
 from halbach.types import FloatArray
@@ -37,21 +38,19 @@ def enumerate_magnets(
         raise ValueError("stride must be >= 1")
 
     theta = run.geometry.theta
-    sin2 = run.geometry.sin2
     cth = run.geometry.cth
     sth = run.geometry.sth
     z_layers = run.geometry.z_layers
     ring_offsets = run.geometry.ring_offsets
     r_bases = run.results.r_bases
-    alphas = run.results.alphas
+    phi_rkn = phi_rkn_from_run(run, phi0=phi0)
 
-    R, K = alphas.shape
+    R, K, _N = phi_rkn.shape
     idx = np.arange(0, theta.size, stride)
     if idx.size == 0:
         raise ValueError("stride is too large for the theta grid")
 
     th = theta[idx]
-    s2 = sin2[idx]
     c = cth[idx]
     s = sth[idx]
 
@@ -69,7 +68,7 @@ def enumerate_magnets(
             z = np.full_like(x, z_layers[k], dtype=np.float64)
             centers_list.append(np.column_stack([x, y, z]).astype(np.float64))
 
-            phi = 2.0 * th + phi0 + alphas[r, k] * s2
+            phi = phi_rkn[r, k, idx]
             phi_list.append(np.asarray(phi, dtype=np.float64))
 
             ring_list.append(np.full(th.shape, r, dtype=np.int_))

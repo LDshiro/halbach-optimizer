@@ -7,8 +7,9 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
+from halbach.angles_runtime import angle_model_from_run, phi_rkn_from_run
 from halbach.constants import FACTOR, m0, phi0
-from halbach.physics import compute_B_and_B0
+from halbach.physics import compute_B_and_B0, compute_B_and_B0_phi_rkn
 from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
@@ -72,20 +73,35 @@ def compute_error_map_ppm_plane(
 
     mask, pts = _build_plane_points(xs, ys, plane, coord0, roi_r)
 
-    Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
-        run.results.alphas,
-        run.results.r_bases,
-        run.geometry.theta,
-        run.geometry.sin2,
-        run.geometry.cth,
-        run.geometry.sth,
-        run.geometry.z_layers,
-        run.geometry.ring_offsets,
-        pts,
-        FACTOR,
-        phi0,
-        m0,
-    )
+    model = angle_model_from_run(run)
+    if model == "legacy-alpha":
+        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
+            run.results.alphas,
+            run.results.r_bases,
+            run.geometry.theta,
+            run.geometry.sin2,
+            run.geometry.cth,
+            run.geometry.sth,
+            run.geometry.z_layers,
+            run.geometry.ring_offsets,
+            pts,
+            FACTOR,
+            phi0,
+            m0,
+        )
+    else:
+        phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(
+            phi_rkn,
+            run.results.r_bases,
+            run.geometry.cth,
+            run.geometry.sth,
+            run.geometry.z_layers,
+            run.geometry.ring_offsets,
+            pts,
+            FACTOR,
+            m0,
+        )
 
     B0_T = float(np.sqrt(B0x * B0x + B0y * B0y + B0z * B0z))
     if B0_T < 1e-15:

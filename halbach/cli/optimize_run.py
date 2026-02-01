@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import importlib
 import json
 import logging
 import subprocess
@@ -11,18 +12,26 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, TypeAlias, TypedDict, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, FIELD_SCALE_DEFAULT, m0, phi0
-from halbach.geom import ParamMap, RoiMode, build_param_map, build_roi_points, pack_x, unpack_x
-from halbach.physics import objective_only
-from halbach.robust import Float1DArray, fun_grad_gradnorm_fixed
+from halbach.geom import (
+    ParamMap,
+    RoiMode,
+    build_param_map,
+    build_roi_points,
+    pack_grad,
+    pack_x,
+    unpack_x,
+)
+from halbach.objective import objective_with_grads_fixed
 from halbach.run_io import load_run
 from halbach.solvers.lbfgsb import solve_lbfgsb
 from halbach.solvers.types import LBFGSBOptions, SolveResult
+from halbach.symmetry import build_mirror_x0
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +85,52 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0,
         help="downsample ROI points to at most M (0 disables)",
     )
-    ap.add_argument("--rho-gn", type=float, default=1e-4, help="GN weight in y-space")
     ap.add_argument(
         "--field-scale",
         type=float,
         default=FIELD_SCALE_DEFAULT,
         help="field scaling factor for objective stability",
     )
-    ap.add_argument("--sigma-alpha-deg", type=float, default=0.5, help="1-sigma alpha [deg]")
-    ap.add_argument("--sigma-r-mm", type=float, default=0.2, help="1-sigma r [mm]")
-    ap.add_argument("--eps-hvp", type=float, default=1e-6, help="HVP step base")
+    ap.add_argument(
+        "--angle-model",
+        type=str,
+        choices=["legacy-alpha", "delta-rep-x0", "fourier-x0"],
+        default="legacy-alpha",
+        help="angle model to optimize",
+    )
+    ap.add_argument(
+        "--grad-backend",
+        type=str,
+        choices=["analytic", "jax"],
+        default=None,
+        help="gradient backend (default depends on angle model)",
+    )
+    ap.add_argument(
+        "--fourier-H",
+        type=int,
+        default=4,
+        help="Fourier basis size for fourier-x0",
+    )
+    ap.add_argument("--lambda0", type=float, default=0.0, help="delta/phi L2 regularization")
+    ap.add_argument(
+        "--lambda-theta",
+        type=float,
+        default=0.0,
+        help="delta/phi smoothness regularization in theta",
+    )
+    ap.add_argument(
+        "--lambda-z",
+        type=float,
+        default=0.0,
+        help="delta/phi smoothness regularization along z",
+    )
+    ap.add_argument(
+        "--angle-init",
+        type=str,
+        choices=["from-run", "zeros"],
+        default="from-run",
+        help="initialize angle variables from run or zeros",
+    )
     ap.add_argument(
         "--r-bound-mode",
         type=str,
@@ -125,8 +170,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=2,
         help="number of center z-layers to fix radius only (0, 2, or 4)",
     )
-    ap.add_argument("--mc-samples", type=int, default=600, help="MC samples")
-    ap.add_argument("--run-mc", action="store_true", help="run Monte Carlo evaluation")
     ap.add_argument(
         "--log-level",
         type=str,
@@ -146,12 +189,25 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 BoundMode = Literal["none", "relative", "absolute"]
 Bounds = list[tuple[float | None, float | None]]
+Float1DArray: TypeAlias = NDArray[np.float64]
+
+
+def _require_jax() -> None:
+    try:
+        importlib.import_module("jax")
+    except Exception as exc:
+        raise ModuleNotFoundError(
+            "JAX backend requested but `jax` is not installed. "
+            "Install `jax` and `jaxlib`, or use --angle-model legacy-alpha "
+            "and --grad-backend analytic."
+        ) from exc
 
 
 def build_bounds(
     param_map: ParamMap,
     r_bases0: NDArray[np.float64],
     *,
+    n_angle: int,
     mode: BoundMode,
     dl_mm: float,
     du_mm: float,
@@ -159,9 +215,8 @@ def build_bounds(
     rmax_mm: float,
     no_upper: bool,
 ) -> Bounds:
-    n_alpha = int(param_map.free_alpha_idx.size)
     n_r = int(param_map.free_r_idx.size)
-    bounds: Bounds = [(None, None) for _ in range(n_alpha)]
+    bounds: Bounds = [(None, None) for _ in range(n_angle)]
 
     if mode == "none":
         bounds.extend((None, None) for _ in range(n_r))
@@ -189,6 +244,37 @@ def build_bounds(
         return bounds
 
     raise ValueError(f"Unsupported bound mode: {mode}")
+
+
+def _pack_r_vars(r_bases: NDArray[np.float64], param_map: ParamMap) -> NDArray[np.float64]:
+    return np.asarray(r_bases[param_map.free_r_idx], dtype=np.float64)
+
+
+def _apply_r_vars(
+    r_vars: NDArray[np.float64],
+    r_bases0: NDArray[np.float64],
+    param_map: ParamMap,
+) -> NDArray[np.float64]:
+    r_bases = np.array(r_bases0, dtype=np.float64, copy=True)
+    if r_vars.size != param_map.free_r_idx.size:
+        raise ValueError("r_vars size does not match parameter map")
+    for idx, k_low in enumerate(param_map.free_r_idx):
+        r_bases[k_low] = r_vars[idx]
+        k_up = param_map.lower_to_upper[k_low]
+        if k_up >= 0:
+            r_bases[k_up] = r_vars[idx]
+    return r_bases
+
+
+def _pack_r_grad(grad_r_bases: NDArray[np.float64], param_map: ParamMap) -> NDArray[np.float64]:
+    g_r = np.zeros(param_map.free_r_idx.size, dtype=np.float64)
+    for idx, k_low in enumerate(param_map.free_r_idx):
+        k_up = param_map.lower_to_upper[k_low]
+        if k_up >= 0:
+            g_r[idx] = grad_r_bases[k_low] + grad_r_bases[k_up]
+        else:
+            g_r[idx] = grad_r_bases[k_low]
+    return g_r
 
 
 def _opt_log_path(out_dir: Path) -> Path:
@@ -320,44 +406,6 @@ def _enable_stack_dumps(interval: int, file_handler: logging.FileHandler) -> Non
     logger.warning("Enabled stack dumps every %d seconds", interval)
 
 
-def _mc_eval(
-    alphas_base: NDArray[np.float64],
-    r_bases_base: NDArray[np.float64],
-    pts: NDArray[np.float64],
-    factor: float,
-    sigma_alpha: float,
-    sigma_r: float,
-    samples: int,
-    seed: int,
-    geom_theta: NDArray[np.float64],
-    geom_sin2: NDArray[np.float64],
-    geom_cth: NDArray[np.float64],
-    geom_sth: NDArray[np.float64],
-    geom_z_layers: NDArray[np.float64],
-    geom_ring_offsets: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    rng = np.random.default_rng(seed)
-    out = np.zeros(samples, dtype=np.float64)
-    for s in range(samples):
-        dA = rng.standard_normal(size=alphas_base.shape) * sigma_alpha
-        dR = rng.standard_normal(size=r_bases_base.shape) * sigma_r
-        out[s] = objective_only(
-            alphas_base + dA,
-            r_bases_base + dR,
-            geom_theta,
-            geom_sin2,
-            geom_cth,
-            geom_sth,
-            geom_z_layers,
-            geom_ring_offsets,
-            pts,
-            factor,
-            phi0,
-            m0,
-        )
-    return out
-
-
 def run_optimize(args: argparse.Namespace) -> int:
     start_time = datetime.now(UTC)
     in_path = Path(args.in_path)
@@ -372,6 +420,72 @@ def run_optimize(args: argparse.Namespace) -> int:
     param_map = build_param_map(geom.R, geom.K, n_fix_radius=int(args.fix_center_radius_layers))
     alphas0 = np.array(run.results.alphas, dtype=np.float64, copy=True)
     r_bases0 = np.array(run.results.r_bases, dtype=np.float64, copy=True)
+
+    angle_model = cast(str, args.angle_model)
+    if angle_model not in ("legacy-alpha", "delta-rep-x0", "fourier-x0"):
+        raise ValueError(f"Unsupported angle_model: {angle_model}")
+    grad_backend = args.grad_backend
+    if grad_backend is None:
+        grad_backend = "analytic" if angle_model == "legacy-alpha" else "jax"
+    if angle_model in ("delta-rep-x0", "fourier-x0") and grad_backend != "jax":
+        raise ValueError("delta/fourier models require --grad-backend jax")
+    if angle_model != "legacy-alpha" or grad_backend == "jax":
+        _require_jax()
+
+    angle_init = str(args.angle_init)
+    if angle_init not in ("from-run", "zeros"):
+        raise ValueError(f"Unsupported angle_init: {angle_init}")
+
+    delta_rep0: NDArray[np.float64] | None = None
+    coeffs0: NDArray[np.float64] | None = None
+    fourier_H = int(args.fourier_H)
+    if angle_model in ("delta-rep-x0", "fourier-x0") and geom.N % 2 != 0:
+        raise ValueError("N must be even for delta/fourier angle models")
+
+    if angle_model == "legacy-alpha":
+        if angle_init == "zeros":
+            alphas0 = np.zeros_like(alphas0)
+        angle_dim = int(alphas0.size)
+        x0 = pack_x(alphas0, r_bases0, param_map)
+    elif angle_model == "delta-rep-x0":
+        mirror = build_mirror_x0(int(geom.N))
+        n_rep = int(mirror.rep_idx.size)
+        if angle_init == "from-run":
+            raw = run.results.extras.get("delta_rep_opt")
+            if raw is None:
+                raw = run.results.extras.get("delta_rep")
+            if raw is not None:
+                delta_rep0 = np.asarray(raw, dtype=np.float64)
+        if delta_rep0 is None:
+            logger.warning("delta_rep not found; initializing delta_rep to zeros")
+            delta_rep0 = np.zeros((geom.K, n_rep), dtype=np.float64)
+        if delta_rep0.shape != (geom.K, n_rep):
+            raise ValueError("delta_rep shape does not match K and mirror rep count")
+        angle_dim = int(delta_rep0.size)
+        r_vars0 = _pack_r_vars(r_bases0, param_map)
+        x0 = cast(Float1DArray, np.concatenate([delta_rep0.ravel(), r_vars0]))
+    else:
+        if fourier_H < 0:
+            raise ValueError("fourier_H must be >= 0")
+        if angle_init == "from-run":
+            raw = run.results.extras.get("fourier_coeffs_opt")
+            if raw is None:
+                raw = run.results.extras.get("fourier_coeffs")
+            if raw is not None:
+                coeffs0 = np.asarray(raw, dtype=np.float64)
+                if coeffs0.shape[1] % 2 == 0:
+                    inferred_H = int(coeffs0.shape[1] // 2)
+                    if inferred_H != fourier_H:
+                        logger.warning("fourier_H mismatch; using H=%d from coeffs", inferred_H)
+                        fourier_H = inferred_H
+        if coeffs0 is None:
+            logger.warning("fourier_coeffs not found; initializing coeffs to zeros")
+            coeffs0 = np.zeros((geom.K, 2 * fourier_H), dtype=np.float64)
+        if coeffs0.shape != (geom.K, 2 * fourier_H):
+            raise ValueError("fourier_coeffs shape does not match K and H")
+        angle_dim = int(coeffs0.size)
+        r_vars0 = _pack_r_vars(r_bases0, param_map)
+        x0 = cast(Float1DArray, np.concatenate([coeffs0.ravel(), r_vars0]))
 
     roi_mode = cast(RoiMode, args.roi_mode)
     logger.info(
@@ -418,8 +532,6 @@ def run_optimize(args: argparse.Namespace) -> int:
         )
     pts = downsampled.pts
 
-    x0 = cast(Float1DArray, pack_x(alphas0, r_bases0, param_map))
-
     r_bound_mode = cast(BoundMode, args.r_bound_mode)
     r_lower_delta_mm = float(args.r_lower_delta_mm)
     if args.min_radius_drop_mm is not None and r_bound_mode == "relative":
@@ -428,6 +540,7 @@ def run_optimize(args: argparse.Namespace) -> int:
     bounds = build_bounds(
         param_map,
         r_bases0,
+        n_angle=angle_dim,
         mode=r_bound_mode,
         dl_mm=r_lower_delta_mm,
         du_mm=float(args.r_upper_delta_mm),
@@ -436,7 +549,6 @@ def run_optimize(args: argparse.Namespace) -> int:
         no_upper=bool(args.r_no_upper),
     )
 
-    angle_dim = geom.R * geom.K
     radius_dim_free = int(param_map.free_r_idx.size)
     logger.info(
         "x_dim total = %d, angle_dim = %d, radius_dim_free = %d, fixed_radius_layers = %s",
@@ -457,18 +569,15 @@ def run_optimize(args: argparse.Namespace) -> int:
     if radius_dim_free > 0:
         sample_count = min(3, radius_dim_free)
         samples: list[str] = []
-        n_alpha = int(param_map.free_alpha_idx.size)
         for idx in range(sample_count):
             k_low = int(param_map.free_r_idx[idx])
             r0_mm = float(r_bases0[k_low] * 1e3)
-            lb, ub = bounds[n_alpha + idx]
+            lb, ub = bounds[angle_dim + idx]
             lb_text = "None" if lb is None else f"{lb * 1e3:.3f}mm"
             ub_text = "None" if ub is None else f"{ub * 1e3:.3f}mm"
             samples.append(f"k={k_low} r0={r0_mm:.3f}mm lb={lb_text} ub={ub_text}")
         logger.info("radius bounds sample: %s", "; ".join(samples))
 
-    sigma_alpha = np.deg2rad(args.sigma_alpha_deg)
-    sigma_r = args.sigma_r_mm * 1e-3
     field_scale = float(args.field_scale)
     if field_scale <= 0.0:
         raise ValueError("field_scale must be positive")
@@ -476,36 +585,100 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     first_eval_done = False
     state: dict[str, float] = {}
+    n_rep = delta_rep0.shape[1] if delta_rep0 is not None else 0
+
+    logger.info(
+        "angle_model=%s grad_backend=%s angle_init=%s", angle_model, grad_backend, angle_init
+    )
 
     def fun_grad_solver(x: Float1DArray) -> tuple[float, Float1DArray, dict[str, Any]]:
         nonlocal first_eval_done
         if not first_eval_done:
             logger.info("first eval start")
         t_eval = perf_counter()
-        Jgn, gx, B0, Jn, gn2 = fun_grad_gradnorm_fixed(
-            x,
-            geom,
-            pts,
-            sigma_alpha,
-            sigma_r,
-            args.rho_gn,
-            args.eps_hvp,
-            param_map,
-            alphas0,
-            r_bases0,
-            factor,
-        )
+
+        if angle_model == "legacy-alpha":
+            if grad_backend == "analytic":
+                alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
+                J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed(
+                    alphas, r_bases, geom, pts, factor=factor
+                )
+                gx = pack_grad(gA_y, gRb_y, param_map)
+                J_total = float(J_data)
+            else:
+                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
+                J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
+                    alphas, r_bases, geom, pts, factor=factor
+                )
+                gx = pack_grad(gA_y, gRb_y, param_map)
+                J_total = float(J_data)
+        elif angle_model == "delta-rep-x0":
+            from halbach.autodiff.jax_objective_delta_phi import (
+                objective_with_grads_delta_phi_x0_jax,
+            )
+
+            delta_flat = np.asarray(x[:angle_dim], dtype=np.float64)
+            r_vars = np.asarray(x[angle_dim:], dtype=np.float64)
+            delta_rep = delta_flat.reshape((geom.K, n_rep))
+            r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
+            J_total, g_delta, g_r_bases, B0n = objective_with_grads_delta_phi_x0_jax(
+                delta_rep,
+                r_bases,
+                geom,
+                pts,
+                lambda0=float(args.lambda0),
+                lambda_theta=float(args.lambda_theta),
+                lambda_z=float(args.lambda_z),
+                factor=factor,
+                phi0=phi0,
+                m0=m0,
+            )
+            gx = cast(
+                Float1DArray,
+                np.concatenate([g_delta.ravel(), _pack_r_grad(g_r_bases, param_map)]),
+            )
+            J_data = float(J_total)
+        else:
+            from halbach.autodiff.jax_objective_delta_phi_fourier import (
+                objective_with_grads_delta_phi_fourier_x0_jax,
+            )
+
+            coeffs_flat = np.asarray(x[:angle_dim], dtype=np.float64)
+            r_vars = np.asarray(x[angle_dim:], dtype=np.float64)
+            coeffs = coeffs_flat.reshape((geom.K, 2 * fourier_H))
+            r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
+            J_total, g_coeffs, g_r_bases, B0n = objective_with_grads_delta_phi_fourier_x0_jax(
+                coeffs,
+                r_bases,
+                geom,
+                pts,
+                H=fourier_H,
+                lambda0=float(args.lambda0),
+                lambda_theta=float(args.lambda_theta),
+                lambda_z=float(args.lambda_z),
+                factor=factor,
+                phi0=phi0,
+                m0=m0,
+            )
+            gx = cast(
+                Float1DArray,
+                np.concatenate([g_coeffs.ravel(), _pack_r_grad(g_r_bases, param_map)]),
+            )
+            J_data = float(J_total)
+
         dt_eval = perf_counter() - t_eval
         if not first_eval_done:
             logger.info("first eval done in %.3fs", dt_eval)
             first_eval_done = True
-        state["J"] = float(Jn)
+        state["J"] = float(J_data)
         state["gnorm"] = float(np.linalg.norm(gx))
-        B0_T = float(B0) / field_scale
+        B0_T = float(B0n) / field_scale
         state["B0"] = B0_T
         state["t_last_eval"] = float(dt_eval)
-        extras: dict[str, Any] = {"J": float(Jn), "B0": B0_T, "gn2": float(gn2)}
-        return float(Jgn), gx, extras
+        extras: dict[str, Any] = {"J": float(J_data), "B0": B0_T}
+        return float(J_total), gx, extras
 
     log_every = max(1, int(args.log_every))
     if log_every != args.log_every:
@@ -541,11 +714,11 @@ def run_optimize(args: argparse.Namespace) -> int:
             logger.info(line)
 
     if args.dry_run:
-        Jgn, g0, extras_eval = fun_grad_solver(x0)
+        Jn, g0, extras_eval = fun_grad_solver(x0)
         gnorm = float(np.linalg.norm(g0))
         logger.info(
-            "dry-run: Jgn=%.6e J=%.6e |B0|=%.3f mT gnorm=%.3e",
-            Jgn,
+            "dry-run: J=%.6e |B0|=%.3f mT gnorm=%.3e",
+            Jn,
             float(extras_eval.get("J", np.nan)),
             float(extras_eval.get("B0", np.nan)) * 1e3,
             gnorm,
@@ -564,12 +737,6 @@ def run_optimize(args: argparse.Namespace) -> int:
                 roi_seed=int(args.roi_seed),
                 roi_half_x=bool(args.roi_half_x),
             ),
-            robust=dict(
-                rho_gn=float(args.rho_gn),
-                eps_hvp=float(args.eps_hvp),
-                sigma_alpha_deg=float(args.sigma_alpha_deg),
-                sigma_r_mm=float(args.sigma_r_mm),
-            ),
             scaling=dict(
                 field_scale=float(field_scale),
             ),
@@ -583,6 +750,15 @@ def run_optimize(args: argparse.Namespace) -> int:
                 r_no_upper=bool(args.r_no_upper),
                 r_min_mm=float(args.r_min_mm),
                 r_max_mm=float(args.r_max_mm),
+            ),
+            angle_model=str(angle_model),
+            grad_backend=str(grad_backend),
+            angle_init=str(angle_init),
+            fourier_H=int(fourier_H),
+            regularization=dict(
+                lambda0=float(args.lambda0),
+                lambda_theta=float(args.lambda_theta),
+                lambda_z=float(args.lambda_z),
             ),
             fix_center_radius_layers=int(args.fix_center_radius_layers),
             fixed_k_radius=param_map.fixed_k_radius.tolist(),
@@ -608,29 +784,70 @@ def run_optimize(args: argparse.Namespace) -> int:
         res.njev,
     )
 
-    al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
+    delta_rep_opt: NDArray[np.float64] | None = None
+    coeffs_opt: NDArray[np.float64] | None = None
+    if angle_model == "legacy-alpha":
+        al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
+        if grad_backend == "jax":
+            from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
 
-    Jgn_f, _, B0_f, Jn_f, gn2_f = fun_grad_gradnorm_fixed(
-        res.x,
-        geom,
-        pts,
-        sigma_alpha,
-        sigma_r,
-        args.rho_gn,
-        args.eps_hvp,
-        param_map,
-        alphas0,
-        r_bases0,
-        factor,
-    )
+            Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
+                al_opt, rb_opt, geom, pts, factor=factor
+            )
+        else:
+            Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
+                al_opt, rb_opt, geom, pts, factor=factor
+            )
+    elif angle_model == "delta-rep-x0":
+        delta_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
+        r_vars = np.asarray(res.x[angle_dim:], dtype=np.float64)
+        delta_rep_opt = delta_flat.reshape((geom.K, n_rep))
+        rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
+        al_opt = np.zeros((geom.R, geom.K), dtype=np.float64)
+        from halbach.autodiff.jax_objective_delta_phi import objective_with_grads_delta_phi_x0_jax
+
+        Jn_f, _gD, _gR, B0_f = objective_with_grads_delta_phi_x0_jax(
+            delta_rep_opt,
+            rb_opt,
+            geom,
+            pts,
+            lambda0=float(args.lambda0),
+            lambda_theta=float(args.lambda_theta),
+            lambda_z=float(args.lambda_z),
+            factor=factor,
+            phi0=phi0,
+            m0=m0,
+        )
+    else:
+        coeffs_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
+        r_vars = np.asarray(res.x[angle_dim:], dtype=np.float64)
+        coeffs_opt = coeffs_flat.reshape((geom.K, 2 * fourier_H))
+        rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
+        al_opt = np.zeros((geom.R, geom.K), dtype=np.float64)
+        from halbach.autodiff.jax_objective_delta_phi_fourier import (
+            objective_with_grads_delta_phi_fourier_x0_jax,
+        )
+
+        Jn_f, _gC, _gR, B0_f = objective_with_grads_delta_phi_fourier_x0_jax(
+            coeffs_opt,
+            rb_opt,
+            geom,
+            pts,
+            H=fourier_H,
+            lambda0=float(args.lambda0),
+            lambda_theta=float(args.lambda_theta),
+            lambda_z=float(args.lambda_z),
+            factor=factor,
+            phi0=phi0,
+            m0=m0,
+        )
+
     B0_f_T = B0_f / field_scale
     logger.info(
-        "[done] success=%s iters=%d Jgn=%.6e J=%.6e gn2=%.3e |B0|=%.3f mT",
+        "[done] success=%s iters=%d J=%.6e |B0|=%.3f mT",
         res.success,
         res.nit,
-        Jgn_f,
         Jn_f,
-        gn2_f,
         B0_f_T * 1e3,
     )
 
@@ -638,13 +855,11 @@ def run_optimize(args: argparse.Namespace) -> int:
     J_hist = np.array(res.trace.f, dtype=float)
     Jn_hist = np.array([float(e.get("J", np.nan)) for e in extras], dtype=float)
     B0_hist = np.array([float(e.get("B0", np.nan)) for e in extras], dtype=float)
-    gn2_hist = np.array([float(e.get("gn2", np.nan)) for e in extras], dtype=float)
 
     logger.info("save start")
     t_save = perf_counter()
     results_path = out_dir / "results.npz"
-    np.savez_compressed(
-        results_path,
+    save_payload: dict[str, Any] = dict(
         alphas_opt=al_opt,
         r_bases_opt=rb_opt,
         theta=geom.theta,
@@ -656,8 +871,12 @@ def run_optimize(args: argparse.Namespace) -> int:
         J_hist=J_hist,
         Jn_hist=Jn_hist,
         B0_hist=B0_hist,
-        gn2_hist=gn2_hist,
     )
+    if delta_rep_opt is not None:
+        save_payload["delta_rep_opt"] = delta_rep_opt
+    if coeffs_opt is not None:
+        save_payload["fourier_coeffs_opt"] = coeffs_opt
+    np.savez_compressed(results_path, **save_payload)
 
     meta: dict[str, Any] = dict(
         input_run=str(in_path),
@@ -673,12 +892,6 @@ def run_optimize(args: argparse.Namespace) -> int:
             roi_seed=int(args.roi_seed),
             roi_half_x=bool(args.roi_half_x),
         ),
-        robust=dict(
-            rho_gn=float(args.rho_gn),
-            eps_hvp=float(args.eps_hvp),
-            sigma_alpha_deg=float(args.sigma_alpha_deg),
-            sigma_r_mm=float(args.sigma_r_mm),
-        ),
         scaling=dict(
             field_scale=float(field_scale),
         ),
@@ -692,6 +905,15 @@ def run_optimize(args: argparse.Namespace) -> int:
             r_no_upper=bool(args.r_no_upper),
             r_min_mm=float(args.r_min_mm),
             r_max_mm=float(args.r_max_mm),
+        ),
+        angle_model=str(angle_model),
+        grad_backend=str(grad_backend),
+        angle_init=str(angle_init),
+        fourier_H=int(fourier_H),
+        regularization=dict(
+            lambda0=float(args.lambda0),
+            lambda_theta=float(args.lambda_theta),
+            lambda_z=float(args.lambda_z),
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
         fixed_k_radius=param_map.fixed_k_radius.tolist(),
@@ -710,60 +932,6 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     _write_trace(out_dir, res)
     logger.info("save done in %.3fs", perf_counter() - t_save)
-
-    if args.run_mc:
-        sigma_alpha = np.deg2rad(args.sigma_alpha_deg)
-        sigma_r = args.sigma_r_mm * 1e-3
-        J_nom_mc = _mc_eval(
-            run.results.alphas,
-            run.results.r_bases,
-            pts,
-            factor,
-            sigma_alpha,
-            sigma_r,
-            args.mc_samples,
-            0,
-            geom.theta,
-            geom.sin2,
-            geom.cth,
-            geom.sth,
-            geom.z_layers,
-            geom.ring_offsets,
-        )
-        J_opt_mc = _mc_eval(
-            al_opt,
-            rb_opt,
-            pts,
-            factor,
-            sigma_alpha,
-            sigma_r,
-            args.mc_samples,
-            1,
-            geom.theta,
-            geom.sin2,
-            geom.cth,
-            geom.sth,
-            geom.z_layers,
-            geom.ring_offsets,
-        )
-        summary = dict(
-            settings=dict(
-                roi_r=float(args.roi_r),
-                roi_step=float(args.roi_step),
-                sigma_alpha_deg=float(args.sigma_alpha_deg),
-                sigma_r_mm=float(args.sigma_r_mm),
-                rho_gn=float(args.rho_gn),
-                eps_hvp=float(args.eps_hvp),
-                maxiter=int(args.maxiter),
-                gtol=float(args.gtol),
-                mc_samples=int(args.mc_samples),
-            ),
-            nominal=_summarize(J_nom_mc, "nominal"),
-            optimized=_summarize(J_opt_mc, "optimized"),
-        )
-        mc_path = out_dir / "mc_summary.json"
-        with mc_path.open("w", encoding="utf-8") as handle:
-            json.dump(summary, handle, indent=2)
 
     return 0
 

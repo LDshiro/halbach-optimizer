@@ -1,6 +1,8 @@
 import numpy as np
 
-from robust_opt_halbach_gradnorm_minimal import FACTOR, build_roi_points, m0, objective_only, phi0
+from halbach.constants import FACTOR, m0, phi0
+from halbach.geom import build_roi_points
+from halbach.physics import objective_only
 
 
 def test_objective_only_smoke_runs_fast() -> None:
