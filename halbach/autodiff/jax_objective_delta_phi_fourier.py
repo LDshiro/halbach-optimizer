@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -11,7 +11,7 @@ from halbach.constants import FACTOR, m0, phi0
 from halbach.symmetry_fourier import build_fourier_x0_features
 from halbach.types import Geometry
 
-jax.config.update("jax_enable_x64", True)
+cast(Any, jax.config).update("jax_enable_x64", True)
 
 EPS = 1e-30
 

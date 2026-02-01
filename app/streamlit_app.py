@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 import time
@@ -75,6 +76,10 @@ def _resolve_results_path(path: Path) -> Path:
 def _results_mtime(path: Path) -> float:
     results_path = _resolve_results_path(path)
     return float(results_path.stat().st_mtime)
+
+
+def _jax_available() -> bool:
+    return importlib.util.find_spec("jax") is not None
 
 
 def _apply_pending_selection_updates() -> None:
@@ -572,7 +577,84 @@ def main() -> None:
                 format="%.4f",
             )
         )
-        rho_gn = float(st.number_input("rho_gn", min_value=0.0, max_value=1.0, value=1e-4))
+        angle_model = st.selectbox(
+            "Angle model",
+            ["legacy-alpha", "delta-rep-x0", "fourier-x0"],
+            index=0,
+            key="angle_model",
+        )
+        angle_init = st.selectbox(
+            "Angle init",
+            ["from-run", "zeros"],
+            index=0,
+            key="angle_init",
+        )
+        jax_available = _jax_available()
+        if angle_model == "legacy-alpha":
+            grad_backend = st.selectbox(
+                "Grad backend",
+                ["analytic", "jax"],
+                index=0,
+                key="grad_backend",
+            )
+            fourier_H = 4
+            lambda0 = 0.0
+            lambda_theta = 0.0
+            lambda_z = 0.0
+        else:
+            grad_backend = "jax"
+            st.caption("Grad backend is fixed to jax for delta/fourier models.")
+            if angle_model == "fourier-x0":
+                fourier_H = int(
+                    st.number_input(
+                        "Fourier H",
+                        min_value=0,
+                        max_value=64,
+                        value=4,
+                        step=1,
+                        key="fourier_H",
+                    )
+                )
+            else:
+                fourier_H = 4
+            lambda0 = float(
+                st.number_input(
+                    "lambda0",
+                    min_value=0.0,
+                    max_value=1e3,
+                    value=0.0,
+                    step=0.1,
+                    key="lambda0",
+                )
+            )
+            lambda_theta = float(
+                st.number_input(
+                    "lambda_theta",
+                    min_value=0.0,
+                    max_value=1e3,
+                    value=0.0,
+                    step=0.1,
+                    key="lambda_theta",
+                )
+            )
+            lambda_z = float(
+                st.number_input(
+                    "lambda_z",
+                    min_value=0.0,
+                    max_value=1e3,
+                    value=0.0,
+                    step=0.1,
+                    key="lambda_z",
+                )
+            )
+        jax_issue: str | None = None
+        if (angle_model != "legacy-alpha" or grad_backend == "jax") and not jax_available:
+            jax_issue = (
+                "JAX is required for the selected angle model/backend. "
+                "Install `jax` and `jaxlib`, or switch to legacy-alpha + analytic."
+            )
+            st.error(jax_issue)
+        can_start = jax_issue is None
         fix_center_radius_layers = int(
             st.selectbox(
                 "Fixed center radius layers (z≈0)",
@@ -647,24 +729,6 @@ def main() -> None:
             r_no_upper = False
             r_min_mm = 0.0
             r_max_mm = 1e9
-
-        with st.expander("Advanced (sigma / MC)", expanded=False):
-            sigma_alpha_deg = float(
-                st.number_input(
-                    "sigma_alpha_deg",
-                    min_value=0.0,
-                    max_value=5.0,
-                    value=0.5,
-                    step=0.1,
-                )
-            )
-            sigma_r_mm = float(
-                st.number_input("sigma_r_mm", min_value=0.0, max_value=5.0, value=0.2, step=0.1)
-            )
-            run_mc = st.checkbox("Run MC", value=False)
-            mc_samples = int(
-                st.number_input("MC samples", min_value=10, max_value=5000, value=600, step=50)
-            )
 
         tag = st.text_input("Output tag", value="opt")
         preview_dir = _default_out_dir(tag)
@@ -749,7 +813,9 @@ def main() -> None:
                         st.session_state["pending_init_select"] = rel_path
                         st.session_state["pending_init_path"] = ""
                     if gen_start_opt:
-                        if job_running:
+                        if not can_start:
+                            st.error(jax_issue or "JAX is required for this configuration.")
+                        elif job_running:
                             st.error("Optimization is already running.")
                         else:
                             opt_out_dir = _default_out_dir(f"{gen_tag}_opt")
@@ -761,7 +827,13 @@ def main() -> None:
                                     gtol=gtol,
                                     roi_r=roi_r_opt,
                                     roi_step=roi_step_opt,
-                                    rho_gn=rho_gn,
+                                    angle_model=angle_model,
+                                    grad_backend=grad_backend,
+                                    fourier_H=fourier_H,
+                                    lambda0=lambda0,
+                                    lambda_theta=lambda_theta,
+                                    lambda_z=lambda_z,
+                                    angle_init=angle_init,
                                     r_bound_mode=r_bound_mode,
                                     r_lower_delta_mm=r_lower_delta_mm,
                                     r_upper_delta_mm=r_upper_delta_mm,
@@ -769,10 +841,6 @@ def main() -> None:
                                     r_min_mm=r_min_mm,
                                     r_max_mm=r_max_mm,
                                     fix_center_radius_layers=fix_center_radius_layers,
-                                    sigma_alpha_deg=sigma_alpha_deg,
-                                    sigma_r_mm=sigma_r_mm,
-                                    run_mc=run_mc,
-                                    mc_samples=mc_samples,
                                     repo_root=ROOT,
                                 )
                                 st.session_state["opt_job"] = job
@@ -796,12 +864,14 @@ def main() -> None:
 
         start_cols = st.columns(2)
         with start_cols[0]:
-            start_clicked = st.button("Start")
+            start_clicked = st.button("Start", disabled=job_running or not can_start)
         with start_cols[1]:
             stop_clicked = st.button("Stop", disabled=not job_running)
 
         if start_clicked:
-            if job_running:
+            if not can_start:
+                st.error(jax_issue or "JAX is required for this configuration.")
+            elif job_running:
                 st.error("Optimization is already running.")
             elif not opt_in_path:
                 st.error("Input run path is empty.")
@@ -815,7 +885,13 @@ def main() -> None:
                         gtol=gtol,
                         roi_r=roi_r_opt,
                         roi_step=roi_step_opt,
-                        rho_gn=rho_gn,
+                        angle_model=angle_model,
+                        grad_backend=grad_backend,
+                        fourier_H=fourier_H,
+                        lambda0=lambda0,
+                        lambda_theta=lambda_theta,
+                        lambda_z=lambda_z,
+                        angle_init=angle_init,
                         r_bound_mode=r_bound_mode,
                         r_lower_delta_mm=r_lower_delta_mm,
                         r_upper_delta_mm=r_upper_delta_mm,
@@ -823,10 +899,6 @@ def main() -> None:
                         r_min_mm=r_min_mm,
                         r_max_mm=r_max_mm,
                         fix_center_radius_layers=fix_center_radius_layers,
-                        sigma_alpha_deg=sigma_alpha_deg,
-                        sigma_r_mm=sigma_r_mm,
-                        run_mc=run_mc,
-                        mc_samples=mc_samples,
                         repo_root=ROOT,
                     )
                     st.session_state["opt_job"] = job
@@ -860,7 +932,13 @@ def main() -> None:
                 gtol=gtol,
                 roi_r=roi_r_opt,
                 roi_step=roi_step_opt,
-                rho_gn=rho_gn,
+                angle_model=angle_model,
+                grad_backend=grad_backend,
+                fourier_H=fourier_H,
+                lambda0=lambda0,
+                lambda_theta=lambda_theta,
+                lambda_z=lambda_z,
+                angle_init=angle_init,
                 r_bound_mode=r_bound_mode,
                 r_lower_delta_mm=r_lower_delta_mm,
                 r_upper_delta_mm=r_upper_delta_mm,
@@ -868,10 +946,6 @@ def main() -> None:
                 r_min_mm=r_min_mm,
                 r_max_mm=r_max_mm,
                 fix_center_radius_layers=fix_center_radius_layers,
-                sigma_alpha_deg=sigma_alpha_deg,
-                sigma_r_mm=sigma_r_mm,
-                run_mc=run_mc,
-                mc_samples=mc_samples,
             )
             st.code(" ".join(cmd))
 

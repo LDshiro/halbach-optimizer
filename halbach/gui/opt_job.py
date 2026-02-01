@@ -27,7 +27,13 @@ def build_command(
     gtol: float,
     roi_r: float,
     roi_step: float,
-    rho_gn: float,
+    angle_model: str = "legacy-alpha",
+    grad_backend: str | None = None,
+    fourier_H: int = 4,
+    lambda0: float = 0.0,
+    lambda_theta: float = 0.0,
+    lambda_z: float = 0.0,
+    angle_init: str = "from-run",
     r_bound_mode: str = "relative",
     r_lower_delta_mm: float = 30.0,
     r_upper_delta_mm: float = 30.0,
@@ -35,10 +41,6 @@ def build_command(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
-    sigma_alpha_deg: float | None = None,
-    sigma_r_mm: float | None = None,
-    run_mc: bool = False,
-    mc_samples: int | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -57,8 +59,18 @@ def build_command(
         str(roi_r),
         "--roi-step",
         str(roi_step),
-        "--rho-gn",
-        str(rho_gn),
+        "--angle-model",
+        str(angle_model),
+        "--fourier-H",
+        str(fourier_H),
+        "--lambda0",
+        str(lambda0),
+        "--lambda-theta",
+        str(lambda_theta),
+        "--lambda-z",
+        str(lambda_z),
+        "--angle-init",
+        str(angle_init),
         "--r-bound-mode",
         str(r_bound_mode),
         "--r-lower-delta-mm",
@@ -74,14 +86,8 @@ def build_command(
     ]
     if r_no_upper:
         cmd.append("--r-no-upper")
-    if sigma_alpha_deg is not None:
-        cmd.extend(["--sigma-alpha-deg", str(sigma_alpha_deg)])
-    if sigma_r_mm is not None:
-        cmd.extend(["--sigma-r-mm", str(sigma_r_mm)])
-    if mc_samples is not None:
-        cmd.extend(["--mc-samples", str(mc_samples)])
-    if run_mc:
-        cmd.append("--run-mc")
+    if grad_backend is not None:
+        cmd.extend(["--grad-backend", str(grad_backend)])
     return cmd
 
 
@@ -173,7 +179,13 @@ def start_opt_job(
     gtol: float,
     roi_r: float,
     roi_step: float,
-    rho_gn: float,
+    angle_model: str = "legacy-alpha",
+    grad_backend: str | None = None,
+    fourier_H: int = 4,
+    lambda0: float = 0.0,
+    lambda_theta: float = 0.0,
+    lambda_z: float = 0.0,
+    angle_init: str = "from-run",
     r_bound_mode: str = "relative",
     r_lower_delta_mm: float = 30.0,
     r_upper_delta_mm: float = 30.0,
@@ -181,10 +193,6 @@ def start_opt_job(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
-    sigma_alpha_deg: float | None = None,
-    sigma_r_mm: float | None = None,
-    run_mc: bool = False,
-    mc_samples: int | None = None,
     repo_root: Path | None = None,
 ) -> OptJob:
     out_path = Path(out_dir)
@@ -197,7 +205,13 @@ def start_opt_job(
         gtol=gtol,
         roi_r=roi_r,
         roi_step=roi_step,
-        rho_gn=rho_gn,
+        angle_model=angle_model,
+        grad_backend=grad_backend,
+        fourier_H=fourier_H,
+        lambda0=lambda0,
+        lambda_theta=lambda_theta,
+        lambda_z=lambda_z,
+        angle_init=angle_init,
         r_bound_mode=r_bound_mode,
         r_lower_delta_mm=r_lower_delta_mm,
         r_upper_delta_mm=r_upper_delta_mm,
@@ -205,10 +219,6 @@ def start_opt_job(
         r_min_mm=r_min_mm,
         r_max_mm=r_max_mm,
         fix_center_radius_layers=fix_center_radius_layers,
-        sigma_alpha_deg=sigma_alpha_deg,
-        sigma_r_mm=sigma_r_mm,
-        run_mc=run_mc,
-        mc_samples=mc_samples,
     )
     cwd = repo_root or Path(__file__).resolve().parents[2]
     with log_path.open("w", encoding="utf-8") as log_handle:

@@ -62,17 +62,19 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
 
     calls = {"count": 0}
 
-    def fake_fun_grad(
-        *args: object, **kwargs: object
-    ) -> tuple[float, npt.NDArray[np.floating[Any]], float, float, float]:
-        x = args[0]
+    def fake_objective(
+        alphas: npt.NDArray[np.floating[Any]],
+        r_bases: npt.NDArray[np.floating[Any]],
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[float, npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]], float]:
         calls["count"] += 1
-        return 0.0, np.zeros_like(x), 1.0, 0.0, 0.0
+        return 0.0, np.zeros_like(alphas), np.zeros_like(r_bases), 1.0
 
     def fail_solve(*args: object, **kwargs: object) -> object:
         raise AssertionError("solve_lbfgsb should not be called in dry-run")
 
-    monkeypatch.setattr(opt, "fun_grad_gradnorm_fixed", fake_fun_grad)
+    monkeypatch.setattr(opt, "objective_with_grads_fixed", fake_objective)
     monkeypatch.setattr(opt, "solve_lbfgsb", fail_solve)
     monkeypatch.setattr(opt, "_git_hash", lambda *_args, **_kwargs: None)
 
@@ -90,11 +92,14 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         roi_seed=0,
         roi_half_x=False,
         roi_max_points=0,
-        rho_gn=0.0,
         field_scale=1e6,
-        sigma_alpha_deg=0.5,
-        sigma_r_mm=0.2,
-        eps_hvp=1e-6,
+        angle_model="legacy-alpha",
+        grad_backend="analytic",
+        fourier_H=4,
+        lambda0=0.0,
+        lambda_theta=0.0,
+        lambda_z=0.0,
+        angle_init="from-run",
         r_bound_mode="relative",
         r_lower_delta_mm=30.0,
         r_upper_delta_mm=30.0,
@@ -103,8 +108,6 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         r_max_mm=1e9,
         min_radius_drop_mm=None,
         fix_center_radius_layers=2,
-        mc_samples=10,
-        run_mc=False,
         log_level="INFO",
         debug_stacks_secs=0,
         dry_run=True,
@@ -141,6 +144,7 @@ def test_build_bounds_relative_and_fixed_layers() -> None:
     bounds = opt.build_bounds(
         param_map,
         r_bases0,
+        n_angle=R * K,
         mode="relative",
         dl_mm=10.0,
         du_mm=20.0,
@@ -159,6 +163,7 @@ def test_build_bounds_relative_and_fixed_layers() -> None:
     bounds_fix = opt.build_bounds(
         param_map_fix,
         r_bases0,
+        n_angle=R * K,
         mode="relative",
         dl_mm=10.0,
         du_mm=20.0,
