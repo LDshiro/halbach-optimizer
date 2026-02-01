@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 import time
@@ -78,6 +79,33 @@ def _results_mtime(path: Path) -> float:
     return float(results_path.stat().st_mtime)
 
 
+def _meta_mtime(path: Path) -> float:
+    if path.is_dir():
+        primary = path / "meta.json"
+        if primary.is_file():
+            return float(primary.stat().st_mtime)
+        matches = sorted(path.glob("*meta*.json"))
+        if len(matches) == 1:
+            return float(matches[0].stat().st_mtime)
+        return 0.0
+    if path.is_file() and path.suffix == ".npz":
+        candidate = path.with_name("meta.json")
+        if candidate.is_file():
+            return float(candidate.stat().st_mtime)
+        matches = sorted(path.parent.glob("*meta*.json"))
+        if len(matches) == 1:
+            return float(matches[0].stat().st_mtime)
+    return 0.0
+
+
+def _magnetization_cache_key(meta: dict[str, object]) -> str:
+    magnetization = meta.get("magnetization", {})
+    try:
+        return json.dumps(magnetization, sort_keys=True, default=str)
+    except Exception:
+        return ""
+
+
 def _jax_available() -> bool:
     return importlib.util.find_spec("jax") is not None
 
@@ -98,59 +126,107 @@ def _apply_pending_selection_updates() -> None:
 
 
 @st.cache_data(show_spinner=False)
-def _cached_load_run(path_text: str, mtime: float) -> RunBundle:
+def _cached_load_run(path_text: str, mtime: float, _meta_mtime: float) -> RunBundle:
     from halbach.run_io import load_run
 
     return load_run(Path(path_text))
 
 
 @st.cache_data(show_spinner=False)
-def _cached_error_map(path_text: str, mtime: float, roi_r: float, step: float) -> ErrorMap2D:
+def _cached_error_map(
+    path_text: str, mtime: float, _meta_key: str, roi_r: float, step: float
+) -> tuple[ErrorMap2D, dict[str, object]]:
     from halbach.run_io import load_run
-    from halbach.viz2d import compute_error_map_ppm_plane
+    from halbach.viz2d import compute_error_map_ppm_plane_with_debug
 
     run = load_run(Path(path_text))
-    return compute_error_map_ppm_plane(run, plane="xy", coord0=0.0, roi_r=roi_r, step=step)
+    return compute_error_map_ppm_plane_with_debug(
+        run, plane="xy", coord0=0.0, roi_r=roi_r, step=step
+    )
 
 
 @st.cache_data(show_spinner=False)
-def _cached_b0(path_text: str, mtime: float) -> float:
+def _cached_b0(path_text: str, mtime: float, _meta_key: str) -> float:
+    from halbach.angles_runtime import phi_rkn_from_run
     from halbach.constants import FACTOR, m0, phi0
-    from halbach.physics import compute_B_and_B0
+    from halbach.magnetization_runtime import (
+        compute_b_and_b0_from_m_flat,
+        compute_m_flat_from_run,
+        get_magnetization_config_from_meta,
+    )
+    from halbach.physics import compute_B_and_B0, compute_B_and_B0_phi_rkn
     from halbach.run_io import load_run
 
     run = load_run(Path(path_text))
     pts = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
-    _, _, _, B0x, B0y, B0z = compute_B_and_B0(
-        run.results.alphas,
-        run.results.r_bases,
-        run.geometry.theta,
-        run.geometry.sin2,
-        run.geometry.cth,
-        run.geometry.sth,
-        run.geometry.z_layers,
-        run.geometry.ring_offsets,
-        pts,
-        FACTOR,
-        phi0,
-        m0,
-    )
+    model_effective, _sc_cfg = get_magnetization_config_from_meta(run.meta)
+    if model_effective == "self-consistent-easy-axis":
+        phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+        r_bases = np.asarray(run.results.r_bases, dtype=np.float64)
+        rho = r_bases[None, :] + np.asarray(run.geometry.ring_offsets, dtype=np.float64)[:, None]
+        px = rho[:, :, None] * np.asarray(run.geometry.cth, dtype=np.float64)[None, None, :]
+        py = rho[:, :, None] * np.asarray(run.geometry.sth, dtype=np.float64)[None, None, :]
+        pz = np.broadcast_to(
+            np.asarray(run.geometry.z_layers, dtype=np.float64)[None, :, None], px.shape
+        )
+        r0_rkn = np.stack([px, py, pz], axis=-1)
+        m_flat, _debug = compute_m_flat_from_run(run.run_dir, run.geometry, phi_rkn, r0_rkn)
+        r0_flat = r0_rkn.reshape(-1, 3)
+        _, _, _, B0x, B0y, B0z = compute_b_and_b0_from_m_flat(m_flat, r0_flat, pts, factor=FACTOR)
+    else:
+        if run.meta.get("angle_model", "legacy-alpha") == "legacy-alpha":
+            _, _, _, B0x, B0y, B0z = compute_B_and_B0(
+                run.results.alphas,
+                run.results.r_bases,
+                run.geometry.theta,
+                run.geometry.sin2,
+                run.geometry.cth,
+                run.geometry.sth,
+                run.geometry.z_layers,
+                run.geometry.ring_offsets,
+                pts,
+                FACTOR,
+                phi0,
+                m0,
+            )
+        else:
+            phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+            _, _, _, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(
+                phi_rkn,
+                run.results.r_bases,
+                run.geometry.cth,
+                run.geometry.sth,
+                run.geometry.z_layers,
+                run.geometry.ring_offsets,
+                pts,
+                FACTOR,
+                m0,
+            )
     return float(np.sqrt(B0x * B0x + B0y * B0y + B0z * B0z))
 
 
-def _try_load(path_text: str) -> tuple[RunBundle | None, float | None, str | None]:
+def _try_load(
+    path_text: str,
+) -> tuple[RunBundle | None, float | None, float | None, str | None]:
     if not path_text:
-        return None, None, None
+        return None, None, None, None
     try:
         mtime = _results_mtime(Path(path_text))
-        run = _cached_load_run(path_text, mtime)
-        return run, mtime, None
+        meta_mtime = _meta_mtime(Path(path_text))
+        run = _cached_load_run(path_text, mtime, meta_mtime)
+        return run, mtime, meta_mtime, None
     except Exception as exc:
-        return None, None, str(exc)
+        return None, None, None, str(exc)
 
 
 def _ppm_stats(m: ErrorMap2D) -> tuple[float, float]:
     return float(np.nanmean(m.ppm)), float(np.nanmax(np.abs(m.ppm)))
+
+
+def _fmt_num(value: object, fmt: str = ".4f") -> str:
+    if isinstance(value, int | float | np.floating):
+        return f"{float(value):{fmt}}"
+    return "n/a"
 
 
 def _sample_colorscale(name: str, levels: int) -> list[tuple[float, str]]:
@@ -329,8 +405,8 @@ def main() -> None:
     init_path = _resolve_path(init_select, init_path_text)
     opt_path = _resolve_path(opt_select, opt_path_text)
 
-    init_run, init_mtime, init_err = _try_load(init_path)
-    opt_run, opt_mtime, opt_err = _try_load(opt_path)
+    init_run, init_mtime, _init_meta_mtime, init_err = _try_load(init_path)
+    opt_run, opt_mtime, _opt_meta_mtime, opt_err = _try_load(opt_path)
 
     if init_err:
         st.error(f"Initial run load error: {init_err}")
@@ -339,14 +415,18 @@ def main() -> None:
 
     init_map: ErrorMap2D | None = None
     opt_map: ErrorMap2D | None = None
+    init_debug: dict[str, object] | None = None
+    opt_debug: dict[str, object] | None = None
     if init_run is not None and init_mtime is not None:
         try:
-            init_map = _cached_error_map(init_path, init_mtime, roi_r, step)
+            init_key = _magnetization_cache_key(init_run.meta)
+            init_map, init_debug = _cached_error_map(init_path, init_mtime, init_key, roi_r, step)
         except Exception as exc:
             st.error(f"Initial 2D map error: {exc}")
     if opt_run is not None and opt_mtime is not None:
         try:
-            opt_map = _cached_error_map(opt_path, opt_mtime, roi_r, step)
+            opt_key = _magnetization_cache_key(opt_run.meta)
+            opt_map, opt_debug = _cached_error_map(opt_path, opt_mtime, opt_key, roi_r, step)
         except Exception as exc:
             st.error(f"Optimized 2D map error: {exc}")
 
@@ -362,14 +442,20 @@ def main() -> None:
         st.subheader("Runs")
         cols = st.columns(2)
 
-        def render_summary(run: RunBundle | None, m: ErrorMap2D | None, label: str) -> None:
+        def render_summary(
+            run: RunBundle | None,
+            m: ErrorMap2D | None,
+            label: str,
+            debug: dict[str, object] | None,
+        ) -> None:
             if run is None:
                 st.info(f"{label} run is not loaded.")
                 return
             b0 = None
             try:
                 mtime = _results_mtime(run.results_path)
-                b0 = _cached_b0(str(run.results_path), mtime)
+                meta_key = _magnetization_cache_key(run.meta)
+                b0 = _cached_b0(str(run.results_path), mtime, meta_key)
             except Exception:
                 b0 = None
             st.markdown(f"**{label} name**: {run.name}")
@@ -387,11 +473,30 @@ def main() -> None:
                 ppm_mean, ppm_maxabs = _ppm_stats(m)
                 st.write(f"ppm mean: {ppm_mean:.2f}")
                 st.write(f"ppm max|.|: {ppm_maxabs:.2f}")
+            if debug is not None and debug.get("model_effective") == "self-consistent-easy-axis":
+                st.markdown("**Self-consistent diagnostics**")
+                st.write(
+                    f"near_kernel: {debug.get('sc_near_kernel')} "
+                    f"subdip_n: {debug.get('sc_subdip_n')} "
+                    f"near_window: {debug.get('sc_near_window')}"
+                )
+                st.write(
+                    f"iters: {debug.get('sc_iters')} omega: {debug.get('sc_omega')} "
+                    f"chi: {debug.get('sc_chi')} Nd: {debug.get('sc_Nd')}"
+                )
+                st.write(
+                    f"p stats (min/max/mean/std/rel_std): "
+                    f"{_fmt_num(debug.get('sc_p_min'))} / "
+                    f"{_fmt_num(debug.get('sc_p_max'))} / "
+                    f"{_fmt_num(debug.get('sc_p_mean'))} / "
+                    f"{_fmt_num(debug.get('sc_p_std'))} / "
+                    f"{_fmt_num(debug.get('sc_p_rel_std'))}"
+                )
 
         with cols[0]:
-            render_summary(init_run, init_map, "Initial")
+            render_summary(init_run, init_map, "Initial", init_debug)
         with cols[1]:
-            render_summary(opt_run, opt_map, "Optimized")
+            render_summary(opt_run, opt_map, "Optimized", opt_debug)
 
         if init_run is not None and opt_run is not None:
             st.subheader("Delta (optimized - initial)")

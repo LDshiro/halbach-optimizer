@@ -9,6 +9,11 @@ from numpy.typing import NDArray
 
 from halbach.angles_runtime import angle_model_from_run, phi_rkn_from_run
 from halbach.constants import FACTOR, m0, phi0
+from halbach.magnetization_runtime import (
+    compute_b_and_b0_from_m_flat,
+    compute_m_flat_from_run,
+    get_magnetization_config_from_meta,
+)
 from halbach.physics import compute_B_and_B0, compute_B_and_B0_phi_rkn
 from halbach.run_types import RunBundle
 from halbach.types import FloatArray
@@ -60,48 +65,71 @@ def _build_plane_points(
     return mask, np.asarray(pts, dtype=np.float64)
 
 
-def compute_error_map_ppm_plane(
+def _build_r0_rkn(run: RunBundle) -> NDArray[np.float64]:
+    geom = run.geometry
+    r_bases = np.asarray(run.results.r_bases, dtype=np.float64)
+    rho = r_bases[None, :] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None]
+    px = rho[:, :, None] * np.asarray(geom.cth, dtype=np.float64)[None, None, :]
+    py = rho[:, :, None] * np.asarray(geom.sth, dtype=np.float64)[None, None, :]
+    pz = np.broadcast_to(np.asarray(geom.z_layers, dtype=np.float64)[None, :, None], px.shape)
+    return np.stack([px, py, pz], axis=-1)
+
+
+def _compute_error_map_impl(
     run: RunBundle,
     *,
     plane: Plane = "xy",
     coord0: float = 0.0,
     roi_r: float = 0.14,
     step: float = 0.001,
-) -> ErrorMap2D:
+) -> tuple[ErrorMap2D, dict[str, object]]:
     xs = _axis_grid(roi_r, step)
     ys = _axis_grid(roi_r, step)
 
     mask, pts = _build_plane_points(xs, ys, plane, coord0, roi_r)
 
-    model = angle_model_from_run(run)
-    if model == "legacy-alpha":
-        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
-            run.results.alphas,
-            run.results.r_bases,
-            run.geometry.theta,
-            run.geometry.sin2,
-            run.geometry.cth,
-            run.geometry.sth,
-            run.geometry.z_layers,
-            run.geometry.ring_offsets,
-            pts,
-            FACTOR,
-            phi0,
-            m0,
-        )
-    else:
+    model_effective, _sc_cfg = get_magnetization_config_from_meta(run.meta)
+    debug: dict[str, object] = {"model_effective": model_effective}
+
+    if model_effective == "self-consistent-easy-axis":
         phi_rkn = phi_rkn_from_run(run, phi0=phi0)
-        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(
-            phi_rkn,
-            run.results.r_bases,
-            run.geometry.cth,
-            run.geometry.sth,
-            run.geometry.z_layers,
-            run.geometry.ring_offsets,
-            pts,
-            FACTOR,
-            m0,
+        r0_rkn = _build_r0_rkn(run)
+        m_flat, sc_debug = compute_m_flat_from_run(run.run_dir, run.geometry, phi_rkn, r0_rkn)
+        r0_flat = r0_rkn.reshape(-1, 3)
+        Bx, By, Bz, B0x, B0y, B0z = compute_b_and_b0_from_m_flat(
+            m_flat, r0_flat, pts, factor=FACTOR
         )
+        debug.update(sc_debug)
+    else:
+        model = angle_model_from_run(run)
+        if model == "legacy-alpha":
+            Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
+                run.results.alphas,
+                run.results.r_bases,
+                run.geometry.theta,
+                run.geometry.sin2,
+                run.geometry.cth,
+                run.geometry.sth,
+                run.geometry.z_layers,
+                run.geometry.ring_offsets,
+                pts,
+                FACTOR,
+                phi0,
+                m0,
+            )
+        else:
+            phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+            Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(
+                phi_rkn,
+                run.results.r_bases,
+                run.geometry.cth,
+                run.geometry.sth,
+                run.geometry.z_layers,
+                run.geometry.ring_offsets,
+                pts,
+                FACTOR,
+                m0,
+            )
 
     B0_T = float(np.sqrt(B0x * B0x + B0y * B0y + B0z * B0z))
     if B0_T < 1e-15:
@@ -113,15 +141,41 @@ def compute_error_map_ppm_plane(
     ppm = np.full(mask.shape, np.nan, dtype=np.float64)
     ppm[mask] = np.asarray(ppm_vals, dtype=np.float64)
 
-    return ErrorMap2D(
-        xs=xs,
-        ys=ys,
-        ppm=ppm,
-        mask=mask,
-        B0_T=B0_T,
-        plane=plane,
-        coord0=coord0,
+    return (
+        ErrorMap2D(
+            xs=xs,
+            ys=ys,
+            ppm=ppm,
+            mask=mask,
+            B0_T=B0_T,
+            plane=plane,
+            coord0=coord0,
+        ),
+        debug,
     )
+
+
+def compute_error_map_ppm_plane(
+    run: RunBundle,
+    *,
+    plane: Plane = "xy",
+    coord0: float = 0.0,
+    roi_r: float = 0.14,
+    step: float = 0.001,
+) -> ErrorMap2D:
+    m, _debug = _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
+    return m
+
+
+def compute_error_map_ppm_plane_with_debug(
+    run: RunBundle,
+    *,
+    plane: Plane = "xy",
+    coord0: float = 0.0,
+    roi_r: float = 0.14,
+    step: float = 0.001,
+) -> tuple[ErrorMap2D, dict[str, object]]:
+    return _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
 
 
 def extract_cross_section_y0(m: ErrorMap2D) -> CrossSection1D:
@@ -162,6 +216,7 @@ __all__ = [
     "ErrorMap2D",
     "CrossSection1D",
     "compute_error_map_ppm_plane",
+    "compute_error_map_ppm_plane_with_debug",
     "extract_cross_section_y0",
     "common_ppm_limits",
     "contour_levels_ppm",

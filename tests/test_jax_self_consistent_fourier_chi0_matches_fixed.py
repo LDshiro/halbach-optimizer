@@ -1,0 +1,98 @@
+import numpy as np
+import pytest
+
+from halbach.constants import FACTOR, m0, phi0
+from halbach.geom import build_roi_points
+from halbach.near import NearWindow, build_near_graph
+from halbach.types import Geometry
+
+
+def _build_geom() -> tuple[Geometry, np.ndarray]:
+    N = 12
+    K = 4
+    R = 1
+
+    theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
+    sin2 = np.sin(2.0 * theta)
+    cth = np.cos(theta)
+    sth = np.sin(theta)
+    z_layers = np.linspace(-0.03, 0.03, K)
+    ring_offsets = np.array([0.0], dtype=float)
+
+    dzs = np.diff(z_layers)
+    dz = float(np.median(np.abs(dzs))) if dzs.size > 0 else 0.01
+    Lz = dz * K
+    geom = Geometry(
+        theta=theta,
+        sin2=sin2,
+        cth=cth,
+        sth=sth,
+        z_layers=z_layers,
+        ring_offsets=ring_offsets,
+        N=N,
+        K=K,
+        R=R,
+        dz=dz,
+        Lz=Lz,
+    )
+    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    return geom, pts
+
+
+def test_sc_fourier_chi0_matches_fixed() -> None:
+    pytest.importorskip("jax")
+    from halbach.autodiff.jax_objective_delta_phi_fourier import (
+        objective_with_grads_delta_phi_fourier_x0_jax,
+    )
+    from halbach.autodiff.jax_objective_self_consistent_delta_phi_fourier import (
+        objective_with_grads_self_consistent_delta_phi_fourier_x0_jax,
+    )
+
+    geom, pts = _build_geom()
+    rng = np.random.default_rng(1)
+    H = 2
+    coeffs = 1e-3 * rng.standard_normal((geom.K, 2 * H))
+    r_bases = 0.2 + 1e-4 * rng.standard_normal(geom.K)
+
+    near = build_near_graph(geom.R, geom.K, geom.N, NearWindow(wr=0, wz=1, wphi=1))
+
+    J_fix, gC_fix, gR_fix, B0_fix = objective_with_grads_delta_phi_fourier_x0_jax(
+        coeffs,
+        r_bases,
+        geom,
+        pts,
+        H=H,
+        lambda0=0.0,
+        lambda_theta=0.0,
+        lambda_z=0.0,
+        factor=FACTOR,
+        phi0=phi0,
+        m0=m0,
+    )
+    J_sc, gC_sc, gR_sc, B0_sc, _sc = objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
+        coeffs,
+        r_bases,
+        geom,
+        pts,
+        near.nbr_idx,
+        near.nbr_mask,
+        H=H,
+        chi=0.0,
+        Nd=1.0 / 3.0,
+        p0=m0,
+        volume_m3=1e-6,
+        iters=5,
+        omega=0.6,
+        near_kernel="dipole",
+        subdip_n=2,
+        lambda0=0.0,
+        lambda_theta=0.0,
+        lambda_z=0.0,
+        factor=FACTOR,
+        phi0=phi0,
+    )
+
+    np.testing.assert_allclose(J_sc, J_fix, rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(B0_sc, B0_fix, rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(gC_sc, gC_fix, rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(gR_sc, gR_fix, rtol=1e-6, atol=1e-9)
