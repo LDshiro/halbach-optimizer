@@ -7,7 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import NDArray
 
-from halbach.autodiff.jax_self_consistent import solve_p_easy_axis_near
+from halbach.autodiff.jax_self_consistent import (
+    solve_p_easy_axis_near,
+    solve_p_easy_axis_near_multi_dipole,
+)
 from halbach.constants import FACTOR, phi0
 from halbach.types import Geometry
 
@@ -47,6 +50,8 @@ def objective_with_grads_self_consistent_legacy_jax(
     Nd: float,
     p0: float,
     volume_m3: float,
+    near_kernel: str = "dipole",
+    subdip_n: int = 2,
     iters: int = 30,
     omega: float = 0.6,
     factor: float = FACTOR,
@@ -96,18 +101,35 @@ def objective_with_grads_self_consistent_legacy_jax(
         if chi_val == 0.0:
             p_flat = jnp.full((phi_flat.shape[0],), p0_val, dtype=r0_flat.dtype)
         else:
-            p_flat = solve_p_easy_axis_near(
-                phi_flat,
-                r0_flat,
-                nbr_idx_j,
-                nbr_mask_j,
-                p0=p0_val,
-                chi=chi_val,
-                Nd=Nd_val,
-                volume_m3=volume_val,
-                iters=iters_val,
-                omega=omega_val,
-            )
+            if near_kernel == "dipole":
+                p_flat = solve_p_easy_axis_near(
+                    phi_flat,
+                    r0_flat,
+                    nbr_idx_j,
+                    nbr_mask_j,
+                    p0=p0_val,
+                    chi=chi_val,
+                    Nd=Nd_val,
+                    volume_m3=volume_val,
+                    iters=iters_val,
+                    omega=omega_val,
+                )
+            elif near_kernel == "multi-dipole":
+                p_flat = solve_p_easy_axis_near_multi_dipole(
+                    phi_flat,
+                    r0_flat,
+                    nbr_idx_j,
+                    nbr_mask_j,
+                    p0=p0_val,
+                    chi=chi_val,
+                    Nd=Nd_val,
+                    volume_m3=volume_val,
+                    subdip_n=int(subdip_n),
+                    iters=iters_val,
+                    omega=omega_val,
+                )
+            else:
+                raise ValueError(f"Unsupported near_kernel: {near_kernel}")
 
         u = jnp.stack([jnp.cos(phi_flat), jnp.sin(phi_flat), jnp.zeros_like(phi_flat)], axis=1)
         m_flat = p_flat[:, None] * u

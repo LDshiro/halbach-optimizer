@@ -497,6 +497,8 @@ def run_optimize(args: argparse.Namespace) -> int:
         raise ValueError("self-consistent volume_mm3 must be > 0")
     if float(args.sc_Nd) < 0.0 or float(args.sc_Nd) > 1.0:
         raise ValueError("self-consistent Nd must be in [0, 1]")
+    if str(args.sc_near_kernel) == "multi-dipole" and int(args.sc_subdip_n) < 2:
+        raise ValueError("self-consistent subdip_n must be >= 2 for multi-dipole")
 
     if angle_model == "legacy-alpha":
         if angle_init == "zeros":
@@ -643,11 +645,6 @@ def run_optimize(args: argparse.Namespace) -> int:
     sc_nbr_idx: NDArray[np.int32] | None = None
     sc_nbr_mask: NDArray[np.bool_] | None = None
     if mag_model_effective == "self-consistent-easy-axis":
-        if str(args.sc_near_kernel) != "dipole":
-            logger.warning(
-                "sc-near-kernel %s not implemented; using dipole",
-                args.sc_near_kernel,
-            )
         from halbach.near import NearWindow, build_near_graph
 
         window = NearWindow(
@@ -701,6 +698,8 @@ def run_optimize(args: argparse.Namespace) -> int:
                         Nd=float(args.sc_Nd),
                         p0=float(args.sc_p0),
                         volume_m3=sc_volume_m3,
+                        near_kernel=str(args.sc_near_kernel),
+                        subdip_n=int(args.sc_subdip_n),
                         iters=int(args.sc_iters),
                         omega=float(args.sc_omega),
                         factor=factor,
@@ -926,6 +925,8 @@ def run_optimize(args: argparse.Namespace) -> int:
                     Nd=float(args.sc_Nd),
                     p0=float(args.sc_p0),
                     volume_m3=sc_volume_m3,
+                    near_kernel=str(args.sc_near_kernel),
+                    subdip_n=int(args.sc_subdip_n),
                     iters=int(args.sc_iters),
                     omega=float(args.sc_omega),
                     factor=factor,
