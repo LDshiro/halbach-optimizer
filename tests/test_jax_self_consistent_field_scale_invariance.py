@@ -43,7 +43,8 @@ def _grad_norm(gA: np.ndarray, gR: np.ndarray) -> float:
     return float(np.linalg.norm(np.concatenate([gA.ravel(), gR])))
 
 
-def test_field_scale_invariance() -> None:
+@pytest.mark.parametrize("near_kernel", ["dipole", "multi-dipole"])  # type: ignore[misc]
+def test_field_scale_invariance(near_kernel: str) -> None:
     pytest.importorskip("jax")
     from halbach.autodiff.jax_objective_self_consistent_legacy import (
         objective_with_grads_self_consistent_legacy_jax,
@@ -68,6 +69,8 @@ def test_field_scale_invariance() -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
+        near_kernel=near_kernel,
+        subdip_n=2,
         iters=5,
         omega=0.6,
         factor=FACTOR,
@@ -83,6 +86,8 @@ def test_field_scale_invariance() -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
+        near_kernel=near_kernel,
+        subdip_n=2,
         iters=5,
         omega=0.6,
         factor=FACTOR * scale,

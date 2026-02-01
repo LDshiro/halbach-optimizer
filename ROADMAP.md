@@ -87,3 +87,5 @@
   - 例: Wz=1, Wphi=2, Wr=0 をデフォルト候補（将来調整）。
 - cube 近似は当面 multi-dipole（サブ双極子集合）で実装し、将来「立方体平均テンソル」に置換する TODO を保持。
 - DC/CCP は既存 L-BFGS-B フレームに混ぜず、別ソルババックエンドとして追加（衝突回避）。
+- self-consistent near kernel: multi-dipole (source split only) implemented.
+- TODO: replace near kernel with cube-average tensor (analytic/high-accuracy).
