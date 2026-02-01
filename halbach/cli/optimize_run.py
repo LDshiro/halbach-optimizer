@@ -500,6 +500,7 @@ def run_optimize(args: argparse.Namespace) -> int:
     if str(args.sc_near_kernel) == "multi-dipole" and int(args.sc_subdip_n) < 2:
         raise ValueError("self-consistent subdip_n must be >= 2 for multi-dipole")
 
+    sc_final_extras: dict[str, Any] | None = None
     if angle_model == "legacy-alpha":
         if angle_init == "zeros":
             alphas0 = np.zeros_like(alphas0)
@@ -644,6 +645,7 @@ def run_optimize(args: argparse.Namespace) -> int:
     sc_volume_m3 = float(args.sc_volume_mm3) * 1e-9
     sc_nbr_idx: NDArray[np.int32] | None = None
     sc_nbr_mask: NDArray[np.bool_] | None = None
+    sc_logged_kernel_info = False
     if mag_model_effective == "self-consistent-easy-axis":
         from halbach.near import NearWindow, build_near_graph
 
@@ -665,6 +667,7 @@ def run_optimize(args: argparse.Namespace) -> int:
     )
 
     def fun_grad_solver(x: Float1DArray) -> tuple[float, Float1DArray, dict[str, Any]]:
+        nonlocal sc_logged_kernel_info
         nonlocal first_eval_done
         if not first_eval_done:
             logger.info("first eval start")
@@ -687,23 +690,25 @@ def run_optimize(args: argparse.Namespace) -> int:
 
                     if sc_nbr_idx is None or sc_nbr_mask is None:
                         raise ValueError("self-consistent near graph is missing")
-                    J_data, gA_y, gRb_y, B0n = objective_with_grads_self_consistent_legacy_jax(
-                        alphas,
-                        r_bases,
-                        geom,
-                        pts,
-                        sc_nbr_idx,
-                        sc_nbr_mask,
-                        chi=float(args.sc_chi),
-                        Nd=float(args.sc_Nd),
-                        p0=float(args.sc_p0),
-                        volume_m3=sc_volume_m3,
-                        near_kernel=str(args.sc_near_kernel),
-                        subdip_n=int(args.sc_subdip_n),
-                        iters=int(args.sc_iters),
-                        omega=float(args.sc_omega),
-                        factor=factor,
-                        phi0_val=phi0,
+                    J_data, gA_y, gRb_y, B0n, sc_extras = (
+                        objective_with_grads_self_consistent_legacy_jax(
+                            alphas,
+                            r_bases,
+                            geom,
+                            pts,
+                            sc_nbr_idx,
+                            sc_nbr_mask,
+                            chi=float(args.sc_chi),
+                            Nd=float(args.sc_Nd),
+                            p0=float(args.sc_p0),
+                            volume_m3=sc_volume_m3,
+                            near_kernel=str(args.sc_near_kernel),
+                            subdip_n=int(args.sc_subdip_n),
+                            iters=int(args.sc_iters),
+                            omega=float(args.sc_omega),
+                            factor=factor,
+                            phi0_val=phi0,
+                        )
                     )
                 else:
                     from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
@@ -777,6 +782,24 @@ def run_optimize(args: argparse.Namespace) -> int:
         state["B0"] = B0_T
         state["t_last_eval"] = float(dt_eval)
         extras: dict[str, Any] = {"J": float(J_data), "B0": B0_T}
+        if mag_model_effective == "self-consistent-easy-axis":
+            extras.update(sc_extras)
+            if not sc_logged_kernel_info:
+                deg = int(sc_extras.get("sc_near_deg_max", 0))
+                subdip_n = int(sc_extras.get("sc_subdip_n", 1))
+                S = subdip_n**3 if str(args.sc_near_kernel) == "multi-dipole" else 1
+                M = int(geom.R * geom.K * geom.N)
+                approx_pairs = M * deg
+                approx_evals = approx_pairs * S
+                logger.info(
+                    "self-consistent near kernel=%s deg=%d subdip=%d (S=%d) approx_evals_per_iter=%d",
+                    args.sc_near_kernel,
+                    deg,
+                    subdip_n,
+                    S,
+                    approx_evals,
+                )
+                sc_logged_kernel_info = True
         return float(J_total), gx, extras
 
     log_every = max(1, int(args.log_every))
@@ -914,23 +937,25 @@ def run_optimize(args: argparse.Namespace) -> int:
 
                 if sc_nbr_idx is None or sc_nbr_mask is None:
                     raise ValueError("self-consistent near graph is missing")
-                Jn_f, _gA, _gR, B0_f = objective_with_grads_self_consistent_legacy_jax(
-                    al_opt,
-                    rb_opt,
-                    geom,
-                    pts,
-                    sc_nbr_idx,
-                    sc_nbr_mask,
-                    chi=float(args.sc_chi),
-                    Nd=float(args.sc_Nd),
-                    p0=float(args.sc_p0),
-                    volume_m3=sc_volume_m3,
-                    near_kernel=str(args.sc_near_kernel),
-                    subdip_n=int(args.sc_subdip_n),
-                    iters=int(args.sc_iters),
-                    omega=float(args.sc_omega),
-                    factor=factor,
-                    phi0_val=phi0,
+                Jn_f, _gA, _gR, B0_f, sc_final_extras = (
+                    objective_with_grads_self_consistent_legacy_jax(
+                        al_opt,
+                        rb_opt,
+                        geom,
+                        pts,
+                        sc_nbr_idx,
+                        sc_nbr_mask,
+                        chi=float(args.sc_chi),
+                        Nd=float(args.sc_Nd),
+                        p0=float(args.sc_p0),
+                        volume_m3=sc_volume_m3,
+                        near_kernel=str(args.sc_near_kernel),
+                        subdip_n=int(args.sc_subdip_n),
+                        iters=int(args.sc_iters),
+                        omega=float(args.sc_omega),
+                        factor=factor,
+                        phi0_val=phi0,
+                    )
                 )
             else:
                 from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
@@ -1016,6 +1041,8 @@ def run_optimize(args: argparse.Namespace) -> int:
         Jn_hist=Jn_hist,
         B0_hist=B0_hist,
     )
+    if mag_model_effective == "self-consistent-easy-axis" and sc_final_extras is not None:
+        save_payload["extras_sc_stats"] = dict(sc_final_extras)
     if delta_rep_opt is not None:
         save_payload["delta_rep_opt"] = delta_rep_opt
     if coeffs_opt is not None:

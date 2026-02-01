@@ -39,14 +39,21 @@ def _write_min_run(tmp_path: Path) -> Path:
     return run_dir
 
 
-def test_dryrun_uses_self_consistent_objective(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_sc_extras_written_to_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("jax")
     run_dir = _write_min_run(tmp_path)
     out_dir = tmp_path / "out"
 
-    calls: dict[str, int] = {"count": 0}
+    sc_payload: dict[str, float | int | str] = {
+        "sc_p_min": 0.9,
+        "sc_p_max": 1.1,
+        "sc_p_mean": 1.0,
+        "sc_p_std": 0.05,
+        "sc_p_rel_std": 0.05,
+        "sc_near_kernel": "dipole",
+        "sc_subdip_n": 2,
+        "sc_near_deg_max": 14,
+    }
 
     def fake_sc_objective(
         alphas: np.ndarray,
@@ -54,23 +61,7 @@ def test_dryrun_uses_self_consistent_objective(
         *_args: object,
         **_kwargs: object,
     ) -> tuple[float, np.ndarray, np.ndarray, float, dict[str, float | int | str]]:
-        calls["count"] += 1
-        return (
-            0.0,
-            np.zeros_like(alphas),
-            np.zeros_like(r_bases),
-            0.0,
-            {
-                "sc_p_min": 1.0,
-                "sc_p_max": 1.0,
-                "sc_p_mean": 1.0,
-                "sc_p_std": 0.0,
-                "sc_p_rel_std": 0.0,
-                "sc_near_kernel": "dipole",
-                "sc_subdip_n": 2,
-                "sc_near_deg_max": 1,
-            },
-        )
+        return 1.0, np.zeros_like(alphas), np.zeros_like(r_bases), 0.1, sc_payload
 
     def fail_fixed(*_args: object, **_kwargs: object) -> Any:
         raise AssertionError("fixed objective should not be called")
@@ -87,7 +78,7 @@ def test_dryrun_uses_self_consistent_objective(
     args = argparse.Namespace(
         in_path=str(run_dir),
         out_dir=str(out_dir),
-        maxiter=10,
+        maxiter=1,
         gtol=1e-12,
         log_every=10,
         log_precision=3,
@@ -128,12 +119,16 @@ def test_dryrun_uses_self_consistent_objective(
         fix_center_radius_layers=2,
         log_level="INFO",
         debug_stacks_secs=0,
-        dry_run=True,
+        dry_run=False,
     )
 
     code = opt.run_optimize(args)
     assert code == 0
-    assert calls["count"] == 1
+
+    trace = json.loads((out_dir / "trace.json").read_text(encoding="utf-8"))
+    extras = trace["extras"][-1]
+    for key in sc_payload:
+        assert key in extras
 
     meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["magnetization"]["model_effective"] == "self-consistent-easy-axis"
