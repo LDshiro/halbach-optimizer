@@ -56,7 +56,7 @@ def test_chi0_matches_fixed() -> None:
     J_fix, gA_fix, gR_fix, B0_fix = objective_with_grads_fixed_jax(
         alphas, r_bases, geom, pts, factor=FACTOR
     )
-    J_sc, gA_sc, gR_sc, B0_sc = objective_with_grads_self_consistent_legacy_jax(
+    J_sc, gA_sc, gR_sc, B0_sc, _sc = objective_with_grads_self_consistent_legacy_jax(
         alphas,
         r_bases,
         geom,

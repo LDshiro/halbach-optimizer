@@ -56,7 +56,7 @@ def objective_with_grads_self_consistent_legacy_jax(
     omega: float = 0.6,
     factor: float = FACTOR,
     phi0_val: float = phi0,
-) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float, dict[str, float | int | str]]:
     """
     JAX objective and gradients (y-space) for self-consistent easy-axis model.
 
@@ -131,6 +131,12 @@ def objective_with_grads_self_consistent_legacy_jax(
             else:
                 raise ValueError(f"Unsupported near_kernel: {near_kernel}")
 
+        p_min = jnp.min(p_flat)
+        p_max = jnp.max(p_flat)
+        p_mean = jnp.mean(p_flat)
+        p_std = jnp.std(p_flat)
+        p_rel_std = p_std / (jnp.abs(p_mean) + EPS)
+
         u = jnp.stack([jnp.cos(phi_flat), jnp.sin(phi_flat), jnp.zeros_like(phi_flat)], axis=1)
         m_flat = p_flat[:, None] * u
 
@@ -140,18 +146,31 @@ def objective_with_grads_self_consistent_legacy_jax(
         diff = B - B0
         J = jnp.mean(jnp.sum(diff * diff, axis=1))
         B0n = jnp.sqrt(jnp.sum(B0 * B0))
-        return J, B0n
+        return J, (B0n, p_min, p_max, p_mean, p_std, p_rel_std)
 
-    (J, B0n), grads = jax.value_and_grad(_objective_only, argnums=(0, 1), has_aux=True)(
+    (J, aux), grads = jax.value_and_grad(_objective_only, argnums=(0, 1), has_aux=True)(
         alphas_j, r_bases_j
     )
+    B0n, p_min, p_max, p_mean, p_std, p_rel_std = aux
     g_alpha, g_rbase = grads
+
+    sc_extras: dict[str, float | int | str] = {
+        "sc_p_min": float(p_min),
+        "sc_p_max": float(p_max),
+        "sc_p_mean": float(p_mean),
+        "sc_p_std": float(p_std),
+        "sc_p_rel_std": float(p_rel_std),
+        "sc_near_kernel": str(near_kernel),
+        "sc_subdip_n": int(subdip_n),
+        "sc_near_deg_max": int(nbr_idx.shape[1]),
+    }
 
     return (
         float(J),
         np.asarray(g_alpha, dtype=np.float64),
         np.asarray(g_rbase, dtype=np.float64),
         float(B0n),
+        sc_extras,
     )
 
 

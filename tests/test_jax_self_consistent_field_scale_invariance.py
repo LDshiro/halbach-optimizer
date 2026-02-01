@@ -58,7 +58,7 @@ def test_field_scale_invariance(near_kernel: str) -> None:
     near = build_near_graph(geom.R, geom.K, geom.N, NearWindow(wr=0, wz=1, wphi=1))
     scale = 10.0
 
-    J1, gA1, gR1, _B01 = objective_with_grads_self_consistent_legacy_jax(
+    J1, gA1, gR1, _B01, _sc1 = objective_with_grads_self_consistent_legacy_jax(
         alphas,
         r_bases,
         geom,
@@ -75,7 +75,7 @@ def test_field_scale_invariance(near_kernel: str) -> None:
         omega=0.6,
         factor=FACTOR,
     )
-    J2, gA2, gR2, _B02 = objective_with_grads_self_consistent_legacy_jax(
+    J2, gA2, gR2, _B02, _sc2 = objective_with_grads_self_consistent_legacy_jax(
         alphas,
         r_bases,
         geom,
