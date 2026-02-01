@@ -473,9 +473,17 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     mag_model_requested = str(args.mag_model)
     mag_model_effective = "fixed"
-    if mag_model_requested != "fixed":
+    if mag_model_requested == "self-consistent-easy-axis":
+        if angle_model == "legacy-alpha" and grad_backend == "jax":
+            mag_model_effective = "self-consistent-easy-axis"
+        else:
+            logger.warning(
+                "mag-model %s requested but only supported for legacy-alpha + jax; running fixed model",
+                mag_model_requested,
+            )
+    elif mag_model_requested != "fixed":
         logger.warning(
-            "mag-model %s requested but not implemented yet; running fixed model",
+            "mag-model %s requested but not supported; running fixed model",
             mag_model_requested,
         )
 
@@ -631,6 +639,26 @@ def run_optimize(args: argparse.Namespace) -> int:
         raise ValueError("field_scale must be positive")
     factor = FACTOR * field_scale
 
+    sc_volume_m3 = float(args.sc_volume_mm3) * 1e-9
+    sc_nbr_idx: NDArray[np.int32] | None = None
+    sc_nbr_mask: NDArray[np.bool_] | None = None
+    if mag_model_effective == "self-consistent-easy-axis":
+        if str(args.sc_near_kernel) != "dipole":
+            logger.warning(
+                "sc-near-kernel %s not implemented; using dipole",
+                args.sc_near_kernel,
+            )
+        from halbach.near import NearWindow, build_near_graph
+
+        window = NearWindow(
+            wr=int(args.sc_near_wr),
+            wz=int(args.sc_near_wz),
+            wphi=int(args.sc_near_wphi),
+        )
+        near = build_near_graph(int(geom.R), int(geom.K), int(geom.N), window)
+        sc_nbr_idx = near.nbr_idx
+        sc_nbr_mask = near.nbr_mask
+
     first_eval_done = False
     state: dict[str, float] = {}
     n_rep = delta_rep0.shape[1] if delta_rep0 is not None else 0
@@ -654,12 +682,36 @@ def run_optimize(args: argparse.Namespace) -> int:
                 gx = pack_grad(gA_y, gRb_y, param_map)
                 J_total = float(J_data)
             else:
-                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
-
                 alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
-                J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
-                    alphas, r_bases, geom, pts, factor=factor
-                )
+                if mag_model_effective == "self-consistent-easy-axis":
+                    from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                        objective_with_grads_self_consistent_legacy_jax,
+                    )
+
+                    if sc_nbr_idx is None or sc_nbr_mask is None:
+                        raise ValueError("self-consistent near graph is missing")
+                    J_data, gA_y, gRb_y, B0n = objective_with_grads_self_consistent_legacy_jax(
+                        alphas,
+                        r_bases,
+                        geom,
+                        pts,
+                        sc_nbr_idx,
+                        sc_nbr_mask,
+                        chi=float(args.sc_chi),
+                        Nd=float(args.sc_Nd),
+                        p0=float(args.sc_p0),
+                        volume_m3=sc_volume_m3,
+                        iters=int(args.sc_iters),
+                        omega=float(args.sc_omega),
+                        factor=factor,
+                        phi0_val=phi0,
+                    )
+                else:
+                    from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                    J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
+                        alphas, r_bases, geom, pts, factor=factor
+                    )
                 gx = pack_grad(gA_y, gRb_y, param_map)
                 J_total = float(J_data)
         elif angle_model == "delta-rep-x0":
@@ -856,11 +908,35 @@ def run_optimize(args: argparse.Namespace) -> int:
     if angle_model == "legacy-alpha":
         al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
         if grad_backend == "jax":
-            from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+            if mag_model_effective == "self-consistent-easy-axis":
+                from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                    objective_with_grads_self_consistent_legacy_jax,
+                )
 
-            Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
-                al_opt, rb_opt, geom, pts, factor=factor
-            )
+                if sc_nbr_idx is None or sc_nbr_mask is None:
+                    raise ValueError("self-consistent near graph is missing")
+                Jn_f, _gA, _gR, B0_f = objective_with_grads_self_consistent_legacy_jax(
+                    al_opt,
+                    rb_opt,
+                    geom,
+                    pts,
+                    sc_nbr_idx,
+                    sc_nbr_mask,
+                    chi=float(args.sc_chi),
+                    Nd=float(args.sc_Nd),
+                    p0=float(args.sc_p0),
+                    volume_m3=sc_volume_m3,
+                    iters=int(args.sc_iters),
+                    omega=float(args.sc_omega),
+                    factor=factor,
+                    phi0_val=phi0,
+                )
+            else:
+                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
+                    al_opt, rb_opt, geom, pts, factor=factor
+                )
         else:
             Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
                 al_opt, rb_opt, geom, pts, factor=factor

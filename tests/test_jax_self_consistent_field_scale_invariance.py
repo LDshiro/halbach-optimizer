@@ -1,0 +1,95 @@
+import numpy as np
+import pytest
+
+from halbach.constants import FACTOR, m0
+from halbach.geom import build_roi_points
+from halbach.near import NearWindow, build_near_graph
+from halbach.types import Geometry
+
+
+def _build_geom() -> tuple[Geometry, np.ndarray]:
+    N = 10
+    K = 5
+    R = 1
+
+    theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
+    sin2 = np.sin(2.0 * theta)
+    cth = np.cos(theta)
+    sth = np.sin(theta)
+    z_layers = np.linspace(-0.04, 0.04, K)
+    ring_offsets = np.array([0.0], dtype=float)
+
+    dzs = np.diff(z_layers)
+    dz = float(np.median(np.abs(dzs))) if dzs.size > 0 else 0.01
+    Lz = dz * K
+    geom = Geometry(
+        theta=theta,
+        sin2=sin2,
+        cth=cth,
+        sth=sth,
+        z_layers=z_layers,
+        ring_offsets=ring_offsets,
+        N=N,
+        K=K,
+        R=R,
+        dz=dz,
+        Lz=Lz,
+    )
+    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    return geom, pts
+
+
+def _grad_norm(gA: np.ndarray, gR: np.ndarray) -> float:
+    return float(np.linalg.norm(np.concatenate([gA.ravel(), gR])))
+
+
+def test_field_scale_invariance() -> None:
+    pytest.importorskip("jax")
+    from halbach.autodiff.jax_objective_self_consistent_legacy import (
+        objective_with_grads_self_consistent_legacy_jax,
+    )
+
+    geom, pts = _build_geom()
+    rng = np.random.default_rng(1)
+    alphas = 1e-3 * rng.standard_normal((geom.R, geom.K))
+    r_bases = 0.2 + 1e-4 * rng.standard_normal(geom.K)
+
+    near = build_near_graph(geom.R, geom.K, geom.N, NearWindow(wr=0, wz=1, wphi=1))
+    scale = 10.0
+
+    J1, gA1, gR1, _B01 = objective_with_grads_self_consistent_legacy_jax(
+        alphas,
+        r_bases,
+        geom,
+        pts,
+        near.nbr_idx,
+        near.nbr_mask,
+        chi=0.05,
+        Nd=1.0 / 3.0,
+        p0=m0,
+        volume_m3=1e-6,
+        iters=5,
+        omega=0.6,
+        factor=FACTOR,
+    )
+    J2, gA2, gR2, _B02 = objective_with_grads_self_consistent_legacy_jax(
+        alphas,
+        r_bases,
+        geom,
+        pts,
+        near.nbr_idx,
+        near.nbr_mask,
+        chi=0.05,
+        Nd=1.0 / 3.0,
+        p0=m0,
+        volume_m3=1e-6,
+        iters=5,
+        omega=0.6,
+        factor=FACTOR * scale,
+    )
+
+    ratio_J = J2 / J1
+    ratio_g = _grad_norm(gA2, gR2) / _grad_norm(gA1, gR1)
+
+    np.testing.assert_allclose(ratio_J, scale * scale, rtol=1e-6, atol=1e-9)
+    np.testing.assert_allclose(ratio_g, scale * scale, rtol=1e-6, atol=1e-9)
