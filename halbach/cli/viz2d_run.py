@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from halbach.run_io import load_run
 from halbach.viz2d import compute_error_map_ppm_plane_with_debug
@@ -73,7 +74,13 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
-def _save_png(path: Path, xs: np.ndarray, ys: np.ndarray, ppm: np.ndarray, plane: Plane) -> None:
+def _save_png(
+    path: Path,
+    xs: NDArray[np.float64],
+    ys: NDArray[np.float64],
+    ppm: NDArray[np.float64],
+    plane: Plane,
+) -> None:
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(1, 1, figsize=(6.0, 5.0))

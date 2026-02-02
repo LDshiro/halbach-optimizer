@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from halbach.angles_runtime import phi_rkn_from_run
 from halbach.constants import FACTOR
@@ -31,10 +32,43 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="skip field-scale checks",
     )
     ap.add_argument("--scale-factor", type=float, default=10.0, help="scale factor for checks")
+    ap.add_argument(
+        "--force-compute-p",
+        dest="force_compute_p",
+        action="store_true",
+        default=False,
+        help="ignore saved p and recompute",
+    )
+    ap.add_argument(
+        "--override-sc-near-kernel",
+        type=str,
+        choices=["dipole", "multi-dipole", "cellavg"],
+        default=None,
+        help="override near_kernel in sc_cfg",
+    )
+    ap.add_argument(
+        "--override-sc-subdip-n",
+        type=int,
+        default=None,
+        help="override subdip_n in sc_cfg",
+    )
+    ap.add_argument(
+        "--linear-check",
+        dest="linear_check",
+        action="store_true",
+        default=False,
+        help="enable linear system check",
+    )
+    ap.add_argument(
+        "--linear-check-max-M",
+        type=int,
+        default=256,
+        help="max M for linear check",
+    )
     return ap.parse_args(argv)
 
 
-def _build_plane_points(roi_r: float, plane_z: float, roi_samples: int) -> np.ndarray:
+def _build_plane_points(roi_r: float, plane_z: float, roi_samples: int) -> NDArray[np.float64]:
     n = max(2, int(np.sqrt(max(1, roi_samples))))
     xs = np.linspace(-roi_r, roi_r, n, dtype=np.float64)
     ys = np.linspace(-roi_r, roi_r, n, dtype=np.float64)
@@ -44,7 +78,7 @@ def _build_plane_points(roi_r: float, plane_z: float, roi_samples: int) -> np.nd
     return np.asarray(pts, dtype=np.float64)
 
 
-def _build_r0_rkn(run: Any) -> np.ndarray:
+def _build_r0_rkn(run: Any) -> NDArray[np.float64]:
     geom = run.geometry
     r_bases = np.asarray(run.results.r_bases, dtype=np.float64)
     rho = r_bases[None, :] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None]
@@ -72,6 +106,14 @@ def run(argv: list[str] | None = None) -> int:
         pts = _build_plane_points(roi_r, float(args.plane_z), int(args.roi_samples))
         factor = float(FACTOR)
 
+    sc_cfg_override: dict[str, Any] | None = None
+    if args.override_sc_near_kernel is not None or args.override_sc_subdip_n is not None:
+        sc_cfg_override = {}
+        if args.override_sc_near_kernel is not None:
+            sc_cfg_override["near_kernel"] = str(args.override_sc_near_kernel)
+        if args.override_sc_subdip_n is not None:
+            sc_cfg_override["subdip_n"] = int(args.override_sc_subdip_n)
+
     debug_dir = make_sc_debug_bundle(
         run_dir=run.run_dir,
         out_dir=out_dir,
@@ -82,6 +124,10 @@ def run(argv: list[str] | None = None) -> int:
         factor=factor,
         field_scale_check=bool(args.field_scale_check),
         scale_factor=float(args.scale_factor),
+        force_compute_p=bool(args.force_compute_p),
+        sc_cfg_override=sc_cfg_override,
+        linear_check=bool(args.linear_check),
+        linear_check_max_M=int(args.linear_check_max_M),
     )
 
     report_path = debug_dir / "check_report.json"

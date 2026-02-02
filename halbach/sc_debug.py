@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -12,6 +12,16 @@ from halbach.constants import FACTOR, m0, mu0, phi0
 from halbach.magnetization_runtime import get_magnetization_config_from_meta, sc_cfg_fingerprint
 from halbach.near import NearWindow, build_near_graph, flatten_index, unflatten_index
 from halbach.physics import compute_B_and_B0_from_m_flat
+from halbach.sc_linear_system import (
+    build_A_sparse,
+    build_b,
+    build_C_edges_from_phi,
+    build_C_sparse,
+    build_T2_edges,
+    edges_from_near,
+    residual_norm,
+    solve_p_linear,
+)
 from halbach.types import Geometry
 
 EPS = 1e-30
@@ -33,6 +43,9 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
     near_window = sc_cfg.get("near_window", {})
     if not isinstance(near_window, dict):
         raise ValueError("self_consistent.near_window must be a dict")
+    near_kernel = str(sc_cfg.get("near_kernel", "dipole"))
+    if near_kernel == "cube-average":
+        near_kernel = "cellavg"
     return dict(
         chi=float(sc_cfg.get("chi", 0.0)),
         Nd=float(sc_cfg.get("Nd", 1.0 / 3.0)),
@@ -45,7 +58,7 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
             wz=int(near_window.get("wz", 1)),
             wphi=int(near_window.get("wphi", 2)),
         ),
-        near_kernel=str(sc_cfg.get("near_kernel", "dipole")),
+        near_kernel=near_kernel,
         subdip_n=int(sc_cfg.get("subdip_n", 2)),
     )
 
@@ -124,7 +137,7 @@ def _multi_dipole_offsets(subdip_n: int, cube_edge: float) -> NDArray[np.float64
     coords = (np.arange(subdip_n, dtype=np.float64) + 0.5) / subdip_n - 0.5
     coords = coords * float(cube_edge)
     xx, yy, zz = np.meshgrid(coords, coords, coords, indexing="ij")
-    return np.stack([xx, yy, zz], axis=-1).reshape(-1, 3)
+    return cast(NDArray[np.float64], np.stack([xx, yy, zz], axis=-1).reshape(-1, 3))
 
 
 def _compute_h_ext_u_numpy_multi(
@@ -164,6 +177,37 @@ def _compute_h_ext_u_numpy_multi(
     H_sub = H_sub * mask_f[..., None, None]
     H_sum = np.sum(H_sub, axis=(1, 2))
     return np.asarray(np.sum(H_sum * u_i, axis=1), dtype=np.float64)
+
+
+def _compute_h_ext_u_numpy_cellavg(
+    phi_flat: NDArray[np.float64],
+    r0_flat: NDArray[np.float64],
+    p_flat: NDArray[np.float64],
+    nbr_idx: NDArray[np.int32],
+    nbr_mask: NDArray[np.bool_],
+    volume_m3: float,
+) -> NDArray[np.float64]:
+    from halbach.demag_cellavg import demag_N_cellavg
+
+    u_flat = np.stack([np.cos(phi_flat), np.sin(phi_flat), np.zeros_like(phi_flat)], axis=1)
+    r_i = r0_flat[:, None, :]
+    r_j = r0_flat[nbr_idx]
+    s_ij = r_i - r_j
+    u_i = u_flat[:, None, :]
+    u_j = u_flat[nbr_idx]
+    s_ij = np.where(nbr_mask[..., None], s_ij, 0.0)
+    u_j = np.where(nbr_mask[..., None], u_j, 0.0)
+    a = float(volume_m3) ** (1.0 / 3.0)
+    N_ij = demag_N_cellavg(s_ij.reshape(-1, 3), (a, a, a)).reshape(
+        s_ij.shape[0], s_ij.shape[1], 3, 3
+    )
+    Nu_j = np.einsum("...ab,...b->...a", N_ij, u_j)
+    c_ij = -np.einsum("...a,...a->...", u_i, Nu_j)
+    c_ij = np.where(nbr_mask, c_ij, 0.0)
+    p_j = p_flat[nbr_idx]
+    p_j = np.where(nbr_mask, p_j, 0.0)
+    h_ext = np.sum(c_ij * (p_j / float(volume_m3)), axis=1)
+    return np.asarray(h_ext, dtype=np.float64)
 
 
 def _compute_j_from_m_flat(
@@ -211,9 +255,27 @@ def _compute_p_trace_jax(
     nbr_mask_n = np.asarray(nbr_mask, dtype=bool)
 
     offsets: NDArray[np.float64] | None = None
+    c_ij: NDArray[np.float64] | None = None
     if near_kernel == "multi-dipole":
         cube_edge = float(volume_m3) ** (1.0 / 3.0)
         offsets = _multi_dipole_offsets(subdip_n, cube_edge)
+    elif near_kernel == "cellavg":
+        from halbach.demag_cellavg import demag_N_cellavg
+
+        a = float(volume_m3) ** (1.0 / 3.0)
+        h = (a, a, a)
+        u_flat = np.stack([np.cos(phi), np.sin(phi), np.zeros_like(phi)], axis=1)
+        r_i = r0[:, None, :]
+        r_j = r0[nbr_idx_n]
+        s_ij = r_i - r_j
+        u_i = u_flat[:, None, :]
+        u_j = u_flat[nbr_idx_n]
+        s_ij = np.where(nbr_mask_n[..., None], s_ij, 0.0)
+        u_j = np.where(nbr_mask_n[..., None], u_j, 0.0)
+        N_ij = demag_N_cellavg(s_ij.reshape(-1, 3), h).reshape(s_ij.shape[0], s_ij.shape[1], 3, 3)
+        Nu_j = np.einsum("...ab,...b->...a", N_ij, u_j)
+        c_ij = -np.einsum("...a,...a->...", u_i, Nu_j)
+        c_ij = np.where(nbr_mask_n, c_ij, 0.0)
 
     denom = 1.0 + chi * Nd
     p = np.full((phi.shape[0],), float(p0), dtype=np.float64)
@@ -234,6 +296,12 @@ def _compute_p_trace_jax(
                     nbr_mask_n,
                     offsets,
                 )
+            elif near_kernel == "cellavg":
+                if c_ij is None:
+                    raise ValueError("c_ij missing for cellavg kernel")
+                p_j = p[nbr_idx_n]
+                p_j = np.where(nbr_mask_n, p_j, 0.0)
+                h_ext = np.sum(c_ij * (p_j / float(volume_m3)), axis=1)
             else:
                 h_ext = _compute_h_ext_u_numpy(
                     phi,
@@ -264,6 +332,78 @@ def _compute_p_trace_jax(
         p = np.asarray(p_next, dtype=np.float64)
 
     return np.asarray(p, dtype=np.float64), trace
+
+
+def _build_linear_system(
+    *,
+    phi_flat: NDArray[np.float64],
+    r0_flat: NDArray[np.float64],
+    nbr_idx: NDArray[np.int32],
+    nbr_mask: NDArray[np.bool_],
+    chi: float,
+    Nd: float,
+    p0: float,
+    volume_m3: float,
+    near_kernel: str,
+    subdip_n: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], dict[str, float]]:
+    M = int(phi_flat.shape[0])
+    deg = int(nbr_idx.shape[1])
+
+    i_all = np.repeat(np.arange(M, dtype=np.int64), deg)
+    j_all = nbr_idx.reshape(-1)
+    m_all = nbr_mask.reshape(-1)
+    i = i_all[m_all]
+    j = j_all[m_all]
+    E = int(i.shape[0])
+
+    s = r0_flat[i] - r0_flat[j]
+    ui = np.stack([np.cos(phi_flat[i]), np.sin(phi_flat[i]), np.zeros_like(phi_flat[i])], axis=1)
+    uj = np.stack([np.cos(phi_flat[j]), np.sin(phi_flat[j]), np.zeros_like(phi_flat[j])], axis=1)
+
+    V = float(volume_m3)
+    if near_kernel == "multi-dipole":
+        a = V ** (1.0 / 3.0)
+        offsets = _multi_dipole_offsets(subdip_n, a)
+        r_sub = s[:, None, :] - offsets[None, :, :]
+        r2 = np.sum(r_sub * r_sub, axis=-1)
+        rmag = np.sqrt(r2) + EPS
+        invr3 = 1.0 / (rmag * r2 + EPS)
+        invr5 = invr3 / r2
+        mdotr = np.sum(uj[:, None, :] * r_sub, axis=2)
+        term = 3.0 * r_sub * mdotr[..., None] * invr5[..., None] - uj[:, None, :] * invr3[..., None]
+        H_sub = (1.0 / (4.0 * np.pi)) * term
+        H_sum = np.mean(H_sub, axis=1)
+        scalar = np.sum(ui * H_sum, axis=1)
+        C_ij = V * scalar
+    elif near_kernel == "cellavg":
+        from halbach.demag_cellavg import demag_N_cellavg
+
+        a = V ** (1.0 / 3.0)
+        N = demag_N_cellavg(s, (a, a, a))
+        C_ij = -np.einsum("ei,eij,ej->e", ui, N, uj)
+    else:
+        r2 = np.sum(s * s, axis=1)
+        rmag = np.sqrt(r2) + EPS
+        invr3 = 1.0 / (rmag * r2 + EPS)
+        invr5 = invr3 / r2
+        mdotr = np.sum(uj * s, axis=1)
+        term = 3.0 * s * mdotr[:, None] * invr5[:, None] - uj * invr3[:, None]
+        H = (1.0 / (4.0 * np.pi)) * term
+        scalar = np.sum(ui * H, axis=1)
+        C_ij = V * scalar
+
+    C = np.zeros((M, M), dtype=np.float64)
+    if E > 0:
+        np.add.at(C, (i, j), C_ij)
+    C_max_abs = float(np.max(np.abs(C_ij))) if E > 0 else 0.0
+    C_row_abs_sum_max = float(np.max(np.sum(np.abs(C), axis=1))) if M > 0 else 0.0
+
+    denom = 1.0 + chi * Nd
+    alpha = chi / denom if denom != 0.0 else 0.0
+    A = np.eye(M, dtype=np.float64) - alpha * C
+    b = (p0 / denom) * np.ones(M, dtype=np.float64)
+    return A, b, dict(E=float(E), C_max_abs=C_max_abs, C_row_abs_sum_max=C_row_abs_sum_max)
 
 
 def _field_scale_check(
@@ -516,6 +656,10 @@ def make_sc_debug_bundle(
     scale_factor: float = 10.0,
     sample_magnets: int = 16,
     seed: int = 1234,
+    force_compute_p: bool = False,
+    sc_cfg_override: dict[str, Any] | None = None,
+    linear_check: bool = False,
+    linear_check_max_M: int = 256,
 ) -> Path:
     debug_dir = _ensure_dir(out_dir / "sc_debug")
     meta = _load_meta(run_dir)
@@ -529,6 +673,9 @@ def make_sc_debug_bundle(
         _write_json(debug_dir / "check_report.json", check_report)
         return debug_dir
 
+    if sc_cfg_override is not None:
+        sc_cfg_raw = dict(sc_cfg_raw)
+        sc_cfg_raw.update(sc_cfg_override)
     sc_cfg = _parse_sc_cfg(sc_cfg_raw)
     fp_expected = sc_cfg_fingerprint(sc_cfg_raw)
     summary["sc_cfg_fingerprint"] = fp_expected
@@ -571,9 +718,42 @@ def make_sc_debug_bundle(
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     r0_flat = np.asarray(r0_rkn, dtype=np.float64).reshape(-1, 3)
-    p_flat = _load_saved_p(run_dir, fp_expected, phi_flat.size)
+    if str(sc_cfg["near_kernel"]) == "cellavg":
+        from halbach.demag_cellavg import demag_N_cellavg
+
+        edge_idx = np.argwhere(near.nbr_mask)
+        sample_edges = min(128, int(edge_idx.shape[0]))
+        if sample_edges > 0:
+            edge_sel = rng.choice(edge_idx.shape[0], size=sample_edges, replace=False)
+            edges = edge_idx[edge_sel]
+            src_idx = edges[:, 0]
+            nbr_pos = edges[:, 1]
+            dst_idx = near.nbr_idx[src_idx, nbr_pos]
+            s_edges = r0_flat[src_idx] - r0_flat[dst_idx]
+            a = float(sc_cfg["volume_mm3"]) * 1e-9
+            a = a ** (1.0 / 3.0)
+            N_edges = demag_N_cellavg(s_edges, (a, a, a))
+            finite = np.isfinite(N_edges)
+            trace_vals = np.trace(N_edges, axis1=1, axis2=2)
+            payload = dict(
+                sample_edges=int(sample_edges),
+                nan_count=int(np.size(N_edges) - np.count_nonzero(finite)),
+                trace_min=float(np.min(trace_vals)),
+                trace_max=float(np.max(trace_vals)),
+                trace_mean=float(np.mean(trace_vals)),
+                max_abs=float(np.max(np.abs(N_edges))),
+            )
+        else:
+            payload = dict(sample_edges=0, nan_count=0, trace_min=0.0, trace_max=0.0)
+        _write_json(debug_dir / "cellavg_tensor_stats.json", payload)
+    p_flat = None if force_compute_p else _load_saved_p(run_dir, fp_expected, phi_flat.size)
     trace_rows: list[dict[str, float]] = []
-    sc_p_source = "saved" if p_flat is not None else "computed"
+    if p_flat is not None:
+        sc_p_source = "saved"
+    elif force_compute_p:
+        sc_p_source = "computed(forced)"
+    else:
+        sc_p_source = "computed"
     summary["sc_p_source"] = sc_p_source
 
     if p_flat is None:
@@ -634,6 +814,64 @@ def make_sc_debug_bundle(
             ),
         )
 
+    if linear_check:
+        linear_payload: dict[str, Any]
+        M = int(phi_flat.size)
+        if M > int(linear_check_max_M):
+            linear_payload = dict(
+                skipped=True,
+                reason=f"M={M} > linear_check_max_M={linear_check_max_M}",
+                M=int(M),
+                near_kernel=str(sc_cfg["near_kernel"]),
+            )
+        else:
+            i_edge, j_edge = edges_from_near(near.nbr_idx, near.nbr_mask)
+            T2 = build_T2_edges(
+                r0_flat,
+                i_edge,
+                j_edge,
+                near_kernel=str(sc_cfg["near_kernel"]),
+                volume_m3=float(sc_cfg["volume_mm3"]) * 1e-9,
+                subdip_n=int(sc_cfg["subdip_n"]),
+            )
+            C_edge = build_C_edges_from_phi(phi_flat, i_edge, j_edge, T2)
+            C = build_C_sparse(int(M), i_edge, j_edge, C_edge)
+            A = build_A_sparse(C, float(sc_cfg["chi"]), float(sc_cfg["Nd"]))
+            b = build_b(float(sc_cfg["p0"]), int(M))
+            p_ls = solve_p_linear(A, b)
+            denom = max(float(np.linalg.norm(p_ls)), 1e-30)
+            rel_diff = float(np.linalg.norm(p_flat - p_ls)) / denom
+            res_dbg = residual_norm(A, p_flat, b)
+            res_ls = residual_norm(A, p_ls, b)
+            pass_check = bool(rel_diff < 1e-8 and res_dbg < 1e-8)
+            C_abs = C.copy()
+            C_abs.data = np.abs(C_abs.data)
+            row_sum = np.asarray(C_abs.sum(axis=1)).ravel()
+            C_row_abs_sum_max = float(np.max(row_sum)) if row_sum.size > 0 else 0.0
+            C_max_abs = float(np.max(np.abs(C_edge))) if C_edge.size > 0 else 0.0
+            linear_payload = dict(
+                M=int(M),
+                E=int(C_edge.size),
+                near_kernel=str(sc_cfg["near_kernel"]),
+                chi=float(sc_cfg["chi"]),
+                Nd=float(sc_cfg["Nd"]),
+                p0=float(sc_cfg["p0"]),
+                volume_m3=float(sc_cfg["volume_mm3"]) * 1e-9,
+                rel_diff=rel_diff,
+                res_dbg=res_dbg,
+                res_ls=res_ls,
+                C_max_abs=C_max_abs,
+                C_row_abs_sum_max=C_row_abs_sum_max,
+            )
+            linear_payload["pass"] = pass_check
+            if not pass_check:
+                check_report["pass"] = False
+                failures_list = check_report.get("failures", [])
+                if isinstance(failures_list, list):
+                    failures_list.append("linear_check_failed")
+                    check_report["failures"] = failures_list
+        _write_json(debug_dir / "linear_system_check.json", linear_payload)
+
     if str(sc_cfg["near_kernel"]) == "multi-dipole":
         cube_edge = (float(sc_cfg["volume_mm3"]) * 1e-9) ** (1.0 / 3.0)
         offsets = _multi_dipole_offsets(int(sc_cfg["subdip_n"]), cube_edge)
@@ -644,6 +882,15 @@ def make_sc_debug_bundle(
             near.nbr_idx,
             near.nbr_mask,
             offsets,
+        )
+    elif str(sc_cfg["near_kernel"]) == "cellavg":
+        h_ext = _compute_h_ext_u_numpy_cellavg(
+            phi_flat,
+            r0_flat,
+            p_flat,
+            near.nbr_idx,
+            near.nbr_mask,
+            float(sc_cfg["volume_mm3"]) * 1e-9,
         )
     else:
         h_ext = _compute_h_ext_u_numpy(

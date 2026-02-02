@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from halbach.autodiff.jax_self_consistent import (
     solve_p_easy_axis_near,
+    solve_p_easy_axis_near_cellavg,
     solve_p_easy_axis_near_multi_dipole,
 )
 from halbach.constants import FACTOR, phi0
@@ -63,6 +64,7 @@ def objective_with_grads_self_consistent_legacy_jax(
     self-consistent uses H kernel factor = FACTOR/mu0 internally (no field_scale).
     TODO: Replace near kernel with multi-dipole / cube-average tensor model.
     """
+    near_kernel_norm = "cellavg" if near_kernel == "cube-average" else str(near_kernel)
     alphas_j = jnp.asarray(alphas, dtype=jnp.float64)
     r_bases_j = jnp.asarray(r_bases, dtype=jnp.float64)
     theta = jnp.asarray(geom.theta, dtype=jnp.float64)
@@ -101,7 +103,7 @@ def objective_with_grads_self_consistent_legacy_jax(
         if chi_val == 0.0:
             p_flat = jnp.full((phi_flat.shape[0],), p0_val, dtype=r0_flat.dtype)
         else:
-            if near_kernel == "dipole":
+            if near_kernel_norm == "dipole":
                 p_flat = solve_p_easy_axis_near(
                     phi_flat,
                     r0_flat,
@@ -114,7 +116,7 @@ def objective_with_grads_self_consistent_legacy_jax(
                     iters=iters_val,
                     omega=omega_val,
                 )
-            elif near_kernel == "multi-dipole":
+            elif near_kernel_norm == "multi-dipole":
                 p_flat = solve_p_easy_axis_near_multi_dipole(
                     phi_flat,
                     r0_flat,
@@ -125,6 +127,19 @@ def objective_with_grads_self_consistent_legacy_jax(
                     Nd=Nd_val,
                     volume_m3=volume_val,
                     subdip_n=int(subdip_n),
+                    iters=iters_val,
+                    omega=omega_val,
+                )
+            elif near_kernel_norm == "cellavg":
+                p_flat = solve_p_easy_axis_near_cellavg(
+                    phi_flat,
+                    r0_flat,
+                    nbr_idx_j,
+                    nbr_mask_j,
+                    p0=p0_val,
+                    chi=chi_val,
+                    Nd=Nd_val,
+                    volume_m3=volume_val,
                     iters=iters_val,
                     omega=omega_val,
                 )
@@ -160,7 +175,7 @@ def objective_with_grads_self_consistent_legacy_jax(
         "sc_p_mean": float(p_mean),
         "sc_p_std": float(p_std),
         "sc_p_rel_std": float(p_rel_std),
-        "sc_near_kernel": str(near_kernel),
+        "sc_near_kernel": str(near_kernel_norm),
         "sc_subdip_n": int(subdip_n),
         "sc_near_deg_max": int(nbr_idx.shape[1]),
     }

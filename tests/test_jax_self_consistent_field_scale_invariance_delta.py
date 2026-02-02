@@ -44,7 +44,7 @@ def _grad_norm(gD: np.ndarray, gR: np.ndarray) -> float:
     return float(np.linalg.norm(np.concatenate([gD.ravel(), gR])))
 
 
-@pytest.mark.parametrize("near_kernel", ["dipole", "multi-dipole"])  # type: ignore[misc]
+@pytest.mark.parametrize("near_kernel", ["dipole", "multi-dipole", "cellavg"])
 def test_sc_delta_field_scale_invariance(near_kernel: str) -> None:
     pytest.importorskip("jax")
     from halbach.autodiff.jax_objective_self_consistent_delta_phi import (

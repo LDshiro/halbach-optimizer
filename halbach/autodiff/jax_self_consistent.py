@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from halbach.autodiff.jax_demag_cellavg import demag_N_cellavg_jax
 from halbach.constants import FACTOR, mu0
 
 cast(Any, jax.config).update("jax_enable_x64", True)
@@ -178,8 +179,62 @@ def solve_p_easy_axis_near_multi_dipole(
     return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
 
 
+def solve_p_easy_axis_near_cellavg(
+    phi_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    *,
+    p0: float,
+    chi: float,
+    Nd: float,
+    volume_m3: float,
+    iters: int = 30,
+    omega: float = 0.6,
+) -> jnp.ndarray:
+    """
+    Fixed-iteration damped solver for p (easy-axis, near-only) using cell-averaged demag tensor.
+    Must NOT apply field_scale.
+    """
+    denom = 1.0 + chi * Nd
+    M = int(phi_flat.shape[0])
+    a = float(volume_m3) ** (1.0 / 3.0)
+    h = jnp.array([a, a, a], dtype=jnp.float64)
+
+    u_flat = jnp.stack([jnp.cos(phi_flat), jnp.sin(phi_flat), jnp.zeros_like(phi_flat)], axis=1)
+
+    r_i = r0_flat[:, None, :]
+    r_j = r0_flat[nbr_idx]
+    s_ij = r_i - r_j
+    u_i = u_flat[:, None, :]
+    u_j = u_flat[nbr_idx]
+
+    s_ij = jnp.where(nbr_mask[..., None], s_ij, 0.0)
+    u_j = jnp.where(nbr_mask[..., None], u_j, 0.0)
+
+    N_ij = demag_N_cellavg_jax(s_ij, h)
+    Nu_j = jnp.einsum("...ab,...b->...a", N_ij, u_j)
+    c_ij = -jnp.einsum("...a,...a->...", u_i, Nu_j)
+    c_ij = jnp.where(nbr_mask, c_ij, 0.0)
+
+    if chi == 0.0:
+        return jnp.full((M,), float(p0), dtype=jnp.float64)
+
+    p_init = jnp.full((M,), float(p0), dtype=jnp.float64)
+
+    def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
+        p_j = p[nbr_idx]
+        p_j = jnp.where(nbr_mask, p_j, 0.0)
+        h_ext = jnp.sum(c_ij * (p_j / float(volume_m3)), axis=1)
+        p_new = (float(p0) + float(chi) * float(volume_m3) * h_ext) / denom
+        return (1.0 - float(omega)) * p + float(omega) * p_new
+
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
+
+
 __all__ = [
     "make_subdip_offsets_grid",
     "solve_p_easy_axis_near",
     "solve_p_easy_axis_near_multi_dipole",
+    "solve_p_easy_axis_near_cellavg",
 ]

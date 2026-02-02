@@ -4,6 +4,7 @@ from pathlib import Path
 
 from halbach.gui.opt_job import (
     build_command,
+    build_dc_ccp_sc_command,
     build_generate_command,
     build_generate_out_dir,
     tail_log,
@@ -114,6 +115,56 @@ def test_build_generate_out_dir_naming(tmp_path: Path) -> None:
         suffix_provider=lambda: "abcd",
     )
     assert out_dir2.name == "20250102_030405_init_N48_R3_K24_abcd"
+
+
+def test_build_dc_ccp_sc_command_flags(tmp_path: Path) -> None:
+    out_dir = tmp_path / "dc_out"
+    cmd = build_dc_ccp_sc_command(
+        out_dir,
+        N=6,
+        K=2,
+        R=1,
+        radius_m=0.1,
+        length_m=0.02,
+        roi_radius_m=0.05,
+        roi_grid_n=11,
+        wx=0.0,
+        wy=1.0,
+        wz=0.0,
+        factor=1e-7,
+        phi0=0.0,
+        delta_nom_deg=5.0,
+        delta_step_deg=None,
+        tau0=1e-4,
+        tau_mult=1.2,
+        tau_max=1e-1,
+        iters=5,
+        tol=1e-6,
+        tol_f=1e-9,
+        reg_x=0.0,
+        reg_p=0.0,
+        reg_z=0.0,
+        sc_eq=False,
+        p_fix=1.0,
+        sc_chi=0.05,
+        sc_Nd=1.0 / 3.0,
+        sc_p0=1.0,
+        sc_volume_mm3=1000.0,
+        sc_near_wr=0,
+        sc_near_wz=1,
+        sc_near_wphi=1,
+        sc_near_kernel="dipole",
+        sc_subdip_n=2,
+        pmin=0.0,
+        pmax=2.0,
+        solver="ECOS",
+        verbose=True,
+    )
+    assert cmd[0] == sys.executable
+    assert cmd[1:4] == ["-u", "-m", "halbach.cli.dc_ccp_sc_optimize_run"]
+    assert "--no-sc-eq" in cmd
+    assert "--p-fix" in cmd
+    assert cmd[cmd.index("--p-fix") + 1] == "1.0"
 
 
 def test_tail_log_handles_missing_and_existing(tmp_path: Path) -> None:

@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 readme = "README.md"
 license = { file = "LICENSE" }
 
+[project.optional-dependencies]
+dc = ["cvxpy>=1.4", "osqp>=0.6"]
+
 [tool.black]
 line-length = 100
 target-version = ["py311"]
@@ -37,6 +40,10 @@ ignore = [
 # ベースライン script は関数名に B0 等が入るため、命名チェックだけ緩める
 "robust_opt_halbach_gradnorm_minimal.py" = ["N802"]
 "halbach/physics.py" = ["N802"]
+"halbach/demag_cellavg.py" = ["N802"]
+"halbach/autodiff/jax_demag_cellavg.py" = ["N802"]
+"halbach/sc_linear_system.py" = ["N802"]
+"halbach/dc/dipole_linmap.py" = ["N802"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -51,6 +58,8 @@ warn_return_any = true
 warn_unreachable = true
 show_error_codes = true
 pretty = true
+files = ["halbach"]
+exclude = '(?x)(^\\.venv/|^\\.mypy_cache/|^\\.pytest_cache/|^runs/|^bench/|^docs/|^scripts/|^app/|^tests/|^robust_opt_halbach_gradnorm_minimal\\.py)'
 
 # Numbaは型の都合でmypy strictと相性が悪い部分が出やすいので、
 # まずは「Numba自体は無視しない」が、必要に応じて段階的に緩める。
@@ -69,6 +78,30 @@ module = ["jax", "jax.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["cvxpy", "cvxpy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["optype", "optype.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["test_mirror_x0_delta_phi", "tests.test_mirror_x0_delta_phi"]
 disable_error_code = ["misc"]
+
+[[tool.mypy.overrides]]
+module = [
+  "test_jax_self_consistent_field_scale_invariance",
+  "tests.test_jax_self_consistent_field_scale_invariance",
+  "test_jax_self_consistent_field_scale_invariance_delta",
+  "tests.test_jax_self_consistent_field_scale_invariance_delta",
+]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = [
+  "test_sc_linear_system_matches_jax_solver",
+  "tests.test_sc_linear_system_matches_jax_solver",
+]
+disallow_untyped_decorators = false
 

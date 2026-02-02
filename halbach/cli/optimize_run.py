@@ -159,7 +159,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--sc-near-kernel",
         type=str,
-        choices=["dipole", "multi-dipole"],
+        choices=["dipole", "multi-dipole", "cellavg", "cube-average"],
         default="dipole",
         help="near-field kernel model",
     )
@@ -571,6 +571,9 @@ def run_optimize(args: argparse.Namespace) -> int:
             "mag-model %s requested but not supported; running fixed model",
             mag_model_requested,
         )
+
+    if str(args.sc_near_kernel) == "cube-average":
+        args.sc_near_kernel = "cellavg"
 
     if int(args.sc_near_wr) < 0 or int(args.sc_near_wz) < 0 or int(args.sc_near_wphi) < 0:
         raise ValueError("self-consistent near window must be >= 0")

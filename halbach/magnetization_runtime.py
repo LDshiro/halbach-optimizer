@@ -55,6 +55,9 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
     near_window = sc_cfg.get("near_window", {})
     if not isinstance(near_window, dict):
         raise ValueError("self_consistent.near_window must be a dict")
+    near_kernel = str(sc_cfg.get("near_kernel", "dipole"))
+    if near_kernel == "cube-average":
+        near_kernel = "cellavg"
     return dict(
         chi=float(sc_cfg.get("chi", 0.0)),
         Nd=float(sc_cfg.get("Nd", 1.0 / 3.0)),
@@ -67,7 +70,7 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
             wz=int(near_window.get("wz", 1)),
             wphi=int(near_window.get("wphi", 2)),
         ),
-        near_kernel=str(sc_cfg.get("near_kernel", "dipole")),
+        near_kernel=near_kernel,
         subdip_n=int(sc_cfg.get("subdip_n", 2)),
     )
 
@@ -103,6 +106,7 @@ def compute_p_flat_self_consistent_jax(
 
     from halbach.autodiff.jax_self_consistent import (
         solve_p_easy_axis_near,
+        solve_p_easy_axis_near_cellavg,
         solve_p_easy_axis_near_multi_dipole,
     )
 
@@ -151,6 +155,19 @@ def compute_p_flat_self_consistent_jax(
                 Nd=float(sc["Nd"]),
                 volume_m3=volume_m3,
                 subdip_n=int(sc["subdip_n"]),
+                iters=int(sc["iters"]),
+                omega=float(sc["omega"]),
+            )
+        elif sc["near_kernel"] == "cellavg":
+            p_flat = solve_p_easy_axis_near_cellavg(
+                phi_j,
+                r0_j,
+                nbr_idx_j,
+                nbr_mask_j,
+                p0=float(sc["p0"]),
+                chi=float(sc["chi"]),
+                Nd=float(sc["Nd"]),
+                volume_m3=volume_m3,
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
             )
