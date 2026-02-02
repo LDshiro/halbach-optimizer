@@ -38,6 +38,44 @@ def test_build_command_basic(tmp_path: Path) -> None:
     assert "--r-min-mm" in cmd
     assert "--r-max-mm" in cmd
     assert "--fix-center-radius-layers" in cmd
+    assert "--mag-model" not in cmd
+    assert "--sc-chi" not in cmd
+
+
+def test_build_command_includes_self_consistent_flags(tmp_path: Path) -> None:
+    in_path = tmp_path / "input.npz"
+    out_dir = tmp_path / "out"
+    cmd = build_command(
+        in_path,
+        out_dir,
+        maxiter=50,
+        gtol=1e-12,
+        roi_r=0.14,
+        roi_step=0.02,
+        r_bound_mode="relative",
+        r_lower_delta_mm=25.0,
+        r_upper_delta_mm=35.0,
+        r_no_upper=False,
+        r_min_mm=0.0,
+        r_max_mm=1000.0,
+        mag_model="self-consistent-easy-axis",
+        sc_chi=0.05,
+        sc_Nd=1.0 / 3.0,
+        sc_p0=1.1,
+        sc_volume_mm3=999.0,
+        sc_iters=20,
+        sc_omega=0.5,
+        sc_near_wr=0,
+        sc_near_wz=1,
+        sc_near_wphi=2,
+        sc_near_kernel="dipole",
+        sc_subdip_n=2,
+    )
+    assert "--mag-model" in cmd
+    assert "self-consistent-easy-axis" in cmd
+    assert "--sc-chi" in cmd
+    assert cmd[cmd.index("--sc-chi") + 1] == "0.05"
+    assert "--sc-near-wphi" in cmd
 
 
 def test_build_generate_command_basic(tmp_path: Path) -> None:

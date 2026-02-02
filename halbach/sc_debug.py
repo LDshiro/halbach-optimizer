@@ -205,20 +205,18 @@ def _compute_p_trace_jax(
     near_kernel: str,
     subdip_n: int,
 ) -> tuple[NDArray[np.float64], list[dict[str, float]]]:
-    import jax.numpy as jnp
+    phi = np.asarray(phi_flat, dtype=np.float64)
+    r0 = np.asarray(r0_flat, dtype=np.float64)
+    nbr_idx_n = np.asarray(nbr_idx, dtype=np.int32)
+    nbr_mask_n = np.asarray(nbr_mask, dtype=bool)
 
-    phi_j = jnp.asarray(phi_flat, dtype=jnp.float64)
-    r0_j = jnp.asarray(r0_flat, dtype=jnp.float64)
-    nbr_idx_j = jnp.asarray(nbr_idx, dtype=jnp.int32)
-    nbr_mask_j = jnp.asarray(nbr_mask, dtype=bool)
-
+    offsets: NDArray[np.float64] | None = None
     if near_kernel == "multi-dipole":
         cube_edge = float(volume_m3) ** (1.0 / 3.0)
         offsets = _multi_dipole_offsets(subdip_n, cube_edge)
-        offsets_j = jnp.asarray(offsets, dtype=jnp.float64)
 
     denom = 1.0 + chi * Nd
-    p = jnp.full((phi_j.shape[0],), float(p0), dtype=jnp.float64)
+    p = np.full((phi.shape[0],), float(p0), dtype=np.float64)
     trace: list[dict[str, float]] = []
 
     for i in range(int(iters)):
@@ -226,27 +224,27 @@ def _compute_p_trace_jax(
             p_new = p
         else:
             if near_kernel == "multi-dipole":
+                if offsets is None:
+                    raise ValueError("offsets missing for multi-dipole kernel")
                 h_ext = _compute_h_ext_u_numpy_multi(
-                    np.asarray(phi_j),
-                    np.asarray(r0_j),
-                    np.asarray(p),
-                    np.asarray(nbr_idx_j),
-                    np.asarray(nbr_mask_j),
-                    np.asarray(offsets_j),
+                    phi,
+                    r0,
+                    p,
+                    nbr_idx_n,
+                    nbr_mask_n,
+                    offsets,
                 )
             else:
                 h_ext = _compute_h_ext_u_numpy(
-                    np.asarray(phi_j),
-                    np.asarray(r0_j),
-                    np.asarray(p),
-                    np.asarray(nbr_idx_j),
-                    np.asarray(nbr_mask_j),
+                    phi,
+                    r0,
+                    p,
+                    nbr_idx_n,
+                    nbr_mask_n,
                 )
             p_new = (float(p0) + float(chi) * float(volume_m3) * h_ext) / denom
-        p_next = (1.0 - float(omega)) * np.asarray(p) + float(omega) * np.asarray(p_new)
-        rel_change = float(
-            np.linalg.norm(p_next - np.asarray(p)) / (np.linalg.norm(np.asarray(p)) + EPS)
-        )
+        p_next = (1.0 - float(omega)) * p + float(omega) * p_new
+        rel_change = float(np.linalg.norm(p_next - p) / (np.linalg.norm(p) + EPS))
         p_min = float(np.min(p_next))
         p_max = float(np.max(p_next))
         p_mean = float(np.mean(p_next))
@@ -263,7 +261,7 @@ def _compute_p_trace_jax(
                 p_rel_std=p_rel_std,
             )
         )
-        p = jnp.asarray(p_next, dtype=jnp.float64)
+        p = np.asarray(p_next, dtype=np.float64)
 
     return np.asarray(p, dtype=np.float64), trace
 

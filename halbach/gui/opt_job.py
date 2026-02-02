@@ -41,6 +41,18 @@ def build_command(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    mag_model: str = "fixed",
+    sc_chi: float = 0.0,
+    sc_Nd: float = 1.0 / 3.0,
+    sc_p0: float = 1.0,
+    sc_volume_mm3: float = 1000.0,
+    sc_iters: int = 30,
+    sc_omega: float = 0.6,
+    sc_near_wr: int = 0,
+    sc_near_wz: int = 1,
+    sc_near_wphi: int = 2,
+    sc_near_kernel: str = "dipole",
+    sc_subdip_n: int = 2,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -88,6 +100,19 @@ def build_command(
         cmd.append("--r-no-upper")
     if grad_backend is not None:
         cmd.extend(["--grad-backend", str(grad_backend)])
+    if mag_model != "fixed":
+        cmd.extend(["--mag-model", str(mag_model)])
+        cmd.extend(["--sc-chi", str(sc_chi)])
+        cmd.extend(["--sc-Nd", str(sc_Nd)])
+        cmd.extend(["--sc-p0", str(sc_p0)])
+        cmd.extend(["--sc-volume-mm3", str(sc_volume_mm3)])
+        cmd.extend(["--sc-iters", str(sc_iters)])
+        cmd.extend(["--sc-omega", str(sc_omega)])
+        cmd.extend(["--sc-near-wr", str(sc_near_wr)])
+        cmd.extend(["--sc-near-wz", str(sc_near_wz)])
+        cmd.extend(["--sc-near-wphi", str(sc_near_wphi)])
+        cmd.extend(["--sc-near-kernel", str(sc_near_kernel)])
+        cmd.extend(["--sc-subdip-n", str(sc_subdip_n)])
     return cmd
 
 
@@ -193,6 +218,18 @@ def start_opt_job(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    mag_model: str = "fixed",
+    sc_chi: float = 0.0,
+    sc_Nd: float = 1.0 / 3.0,
+    sc_p0: float = 1.0,
+    sc_volume_mm3: float = 1000.0,
+    sc_iters: int = 30,
+    sc_omega: float = 0.6,
+    sc_near_wr: int = 0,
+    sc_near_wz: int = 1,
+    sc_near_wphi: int = 2,
+    sc_near_kernel: str = "dipole",
+    sc_subdip_n: int = 2,
     repo_root: Path | None = None,
 ) -> OptJob:
     out_path = Path(out_dir)
@@ -219,6 +256,18 @@ def start_opt_job(
         r_min_mm=r_min_mm,
         r_max_mm=r_max_mm,
         fix_center_radius_layers=fix_center_radius_layers,
+        mag_model=mag_model,
+        sc_chi=sc_chi,
+        sc_Nd=sc_Nd,
+        sc_p0=sc_p0,
+        sc_volume_mm3=sc_volume_mm3,
+        sc_iters=sc_iters,
+        sc_omega=sc_omega,
+        sc_near_wr=sc_near_wr,
+        sc_near_wz=sc_near_wz,
+        sc_near_wphi=sc_near_wphi,
+        sc_near_kernel=sc_near_kernel,
+        sc_subdip_n=sc_subdip_n,
     )
     cwd = repo_root or Path(__file__).resolve().parents[2]
     with log_path.open("w", encoding="utf-8") as log_handle:

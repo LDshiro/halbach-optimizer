@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,6 +19,7 @@ from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
 Plane = Literal["xy", "xz", "yz"]
+MagModelEval = Literal["auto", "fixed", "self-consistent-easy-axis"]
 
 
 @dataclass(frozen=True)
@@ -82,19 +83,42 @@ def _compute_error_map_impl(
     coord0: float = 0.0,
     roi_r: float = 0.14,
     step: float = 0.001,
+    mag_model_eval: MagModelEval = "auto",
+    sc_cfg_override: dict[str, Any] | None = None,
 ) -> tuple[ErrorMap2D, dict[str, object]]:
     xs = _axis_grid(roi_r, step)
     ys = _axis_grid(roi_r, step)
 
     mask, pts = _build_plane_points(xs, ys, plane, coord0, roi_r)
 
-    model_effective, _sc_cfg = get_magnetization_config_from_meta(run.meta)
-    debug: dict[str, object] = {"model_effective": model_effective}
+    model_effective_meta, sc_cfg_meta = get_magnetization_config_from_meta(run.meta)
+    if mag_model_eval == "auto":
+        model_effective_eval = model_effective_meta
+        sc_cfg_eval = sc_cfg_meta
+    elif mag_model_eval == "self-consistent-easy-axis":
+        model_effective_eval = "self-consistent-easy-axis"
+        sc_cfg_eval = sc_cfg_override or sc_cfg_meta
+    else:
+        model_effective_eval = "fixed"
+        sc_cfg_eval = {}
 
-    if model_effective == "self-consistent-easy-axis":
+    debug: dict[str, object] = {
+        "model_effective": model_effective_eval,
+        "model_effective_meta": model_effective_meta,
+        "model_effective_eval": model_effective_eval,
+    }
+
+    if model_effective_eval == "self-consistent-easy-axis":
         phi_rkn = phi_rkn_from_run(run, phi0=phi0)
         r0_rkn = _build_r0_rkn(run)
-        m_flat, sc_debug = compute_m_flat_from_run(run.run_dir, run.geometry, phi_rkn, r0_rkn)
+        sc_override = sc_cfg_eval if mag_model_eval != "auto" else None
+        m_flat, sc_debug = compute_m_flat_from_run(
+            run.run_dir,
+            run.geometry,
+            phi_rkn,
+            r0_rkn,
+            sc_cfg_override=sc_override,
+        )
         r0_flat = r0_rkn.reshape(-1, 3)
         Bx, By, Bz, B0x, B0y, B0z = compute_b_and_b0_from_m_flat(
             m_flat, r0_flat, pts, factor=FACTOR
@@ -162,8 +186,18 @@ def compute_error_map_ppm_plane(
     coord0: float = 0.0,
     roi_r: float = 0.14,
     step: float = 0.001,
+    mag_model_eval: MagModelEval = "auto",
+    sc_cfg_override: dict[str, Any] | None = None,
 ) -> ErrorMap2D:
-    m, _debug = _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
+    m, _debug = _compute_error_map_impl(
+        run,
+        plane=plane,
+        coord0=coord0,
+        roi_r=roi_r,
+        step=step,
+        mag_model_eval=mag_model_eval,
+        sc_cfg_override=sc_cfg_override,
+    )
     return m
 
 
@@ -174,8 +208,18 @@ def compute_error_map_ppm_plane_with_debug(
     coord0: float = 0.0,
     roi_r: float = 0.14,
     step: float = 0.001,
+    mag_model_eval: MagModelEval = "auto",
+    sc_cfg_override: dict[str, Any] | None = None,
 ) -> tuple[ErrorMap2D, dict[str, object]]:
-    return _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
+    return _compute_error_map_impl(
+        run,
+        plane=plane,
+        coord0=coord0,
+        roi_r=roi_r,
+        step=step,
+        mag_model_eval=mag_model_eval,
+        sc_cfg_override=sc_cfg_override,
+    )
 
 
 def extract_cross_section_y0(m: ErrorMap2D) -> CrossSection1D:

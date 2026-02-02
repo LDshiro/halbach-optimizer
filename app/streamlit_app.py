@@ -134,14 +134,27 @@ def _cached_load_run(path_text: str, mtime: float, _meta_mtime: float) -> RunBun
 
 @st.cache_data(show_spinner=False)
 def _cached_error_map(
-    path_text: str, mtime: float, _meta_key: str, roi_r: float, step: float
+    path_text: str,
+    mtime: float,
+    _meta_key: str,
+    roi_r: float,
+    step: float,
+    mag_model_eval: str,
+    sc_cfg_key: str,
 ) -> tuple[ErrorMap2D, dict[str, object]]:
     from halbach.run_io import load_run
     from halbach.viz2d import compute_error_map_ppm_plane_with_debug
 
     run = load_run(Path(path_text))
+    sc_cfg_override = json.loads(sc_cfg_key) if sc_cfg_key else None
     return compute_error_map_ppm_plane_with_debug(
-        run, plane="xy", coord0=0.0, roi_r=roi_r, step=step
+        run,
+        plane="xy",
+        coord0=0.0,
+        roi_r=roi_r,
+        step=step,
+        mag_model_eval=cast(Literal["auto", "fixed", "self-consistent-easy-axis"], mag_model_eval),
+        sc_cfg_override=sc_cfg_override,
     )
 
 
@@ -367,6 +380,96 @@ def main() -> None:
                 "Contour level (ppm)", min_value=1.0, max_value=20000.0, value=1000.0, step=100.0
             )
         )
+        st.header("2D Magnetization Eval")
+        mag_model_eval = st.selectbox(
+            "Magnetization model (2D)",
+            ["auto", "fixed", "self-consistent-easy-axis"],
+            index=0,
+            key="map_mag_model_eval",
+        )
+        sc_cfg_eval: dict[str, object] | None = None
+        sc_cfg_key = ""
+        if mag_model_eval == "self-consistent-easy-axis":
+            with st.expander("Self-consistent eval settings", expanded=True):
+                sc_chi = float(
+                    st.number_input(
+                        "chi (2D eval)", min_value=0.0, max_value=10.0, value=0.0, step=0.01
+                    )
+                )
+                sc_Nd = float(
+                    st.number_input(
+                        "Nd (2D eval)",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=1.0 / 3.0,
+                        step=0.01,
+                    )
+                )
+                sc_p0 = float(
+                    st.number_input(
+                        "p0 (2D eval)", min_value=0.0, max_value=10.0, value=1.0, step=0.01
+                    )
+                )
+                sc_volume_mm3 = float(
+                    st.number_input(
+                        "volume_mm3 (2D eval)",
+                        min_value=1.0,
+                        max_value=1e6,
+                        value=1000.0,
+                        step=10.0,
+                    )
+                )
+                sc_iters = int(
+                    st.number_input("iters (2D eval)", min_value=1, max_value=500, value=30, step=1)
+                )
+                sc_omega = float(
+                    st.number_input(
+                        "omega (2D eval)", min_value=0.01, max_value=1.0, value=0.6, step=0.01
+                    )
+                )
+                st.markdown("**Near window (2D eval)**")
+                sc_near_wr = int(
+                    st.number_input("wr (2D eval)", min_value=0, max_value=10, value=0, step=1)
+                )
+                sc_near_wz = int(
+                    st.number_input("wz (2D eval)", min_value=0, max_value=10, value=1, step=1)
+                )
+                sc_near_wphi = int(
+                    st.number_input("wphi (2D eval)", min_value=0, max_value=10, value=2, step=1)
+                )
+                sc_near_kernel = st.selectbox(
+                    "near kernel (2D eval)",
+                    ["dipole", "multi-dipole"],
+                    index=0,
+                    key="map_sc_near_kernel",
+                )
+                sc_subdip_n = 2
+                if sc_near_kernel == "multi-dipole":
+                    sc_subdip_n = int(
+                        st.number_input(
+                            "subdip_n (2D eval)",
+                            min_value=2,
+                            max_value=10,
+                            value=2,
+                            step=1,
+                        )
+                    )
+            sc_cfg_eval = dict(
+                chi=sc_chi,
+                Nd=sc_Nd,
+                p0=sc_p0,
+                volume_mm3=sc_volume_mm3,
+                iters=sc_iters,
+                omega=sc_omega,
+                near_window=dict(wr=sc_near_wr, wz=sc_near_wz, wphi=sc_near_wphi),
+                near_kernel=sc_near_kernel,
+                subdip_n=sc_subdip_n,
+            )
+            sc_cfg_key = json.dumps(sc_cfg_eval, sort_keys=True)
+            if not _jax_available():
+                st.error(
+                    "JAX is required for self-consistent 2D evaluation unless sc_p_flat is saved."
+                )
 
         st.header("3D Settings")
         view_target = st.radio("3D run", ["initial", "optimized"], index=1)
@@ -420,13 +523,29 @@ def main() -> None:
     if init_run is not None and init_mtime is not None:
         try:
             init_key = _magnetization_cache_key(init_run.meta)
-            init_map, init_debug = _cached_error_map(init_path, init_mtime, init_key, roi_r, step)
+            init_map, init_debug = _cached_error_map(
+                init_path,
+                init_mtime,
+                init_key,
+                roi_r,
+                step,
+                mag_model_eval,
+                sc_cfg_key,
+            )
         except Exception as exc:
             st.error(f"Initial 2D map error: {exc}")
     if opt_run is not None and opt_mtime is not None:
         try:
             opt_key = _magnetization_cache_key(opt_run.meta)
-            opt_map, opt_debug = _cached_error_map(opt_path, opt_mtime, opt_key, roi_r, step)
+            opt_map, opt_debug = _cached_error_map(
+                opt_path,
+                opt_mtime,
+                opt_key,
+                roi_r,
+                step,
+                mag_model_eval,
+                sc_cfg_key,
+            )
         except Exception as exc:
             st.error(f"Optimized 2D map error: {exc}")
 
@@ -524,18 +643,18 @@ def main() -> None:
             map_cols = st.columns(2)
             with map_cols[0]:
                 fig_init = _plot_error_map(init_map, vmin, vmax, contour_level, "Initial")
-                st.plotly_chart(fig_init, use_container_width=True)
+                st.plotly_chart(fig_init, use_container_width=True, key="map_init")
             with map_cols[1]:
                 fig_opt = _plot_error_map(opt_map, vmin, vmax, contour_level, "Optimized")
-                st.plotly_chart(fig_opt, use_container_width=True)
+                st.plotly_chart(fig_opt, use_container_width=True, key="map_opt")
 
             line_cols = st.columns(2)
             with line_cols[0]:
                 fig_line_init = _plot_cross_section(init_map, vmin, vmax, "Initial y=0")
-                st.plotly_chart(fig_line_init, use_container_width=True)
+                st.plotly_chart(fig_line_init, use_container_width=True, key="line_init")
             with line_cols[1]:
                 fig_line_opt = _plot_cross_section(opt_map, vmin, vmax, "Optimized y=0")
-                st.plotly_chart(fig_line_opt, use_container_width=True)
+                st.plotly_chart(fig_line_opt, use_container_width=True, key="line_opt")
 
     with tabs[2]:
         st.subheader("3D Magnet View")
@@ -558,7 +677,7 @@ def main() -> None:
                     arrow_head_angle_deg=arrow_head_angle_deg,
                     height=700,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key="magnet_single")
         with view_tabs[1]:
             if init_run is None or opt_run is None:
                 st.info("Both initial and optimized runs are required for 3D comparison.")
@@ -620,10 +739,10 @@ def main() -> None:
                 compare_cols = st.columns(2)
                 with compare_cols[0]:
                     st.caption("Initial")
-                    st.plotly_chart(fig_init, use_container_width=True)
+                    st.plotly_chart(fig_init, use_container_width=True, key="magnet_compare_init")
                 with compare_cols[1]:
                     st.caption("Optimized")
-                    st.plotly_chart(fig_opt, use_container_width=True)
+                    st.plotly_chart(fig_opt, use_container_width=True, key="magnet_compare_opt")
 
     with tabs[3]:
         st.subheader("Optimize (L-BFGS-B)")
@@ -754,6 +873,66 @@ def main() -> None:
                     key="lambda_z",
                 )
             )
+        st.markdown("**Magnetization model**")
+        mag_model = st.selectbox(
+            "Magnetization model",
+            ["fixed", "self-consistent-easy-axis"],
+            index=0,
+            key="mag_model",
+        )
+        sc_chi = 0.0
+        sc_Nd = 1.0 / 3.0
+        sc_p0 = 1.0
+        sc_volume_mm3 = 1000.0
+        sc_iters = 30
+        sc_omega = 0.6
+        sc_near_wr = 0
+        sc_near_wz = 1
+        sc_near_wphi = 2
+        sc_near_kernel = "dipole"
+        sc_subdip_n = 2
+        if mag_model == "self-consistent-easy-axis":
+            with st.expander("Self-consistent settings", expanded=True):
+                sc_chi = float(
+                    st.number_input("chi", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
+                )
+                sc_Nd = float(
+                    st.number_input("Nd", min_value=0.0, max_value=1.0, value=1.0 / 3.0, step=0.01)
+                )
+                sc_p0 = float(
+                    st.number_input("p0", min_value=0.0, max_value=10.0, value=1.0, step=0.01)
+                )
+                sc_volume_mm3 = float(
+                    st.number_input(
+                        "volume_mm3",
+                        min_value=1.0,
+                        max_value=1e6,
+                        value=1000.0,
+                        step=10.0,
+                    )
+                )
+                sc_iters = int(
+                    st.number_input("iters", min_value=1, max_value=500, value=30, step=1)
+                )
+                sc_omega = float(
+                    st.number_input("omega", min_value=0.01, max_value=1.0, value=0.6, step=0.01)
+                )
+                st.markdown("**Near window**")
+                sc_near_wr = int(st.number_input("wr", min_value=0, max_value=10, value=0, step=1))
+                sc_near_wz = int(st.number_input("wz", min_value=0, max_value=10, value=1, step=1))
+                sc_near_wphi = int(
+                    st.number_input("wphi", min_value=0, max_value=10, value=2, step=1)
+                )
+                sc_near_kernel = st.selectbox(
+                    "near kernel",
+                    ["dipole", "multi-dipole"],
+                    index=0,
+                    key="sc_near_kernel",
+                )
+                if sc_near_kernel == "multi-dipole":
+                    sc_subdip_n = int(
+                        st.number_input("subdip_n", min_value=2, max_value=10, value=2, step=1)
+                    )
         jax_issue: str | None = None
         if (angle_model != "legacy-alpha" or grad_backend == "jax") and not jax_available:
             jax_issue = (
@@ -761,7 +940,17 @@ def main() -> None:
                 "Install `jax` and `jaxlib`, or switch to legacy-alpha + analytic."
             )
             st.error(jax_issue)
-        can_start = jax_issue is None
+        sc_errors: list[str] = []
+        if mag_model == "self-consistent-easy-axis":
+            if not jax_available:
+                sc_errors.append("JAX is required for self-consistent magnetization.")
+            if angle_model == "legacy-alpha" and grad_backend != "jax":
+                sc_errors.append("Self-consistent legacy-alpha requires grad_backend=jax.")
+            if sc_near_kernel == "multi-dipole" and sc_subdip_n < 2:
+                sc_errors.append("subdip_n must be >= 2 for multi-dipole.")
+        for msg in sc_errors:
+            st.error(msg)
+        can_start = jax_issue is None and not sc_errors
         fix_center_radius_layers = int(
             st.selectbox(
                 "Fixed center radius layers (z≈0)",
@@ -948,6 +1137,18 @@ def main() -> None:
                                     r_min_mm=r_min_mm,
                                     r_max_mm=r_max_mm,
                                     fix_center_radius_layers=fix_center_radius_layers,
+                                    mag_model=mag_model,
+                                    sc_chi=sc_chi,
+                                    sc_Nd=sc_Nd,
+                                    sc_p0=sc_p0,
+                                    sc_volume_mm3=sc_volume_mm3,
+                                    sc_iters=sc_iters,
+                                    sc_omega=sc_omega,
+                                    sc_near_wr=sc_near_wr,
+                                    sc_near_wz=sc_near_wz,
+                                    sc_near_wphi=sc_near_wphi,
+                                    sc_near_kernel=sc_near_kernel,
+                                    sc_subdip_n=sc_subdip_n,
                                     repo_root=ROOT,
                                 )
                                 st.session_state["opt_job"] = job
@@ -1006,11 +1207,24 @@ def main() -> None:
                         r_min_mm=r_min_mm,
                         r_max_mm=r_max_mm,
                         fix_center_radius_layers=fix_center_radius_layers,
+                        mag_model=mag_model,
+                        sc_chi=sc_chi,
+                        sc_Nd=sc_Nd,
+                        sc_p0=sc_p0,
+                        sc_volume_mm3=sc_volume_mm3,
+                        sc_iters=sc_iters,
+                        sc_omega=sc_omega,
+                        sc_near_wr=sc_near_wr,
+                        sc_near_wz=sc_near_wz,
+                        sc_near_wphi=sc_near_wphi,
+                        sc_near_kernel=sc_near_kernel,
+                        sc_subdip_n=sc_subdip_n,
                         repo_root=ROOT,
                     )
                     st.session_state["opt_job"] = job
                     st.session_state["opt_job_fix_center_radius_layers"] = fix_center_radius_layers
                     st.success(f"Started optimization: {job.out_dir}")
+                    st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to start optimization: {exc}")
 
@@ -1053,6 +1267,18 @@ def main() -> None:
                 r_min_mm=r_min_mm,
                 r_max_mm=r_max_mm,
                 fix_center_radius_layers=fix_center_radius_layers,
+                mag_model=mag_model,
+                sc_chi=sc_chi,
+                sc_Nd=sc_Nd,
+                sc_p0=sc_p0,
+                sc_volume_mm3=sc_volume_mm3,
+                sc_iters=sc_iters,
+                sc_omega=sc_omega,
+                sc_near_wr=sc_near_wr,
+                sc_near_wz=sc_near_wz,
+                sc_near_wphi=sc_near_wphi,
+                sc_near_kernel=sc_near_kernel,
+                sc_subdip_n=sc_subdip_n,
             )
             st.code(" ".join(cmd))
 

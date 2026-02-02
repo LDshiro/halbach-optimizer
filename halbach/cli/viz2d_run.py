@@ -25,6 +25,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--no-png", action="store_true", help="skip PNG output")
     ap.add_argument("--no-npz", action="store_true", help="skip NPZ output")
     ap.add_argument("--no-json", action="store_true", help="skip JSON output")
+    ap.add_argument(
+        "--mag-model-eval",
+        choices=["auto", "fixed", "self-consistent-easy-axis"],
+        default="auto",
+        help="magnetization model for evaluation",
+    )
+    ap.add_argument("--sc-chi", type=float, default=0.0, help="self-consistent chi")
+    ap.add_argument("--sc-Nd", type=float, default=1.0 / 3.0, help="self-consistent Nd")
+    ap.add_argument("--sc-p0", type=float, default=1.0, help="self-consistent p0")
+    ap.add_argument(
+        "--sc-volume-mm3",
+        type=float,
+        default=1000.0,
+        help="self-consistent volume [mm^3]",
+    )
+    ap.add_argument("--sc-iters", type=int, default=30, help="self-consistent iterations")
+    ap.add_argument("--sc-omega", type=float, default=0.6, help="self-consistent mixing")
+    ap.add_argument("--sc-near-wr", type=int, default=0, help="near window wr")
+    ap.add_argument("--sc-near-wz", type=int, default=1, help="near window wz")
+    ap.add_argument("--sc-near-wphi", type=int, default=2, help="near window wphi")
+    ap.add_argument(
+        "--sc-near-kernel",
+        type=str,
+        choices=["dipole", "multi-dipole"],
+        default="dipole",
+        help="near kernel",
+    )
+    ap.add_argument("--sc-subdip-n", type=int, default=2, help="sub-dipole grid size")
     return ap.parse_args(argv)
 
 
@@ -67,6 +95,26 @@ def run() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     run = load_run(run_path)
+    sc_cfg_override: dict[str, Any] | None = None
+    if args.mag_model_eval == "self-consistent-easy-axis":
+        sc_cfg_override = dict(
+            chi=float(args.sc_chi),
+            Nd=float(args.sc_Nd),
+            p0=float(args.sc_p0),
+            volume_mm3=float(args.sc_volume_mm3),
+            iters=int(args.sc_iters),
+            omega=float(args.sc_omega),
+            near_window=dict(
+                wr=int(args.sc_near_wr),
+                wz=int(args.sc_near_wz),
+                wphi=int(args.sc_near_wphi),
+            ),
+            near_kernel=str(args.sc_near_kernel),
+            subdip_n=int(args.sc_subdip_n),
+        )
+    mag_model_eval = cast(
+        Literal["auto", "fixed", "self-consistent-easy-axis"], args.mag_model_eval
+    )
     try:
         m, debug = compute_error_map_ppm_plane_with_debug(
             run,
@@ -74,6 +122,8 @@ def run() -> int:
             coord0=float(args.coord0),
             roi_r=float(args.roi_r),
             step=float(args.step),
+            mag_model_eval=mag_model_eval,
+            sc_cfg_override=sc_cfg_override,
         )
     except RuntimeError as exc:
         msg = str(exc)

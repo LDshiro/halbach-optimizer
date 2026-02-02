@@ -141,7 +141,7 @@ def solve_p_easy_axis_near(
         p_new = (p0 + chi * volume_m3 * h_ext) / denom
         return (1.0 - omega) * p + omega * p_new
 
-    return jax.lax.fori_loop(0, int(iters), _body, p_init)
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
 
 
 def solve_p_easy_axis_near_multi_dipole(
@@ -175,7 +175,7 @@ def solve_p_easy_axis_near_multi_dipole(
         p_new = (p0 + chi * volume_m3 * h_ext) / denom
         return (1.0 - omega) * p + omega * p_new
 
-    return jax.lax.fori_loop(0, int(iters), _body, p_init)
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
 
 
 __all__ = [

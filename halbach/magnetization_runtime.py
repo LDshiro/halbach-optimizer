@@ -202,9 +202,19 @@ def compute_m_flat_from_run(
     geom: Geometry,
     phi_rkn: NDArray[np.float64],
     r0_rkn: NDArray[np.float64],
+    *,
+    sc_cfg_override: dict[str, Any] | None = None,
 ) -> tuple[NDArray[np.float64], dict[str, Any]]:
     meta = _load_meta(run_dir)
-    model_effective, sc_cfg = get_magnetization_config_from_meta(meta)
+    model_effective_meta, sc_cfg_meta = get_magnetization_config_from_meta(meta)
+    if sc_cfg_override is not None:
+        if not isinstance(sc_cfg_override, dict):
+            raise TypeError("sc_cfg_override must be a dict when provided")
+        model_effective = "self-consistent-easy-axis"
+        sc_cfg = sc_cfg_override
+    else:
+        model_effective = model_effective_meta
+        sc_cfg = sc_cfg_meta
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     if model_effective == "self-consistent-easy-axis":
@@ -243,6 +253,9 @@ def compute_m_flat_from_run(
     m_flat = build_m_flat_from_phi_and_p(phi_flat, p_flat)
 
     debug: dict[str, Any] = {"model_effective": model_effective}
+    if sc_cfg_override is not None:
+        debug["model_effective_meta"] = model_effective_meta
+        debug["model_effective_eval"] = model_effective
     if model_effective == "self-consistent-easy-axis":
         p_min = float(np.min(p_flat))
         p_max = float(np.max(p_flat))
