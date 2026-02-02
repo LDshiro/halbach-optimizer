@@ -475,6 +475,8 @@ def main() -> None:
                 st.write(f"ppm max|.|: {ppm_maxabs:.2f}")
             if debug is not None and debug.get("model_effective") == "self-consistent-easy-axis":
                 st.markdown("**Self-consistent diagnostics**")
+                if debug.get("sc_p_source") is not None:
+                    st.write(f"p source: {debug.get('sc_p_source')}")
                 st.write(
                     f"near_kernel: {debug.get('sc_near_kernel')} "
                     f"subdip_n: {debug.get('sc_subdip_n')} "

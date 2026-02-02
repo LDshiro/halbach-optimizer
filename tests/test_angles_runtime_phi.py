@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -28,7 +29,7 @@ def _write_run(
     cth = np.cos(theta)
     sth = np.sin(theta)
     z_layers = np.linspace(-0.02, 0.02, K)
-    payload = dict(
+    payload: dict[str, Any] = dict(
         alphas_opt=alphas,
         r_bases_opt=r_bases,
         theta=theta,

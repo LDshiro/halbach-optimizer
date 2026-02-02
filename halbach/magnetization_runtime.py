@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, m0
 from halbach.near import NearWindow, build_near_graph
+from halbach.physics import compute_B_and_B0_from_m_flat
 from halbach.types import Geometry
 
 EPS = 1e-30
@@ -68,6 +70,23 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
         near_kernel=str(sc_cfg.get("near_kernel", "dipole")),
         subdip_n=int(sc_cfg.get("subdip_n", 2)),
     )
+
+
+def sc_cfg_fingerprint(sc_cfg: dict[str, Any]) -> str:
+    sc = _parse_sc_cfg(sc_cfg)
+    core = dict(
+        chi=float(sc["chi"]),
+        Nd=float(sc["Nd"]),
+        p0=float(sc["p0"]),
+        volume_mm3=float(sc["volume_mm3"]),
+        iters=int(sc["iters"]),
+        omega=float(sc["omega"]),
+        near_window=dict(sc["near_window"]),
+        near_kernel=str(sc["near_kernel"]),
+        subdip_n=int(sc["subdip_n"]),
+    )
+    payload = json.dumps(core, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def compute_p_flat_self_consistent_jax(
@@ -146,7 +165,7 @@ def build_m_flat_from_phi_and_p(
     p_flat: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     u = np.stack([np.cos(phi_flat), np.sin(phi_flat), np.zeros_like(phi_flat)], axis=1)
-    return p_flat[:, None] * u
+    return np.asarray(p_flat[:, None] * u, dtype=np.float64)
 
 
 def compute_b_and_b0_from_m_flat(
@@ -163,19 +182,11 @@ def compute_b_and_b0_from_m_flat(
     float,
     float,
 ]:
-    origin = np.zeros((1, 3), dtype=np.float64)
-    pts_all = np.concatenate([pts, origin], axis=0)
-
-    r = pts_all[None, :, :] - r0_flat[:, None, :]
-    r2 = np.sum(r * r, axis=2)
-    rmag = np.sqrt(r2) + EPS
-    invr3 = 1.0 / (rmag * r2 + EPS)
-    rhat = r / rmag[:, :, None]
-    mdotr = np.sum(m_flat[:, None, :] * rhat, axis=2)
-    term = (3.0 * mdotr[:, :, None] * rhat - m_flat[:, None, :]) * invr3[:, :, None]
-    B_all = float(factor) * np.sum(term, axis=0)
-    B = B_all[:-1]
-    B0 = B_all[-1]
+    origin = np.zeros(3, dtype=np.float64)
+    pts_f = np.asarray(pts, dtype=np.float64)
+    r0_f = np.asarray(r0_flat, dtype=np.float64)
+    m_f = np.asarray(m_flat, dtype=np.float64)
+    B, B0 = compute_B_and_B0_from_m_flat(pts_f, r0_f, m_f, float(factor), origin)
     return (
         np.asarray(B[:, 0], dtype=np.float64),
         np.asarray(B[:, 1], dtype=np.float64),
@@ -197,10 +208,38 @@ def compute_m_flat_from_run(
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     if model_effective == "self-consistent-easy-axis":
-        p_flat = compute_p_flat_self_consistent_jax(phi_rkn, r0_rkn, geom, sc_cfg)
+        fp_expected = sc_cfg_fingerprint(sc_cfg)
+        p_flat = None
+        sc_source = "computed"
+        results_path = run_dir / "results.npz"
+        if results_path.is_file():
+            try:
+                with np.load(results_path, allow_pickle=False) as data:
+                    if "sc_p_flat" in data and "sc_cfg_fingerprint" in data:
+                        p_candidate = np.asarray(data["sc_p_flat"], dtype=np.float64)
+                        fp_raw = data["sc_cfg_fingerprint"]
+                        if isinstance(fp_raw, np.ndarray):
+                            if fp_raw.shape == ():
+                                fp_saved = str(fp_raw.item())
+                            else:
+                                fp_saved = str(fp_raw.reshape(-1)[0])
+                        else:
+                            fp_saved = str(fp_raw)
+                        if fp_saved == fp_expected and p_candidate.shape == (phi_flat.size,):
+                            p_flat = p_candidate
+                            sc_source = "saved"
+            except Exception:
+                p_flat = None
+        if p_flat is None:
+            if importlib.util.find_spec("jax") is None:
+                raise RuntimeError(
+                    "self-consistent visualization requires JAX unless sc_p_flat is saved in results.npz"
+                )
+            p_flat = compute_p_flat_self_consistent_jax(phi_rkn, r0_rkn, geom, sc_cfg)
     else:
         p_flat = np.full(phi_flat.shape, float(m0), dtype=np.float64)
 
+    assert p_flat is not None
     m_flat = build_m_flat_from_phi_and_p(phi_flat, p_flat)
 
     debug: dict[str, Any] = {"model_effective": model_effective}
@@ -213,6 +252,8 @@ def compute_m_flat_from_run(
         sc = _parse_sc_cfg(sc_cfg)
         debug.update(
             dict(
+                sc_p_source=sc_source,
+                sc_cfg_fingerprint=fp_expected,
                 sc_p_min=p_min,
                 sc_p_max=p_max,
                 sc_p_mean=p_mean,
@@ -234,6 +275,7 @@ def compute_m_flat_from_run(
 
 __all__ = [
     "get_magnetization_config_from_meta",
+    "sc_cfg_fingerprint",
     "compute_p_flat_self_consistent_jax",
     "build_m_flat_from_phi_and_p",
     "compute_b_and_b0_from_m_flat",
