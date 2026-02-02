@@ -43,13 +43,7 @@ from numpy.typing import NDArray
 from scipy.io import savemat
 
 from halbach.constants import FACTOR, m0, mu0, phi0
-from halbach.geom import (
-    build_r_bases_from_vars,
-    build_roi_points,
-    build_symmetry_indices,
-    pack_x,
-    unpack_x,
-)
+from halbach.geom import build_param_map, build_roi_points, pack_x, unpack_x
 from halbach.io import load_nominal_npz
 from halbach.logging_utils import configure_logging
 from halbach.objective import objective_with_grads_fixed
@@ -155,7 +149,7 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         dz=nom["dz"],
         Lz=nom["Lz"],
     )
-    lower_var, upper_var, _ = build_symmetry_indices(geom.K)
+    param_map = build_param_map(geom.R, geom.K, n_fix_radius=4)
 
     # 2) ROI の離散点（目的関数評価用）
     pts = build_roi_points(args.roi_r, args.roi_step)
@@ -164,15 +158,16 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
     #    - alphas は名目のまま
     #    - r_vars は「下半分」層の r_bases を切り出す
     al0 = nom["alphas"].copy()
-    rv0 = np.array([nom["r_bases"][k] for k in lower_var], dtype=np.float64)
-    x0 = cast(Float1DArray, pack_x(al0, rv0))
+    r_bases0 = np.array(nom["r_bases"], dtype=np.float64, copy=True)
+    x0 = cast(Float1DArray, pack_x(al0, r_bases0, param_map))
 
     # 4) Box 制約（半径の下限: 初期値 - min_radius_drop_mm）
     delta_m = args.min_radius_drop_mm * 1e-3
-    P = geom.R * geom.K
     lb = np.full(x0.size, -np.inf, dtype=np.float64)
     ub = np.full(x0.size, np.inf, dtype=np.float64)
-    lb[P:] = rv0 - delta_m
+    n_alpha = int(param_map.free_alpha_idx.size)
+    rv0 = r_bases0[param_map.free_r_idx]
+    lb[n_alpha:] = rv0 - delta_m
     bounds = bounds_from_arrays(lb, ub)
 
     # 5) ロバスト正則化の公差・重み（y-space）
@@ -189,9 +184,9 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
             sigma_r,
             args.rho_gn,
             args.eps_hvp,
-            r0,
-            lower_var,
-            upper_var,
+            param_map,
+            al0,
+            r_bases0,
         )
         extras: dict[str, Any] = {"J": float(Jn), "B0": float(B0), "gn2": float(gn2)}
         return float(Jgn), gx, extras
@@ -237,8 +232,7 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
     )
     # 8) 出力整形
     x_opt = res.x
-    al_opt, rv_opt = unpack_x(x_opt, geom.R, geom.K)
-    rb_opt = build_r_bases_from_vars(rv_opt, geom.K, r0, lower_var, upper_var)
+    al_opt, rb_opt = unpack_x(x_opt, al0, r_bases0, param_map)
 
     Jgn_f, _, B0_f, Jn_f, gn2_f = fun_grad_gradnorm_fixed(
         x_opt,
@@ -248,9 +242,9 @@ def run_robust_from_nominal(args: argparse.Namespace) -> None:
         sigma_r,
         args.rho_gn,
         args.eps_hvp,
-        r0,
-        lower_var,
-        upper_var,
+        param_map,
+        al0,
+        r_bases0,
     )
     logger.info(
         f"[done] success={res.success}, iters={res.nit}, Jgn={Jgn_f:.6e}, "

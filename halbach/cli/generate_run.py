@@ -6,7 +6,7 @@ from pathlib import Path
 from halbach.generate import generate_halbach_initial, write_run
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Generate an initial Halbach run directory")
     ap.add_argument("--out", required=True, help="output run directory")
     ap.add_argument("--name", default=None, help="run name (default: out dir name)")
@@ -22,11 +22,11 @@ def parse_args() -> argparse.Namespace:
         help="ring offset step [mm]",
     )
     ap.add_argument("--schema-version", type=int, default=1, help="schema version")
-    return ap.parse_args()
+    return ap.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     out_dir = Path(args.out)
     name = args.name or out_dir.name
 

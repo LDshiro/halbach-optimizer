@@ -6,7 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR
-from halbach.geom import build_r_bases_from_vars, unpack_x
+from halbach.geom import ParamMap, pack_grad, unpack_x
 from halbach.objective import objective_with_grads_fixed
 from halbach.types import Geometry
 
@@ -58,20 +58,21 @@ def fun_grad_gradnorm_fixed(
     sigma_r: float,
     rho_gn: float,
     eps_hvp: float,
-    r0: float,
-    lower_var: NDArray[np.int_],
-    upper_var: NDArray[np.int_],
+    param_map: ParamMap,
+    alphas0: NDArray[np.float64],
+    r_bases0: NDArray[np.float64],
     factor: float = FACTOR,
 ) -> tuple[float, Float1DArray, float, float, float]:
     """
     Robust objective and x-space gradient using y-space GN formulation.
     """
-    alphas, r_vars = unpack_x(x, geom.R, geom.K)
-    r_bases = build_r_bases_from_vars(r_vars, geom.K, r0, lower_var, upper_var)
+    alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
 
     J, gA_y, gRb_y, B0n = objective_with_grads_fixed(alphas, r_bases, geom, pts, factor=factor)
 
-    g_y = np.concatenate([gA_y.ravel(), gRb_y])
+    gA_flat = gA_y.ravel()
+    gR_masked = gRb_y * param_map.free_r_mask
+    g_y = np.concatenate([gA_flat, gR_masked])
     P_A = geom.R * geom.K
     gn2 = (sigma_alpha**2) * np.dot(g_y[:P_A], g_y[:P_A]) + (sigma_r**2) * np.dot(
         g_y[P_A:], g_y[P_A:]
@@ -84,13 +85,9 @@ def fun_grad_gradnorm_fixed(
     rho_gn_eff = rho_gn / (scale * scale)
     Jgn = J + 0.5 * rho_gn_eff * gn2
 
-    gA_x = gA_y.ravel() + rho_gn_eff * hvA
-    gR_x = np.zeros_like(r_vars)
-    for j, k_low in enumerate(lower_var):
-        k_up = upper_var[j]
-        gR_x[j] = (gRb_y[k_low] + gRb_y[k_up]) + rho_gn_eff * (hvR[k_low] + hvR[k_up])
-
-    grad_x = cast(Float1DArray, np.concatenate([gA_x, gR_x]))
+    gA_full = (gA_flat + rho_gn_eff * hvA).reshape(geom.R, geom.K)
+    gR_full = gRb_y + rho_gn_eff * hvR
+    grad_x = cast(Float1DArray, pack_grad(gA_full, gR_full, param_map))
     return float(Jgn), grad_x, float(B0n), float(J), float(gn2)
 
 

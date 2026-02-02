@@ -17,14 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, FIELD_SCALE_DEFAULT, m0, phi0
-from halbach.geom import (
-    RoiMode,
-    build_r_bases_from_vars,
-    build_roi_points,
-    build_symmetry_indices,
-    pack_x,
-    unpack_x,
-)
+from halbach.geom import RoiMode, build_param_map, build_roi_points, pack_x, unpack_x
 from halbach.physics import objective_only
 from halbach.robust import Float1DArray, fun_grad_gradnorm_fixed
 from halbach.run_io import load_run
@@ -98,6 +91,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=20.0,
         help="lower bound: r_vars >= r_init - this [mm]",
+    )
+    ap.add_argument(
+        "--fix-center-radius-layers",
+        type=int,
+        choices=[0, 2, 4],
+        default=2,
+        help="number of center z-layers to fix radius only (0, 2, or 4)",
     )
     ap.add_argument("--mc-samples", type=int, default=600, help="MC samples")
     ap.add_argument("--run-mc", action="store_true", help="run Monte Carlo evaluation")
@@ -296,8 +296,9 @@ def run_optimize(args: argparse.Namespace) -> int:
     run = load_run(in_path)
     logger.info("load_run done in %.3fs", perf_counter() - t_load)
     geom = run.geometry
-    r0 = float(np.median(run.results.r_bases))
-    lower_var, upper_var, _ = build_symmetry_indices(geom.K)
+    param_map = build_param_map(geom.R, geom.K, n_fix_radius=int(args.fix_center_radius_layers))
+    alphas0 = np.array(run.results.alphas, dtype=np.float64, copy=True)
+    r_bases0 = np.array(run.results.r_bases, dtype=np.float64, copy=True)
 
     roi_mode = cast(RoiMode, args.roi_mode)
     logger.info(
@@ -344,15 +345,25 @@ def run_optimize(args: argparse.Namespace) -> int:
         )
     pts = downsampled.pts
 
-    rv0 = np.array([run.results.r_bases[k] for k in lower_var], dtype=np.float64)
-    x0 = cast(Float1DArray, pack_x(run.results.alphas, rv0))
+    x0 = cast(Float1DArray, pack_x(alphas0, r_bases0, param_map))
 
     delta_m = args.min_radius_drop_mm * 1e-3
     lb = np.full(x0.size, -np.inf, dtype=np.float64)
     ub = np.full(x0.size, np.inf, dtype=np.float64)
-    P = geom.R * geom.K
-    lb[P:] = rv0 - delta_m
+    n_alpha = int(param_map.free_alpha_idx.size)
+    rv0 = r_bases0[param_map.free_r_idx]
+    lb[n_alpha:] = rv0 - delta_m
     bounds = bounds_from_arrays(lb, ub)
+
+    angle_dim = geom.R * geom.K
+    radius_dim_free = int(param_map.free_r_idx.size)
+    logger.info(
+        "x_dim total = %d, angle_dim = %d, radius_dim_free = %d, fixed_radius_layers = %s",
+        x0.size,
+        angle_dim,
+        radius_dim_free,
+        param_map.fixed_k_radius.tolist(),
+    )
 
     sigma_alpha = np.deg2rad(args.sigma_alpha_deg)
     sigma_r = args.sigma_r_mm * 1e-3
@@ -377,9 +388,9 @@ def run_optimize(args: argparse.Namespace) -> int:
             sigma_r,
             args.rho_gn,
             args.eps_hvp,
-            r0,
-            lower_var,
-            upper_var,
+            param_map,
+            alphas0,
+            r_bases0,
             factor,
         )
         dt_eval = perf_counter() - t_eval
@@ -466,6 +477,8 @@ def run_optimize(args: argparse.Namespace) -> int:
                 gtol=float(args.gtol),
                 min_radius_drop_mm=float(args.min_radius_drop_mm),
             ),
+            fix_center_radius_layers=int(args.fix_center_radius_layers),
+            fixed_k_radius=param_map.fixed_k_radius.tolist(),
             dry_run=True,
         )
         meta_path = out_dir / "meta.json"
@@ -488,8 +501,7 @@ def run_optimize(args: argparse.Namespace) -> int:
         res.njev,
     )
 
-    al_opt, rv_opt = unpack_x(res.x, geom.R, geom.K)
-    rb_opt = build_r_bases_from_vars(rv_opt, geom.K, r0, lower_var, upper_var)
+    al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
 
     Jgn_f, _, B0_f, Jn_f, gn2_f = fun_grad_gradnorm_fixed(
         res.x,
@@ -499,9 +511,9 @@ def run_optimize(args: argparse.Namespace) -> int:
         sigma_r,
         args.rho_gn,
         args.eps_hvp,
-        r0,
-        lower_var,
-        upper_var,
+        param_map,
+        alphas0,
+        r_bases0,
         factor,
     )
     B0_f_T = B0_f / field_scale
@@ -569,6 +581,8 @@ def run_optimize(args: argparse.Namespace) -> int:
             gtol=float(args.gtol),
             min_radius_drop_mm=float(args.min_radius_drop_mm),
         ),
+        fix_center_radius_layers=int(args.fix_center_radius_layers),
+        fixed_k_radius=param_map.fixed_k_radius.tolist(),
         scipy_result=dict(
             success=bool(res.success),
             status=0 if res.success else 1,

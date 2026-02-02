@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from halbach.run_io import load_run
 from halbach.run_types import RunBundle
@@ -49,7 +50,7 @@ def normalize_run(
     _ensure_output_dir(out_path)
 
     results_out = out_path / "results.npz"
-    extra_npz: dict[str, np.ndarray] = {}
+    extra_npz: dict[str, npt.NDArray[Any]] = {}
     extras_skipped: list[str] = []
 
     for key, value in bundle.results.extras.items():
