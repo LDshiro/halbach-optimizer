@@ -145,6 +145,8 @@ def test_optimize_run_saves_sc_p_flat(tmp_path: Path, monkeypatch: pytest.Monkey
         fix_center_radius_layers=2,
         log_level="INFO",
         debug_stacks_secs=0,
+        sc_debug=False,
+        sc_debug_scale_check=True,
         dry_run=False,
     )
 

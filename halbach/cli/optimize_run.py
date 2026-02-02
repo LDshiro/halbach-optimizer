@@ -30,6 +30,7 @@ from halbach.geom import (
 from halbach.magnetization_runtime import compute_p_flat_self_consistent_jax, sc_cfg_fingerprint
 from halbach.objective import objective_with_grads_fixed
 from halbach.run_io import load_run
+from halbach.sc_debug import make_sc_debug_bundle
 from halbach.solvers.lbfgsb import solve_lbfgsb
 from halbach.solvers.types import LBFGSBOptions, SolveResult
 from halbach.symmetry import build_mirror_x0, expand_delta_phi
@@ -214,6 +215,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="dump stack traces every N seconds (0 disables)",
+    )
+    ap.add_argument("--sc-debug", action="store_true", help="write self-consistent debug bundle")
+    ap.add_argument(
+        "--sc-debug-scale-check",
+        dest="sc_debug_scale_check",
+        action="store_true",
+        default=True,
+        help="enable field-scale debug checks",
+    )
+    ap.add_argument(
+        "--no-sc-debug-scale-check",
+        dest="sc_debug_scale_check",
+        action="store_false",
+        help="disable field-scale debug checks",
     )
     ap.add_argument("--dry-run", action="store_true", help="evaluate once and exit")
     return ap.parse_args(argv)
@@ -1228,6 +1243,8 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     sc_p_flat: NDArray[np.float64] | None = None
     sc_cfg_fp: str | None = None
+    phi_rkn_final: NDArray[np.float64] | None = None
+    r0_rkn_final: NDArray[np.float64] | None = None
     if mag_model_effective == "self-consistent-easy-axis":
         try:
             sc_cfg_fp = sc_cfg_fingerprint(sc_cfg_payload)
@@ -1241,6 +1258,8 @@ def run_optimize(args: argparse.Namespace) -> int:
                 phi0_val=phi0,
             )
             r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
+            phi_rkn_final = phi_rkn
+            r0_rkn_final = r0_rkn
             sc_p_flat = compute_p_flat_self_consistent_jax(
                 phi_rkn,
                 r0_rkn,
@@ -1338,6 +1357,38 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     _write_trace(out_dir, res)
     logger.info("save done in %.3fs", perf_counter() - t_save)
+
+    if bool(args.sc_debug) and mag_model_effective == "self-consistent-easy-axis":
+        try:
+            if phi_rkn_final is None or r0_rkn_final is None:
+                phi_rkn_final = _phi_rkn_from_final(
+                    angle_model,
+                    geom,
+                    al_opt,
+                    delta_rep_opt,
+                    coeffs_opt,
+                    fourier_H=fourier_H,
+                    phi0_val=phi0,
+                )
+                r0_rkn_final = _build_r0_rkn_from_r_bases(rb_opt, geom)
+            pts_debug = build_roi_points(roi_r=0.05, roi_step=0.05)
+            if pts_debug.shape[0] > 100:
+                rng = np.random.default_rng(0)
+                sample_idx = rng.choice(pts_debug.shape[0], size=100, replace=False)
+                pts_debug = pts_debug[sample_idx]
+            make_sc_debug_bundle(
+                run_dir=out_dir,
+                out_dir=out_dir,
+                geom=geom,
+                phi_rkn=phi_rkn_final,
+                r0_rkn=r0_rkn_final,
+                pts=pts_debug,
+                factor=FACTOR,
+                field_scale_check=bool(args.sc_debug_scale_check),
+                scale_factor=10.0,
+            )
+        except Exception as exc:
+            logger.warning("sc_debug bundle failed: %s", exc)
 
     return 0
 

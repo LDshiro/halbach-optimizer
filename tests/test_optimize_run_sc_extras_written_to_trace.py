@@ -119,6 +119,8 @@ def test_sc_extras_written_to_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         fix_center_radius_layers=2,
         log_level="INFO",
         debug_stacks_secs=0,
+        sc_debug=False,
+        sc_debug_scale_check=True,
         dry_run=False,
     )
 
