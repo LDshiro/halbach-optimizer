@@ -316,6 +316,29 @@ def compute_error_map_ppm_plane_with_debug(
     )
 
 
+def compute_error_map_ppm_plane(
+    run: RunBundle,
+    *,
+    plane: Plane = "xy",
+    coord0: float = 0.0,
+    roi_r: float = 0.14,
+    step: float = 0.001,
+) -> ErrorMap2D:
+    m, _debug = _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
+    return m
+
+
+def compute_error_map_ppm_plane_with_debug(
+    run: RunBundle,
+    *,
+    plane: Plane = "xy",
+    coord0: float = 0.0,
+    roi_r: float = 0.14,
+    step: float = 0.001,
+) -> tuple[ErrorMap2D, dict[str, object]]:
+    return _compute_error_map_impl(run, plane=plane, coord0=coord0, roi_r=roi_r, step=step)
+
+
 def extract_cross_section_y0(m: ErrorMap2D) -> CrossSection1D:
     idx = int(np.argmin(np.abs(m.ys)))
     y0 = float(m.ys[idx])

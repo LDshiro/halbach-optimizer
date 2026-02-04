@@ -1584,6 +1584,61 @@ def main() -> None:
                     key="dc_tol_f",
                 )
             )
+            if r_bound_mode == "relative":
+                r_lower_delta_mm = float(
+                    st.number_input(
+                        "Lower delta (mm)",
+                        min_value=0.0,
+                        max_value=200.0,
+                        value=30.0,
+                        step=1.0,
+                        key="r_lower_delta_mm",
+                    )
+                )
+                r_upper_delta_mm = float(
+                    st.number_input(
+                        "Upper delta (mm)",
+                        min_value=0.0,
+                        max_value=200.0,
+                        value=30.0,
+                        step=1.0,
+                        key="r_upper_delta_mm",
+                    )
+                )
+                r_no_upper = st.checkbox("No upper bound", value=False, key="r_no_upper")
+                r_min_mm = 0.0
+                r_max_mm = 1e9
+            else:
+                r_min_mm = float(
+                    st.number_input(
+                        "Min radius (mm)",
+                        min_value=0.0,
+                        max_value=1e9,
+                        value=0.0,
+                        step=1.0,
+                        key="r_min_mm",
+                    )
+                )
+                r_max_mm = float(
+                    st.number_input(
+                        "Max radius (mm)",
+                        min_value=0.0,
+                        max_value=1e9,
+                        value=1e9,
+                        step=1.0,
+                        key="r_max_mm",
+                    )
+                )
+                r_lower_delta_mm = 30.0
+                r_upper_delta_mm = 30.0
+                r_no_upper = False
+        else:
+            r_bound_mode = "none"
+            r_lower_delta_mm = 30.0
+            r_upper_delta_mm = 30.0
+            r_no_upper = False
+            r_min_mm = 0.0
+            r_max_mm = 1e9
 
             st.markdown("**Initial guess (from L-BFGS run)**")
             dc_init_select = st.selectbox(
@@ -1878,6 +1933,243 @@ def main() -> None:
                 if dc_auto_refresh:
                     time.sleep(max(0.1, dc_refresh_secs))
                     st.rerun()
+        with st.expander("Generate initial run", expanded=False):
+            gen_cols = st.columns(3)
+            with gen_cols[0]:
+                gen_N = int(
+                    st.number_input("N", min_value=1, max_value=512, value=48, step=1, key="gen_N")
+                )
+                gen_Lz = float(
+                    st.number_input(
+                        "Lz (m)", min_value=0.01, max_value=2.0, value=0.64, step=0.01, key="gen_Lz"
+                    )
+                )
+            with gen_cols[1]:
+                gen_R = int(
+                    st.number_input("R", min_value=1, max_value=32, value=3, step=1, key="gen_R")
+                )
+                gen_diameter_mm = float(
+                    st.number_input(
+                        "Diameter (mm)",
+                        min_value=10.0,
+                        max_value=2000.0,
+                        value=400.0,
+                        step=10.0,
+                        key="gen_diameter_mm",
+                    )
+                )
+            with gen_cols[2]:
+                gen_K = int(
+                    st.number_input("K", min_value=1, max_value=256, value=24, step=1, key="gen_K")
+                )
+                gen_ring_offset_step_mm = float(
+                    st.number_input(
+                        "Ring offset step (mm)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=12.0,
+                        step=1.0,
+                        key="gen_ring_offset_step_mm",
+                    )
+                )
+
+            gen_tag = st.text_input("Generate output tag", value="init", key="gen_tag")
+            gen_use_as_input = st.checkbox(
+                "Use generated run as input", value=True, key="gen_use_as_input"
+            )
+            gen_start_opt = st.checkbox(
+                "Generate and start optimization", value=False, key="gen_start_opt"
+            )
+
+            gen_out_dir = build_generate_out_dir(
+                ROOT / "runs", tag=gen_tag, N=gen_N, R=gen_R, K=gen_K
+            )
+            st.caption(f"Output dir: {gen_out_dir}")
+
+            gen_clicked = st.button("Generate", key="gen_button")
+            if gen_clicked:
+                cmd = build_generate_command(
+                    gen_out_dir,
+                    N=gen_N,
+                    R=gen_R,
+                    K=gen_K,
+                    Lz=gen_Lz,
+                    diameter_mm=gen_diameter_mm,
+                    ring_offset_step_mm=gen_ring_offset_step_mm,
+                )
+                code, output = run_generate_command(cmd, cwd=ROOT)
+                st.session_state["gen_run_code"] = code
+                st.session_state["gen_run_output"] = output
+                st.session_state["gen_run_dir"] = str(gen_out_dir)
+                if code != 0:
+                    st.error(f"Generate failed (exit {code}).")
+                else:
+                    if gen_use_as_input:
+                        try:
+                            rel_path = str(gen_out_dir.relative_to(ROOT))
+                        except ValueError:
+                            rel_path = str(gen_out_dir)
+                        st.session_state["pending_init_select"] = rel_path
+                        st.session_state["pending_init_path"] = ""
+                    if gen_start_opt:
+                        if not can_start:
+                            st.error(jax_issue or "JAX is required for this configuration.")
+                        elif job_running:
+                            st.error("Optimization is already running.")
+                        else:
+                            opt_out_dir = _default_out_dir(f"{gen_tag}_opt")
+                            try:
+                                job = start_opt_job(
+                                    gen_out_dir,
+                                    opt_out_dir,
+                                    maxiter=maxiter,
+                                    gtol=gtol,
+                                    roi_r=roi_r_opt,
+                                    roi_step=roi_step_opt,
+                                    angle_model=angle_model,
+                                    grad_backend=grad_backend,
+                                    fourier_H=fourier_H,
+                                    lambda0=lambda0,
+                                    lambda_theta=lambda_theta,
+                                    lambda_z=lambda_z,
+                                    angle_init=angle_init,
+                                    r_bound_mode=r_bound_mode,
+                                    r_lower_delta_mm=r_lower_delta_mm,
+                                    r_upper_delta_mm=r_upper_delta_mm,
+                                    r_no_upper=r_no_upper,
+                                    r_min_mm=r_min_mm,
+                                    r_max_mm=r_max_mm,
+                                    fix_center_radius_layers=fix_center_radius_layers,
+                                    repo_root=ROOT,
+                                )
+                                st.session_state["opt_job"] = job
+                                st.session_state["opt_job_fix_center_radius_layers"] = (
+                                    fix_center_radius_layers
+                                )
+                                st.success(f"Started optimization: {job.out_dir}")
+                            except Exception as exc:
+                                st.error(f"Failed to start optimization: {exc}")
+                    st.rerun()
+
+            gen_code = st.session_state.get("gen_run_code")
+            if gen_code is not None:
+                if gen_code == 0:
+                    st.success(f"Generated run: {st.session_state.get('gen_run_dir')}")
+                else:
+                    st.error(f"Generate failed (exit {gen_code}).")
+            gen_output = st.session_state.get("gen_run_output", "")
+            if gen_output:
+                st.text_area("generate_run output", gen_output, height=160)
+
+        start_cols = st.columns(2)
+        with start_cols[0]:
+            start_clicked = st.button("Start", disabled=job_running or not can_start)
+        with start_cols[1]:
+            stop_clicked = st.button("Stop", disabled=not job_running)
+
+        if start_clicked:
+            if not can_start:
+                st.error(jax_issue or "JAX is required for this configuration.")
+            elif job_running:
+                st.error("Optimization is already running.")
+            elif not opt_in_path:
+                st.error("Input run path is empty.")
+            else:
+                out_dir = _default_out_dir(tag)
+                try:
+                    job = start_opt_job(
+                        opt_in_path,
+                        out_dir,
+                        maxiter=maxiter,
+                        gtol=gtol,
+                        roi_r=roi_r_opt,
+                        roi_step=roi_step_opt,
+                        angle_model=angle_model,
+                        grad_backend=grad_backend,
+                        fourier_H=fourier_H,
+                        lambda0=lambda0,
+                        lambda_theta=lambda_theta,
+                        lambda_z=lambda_z,
+                        angle_init=angle_init,
+                        r_bound_mode=r_bound_mode,
+                        r_lower_delta_mm=r_lower_delta_mm,
+                        r_upper_delta_mm=r_upper_delta_mm,
+                        r_no_upper=r_no_upper,
+                        r_min_mm=r_min_mm,
+                        r_max_mm=r_max_mm,
+                        fix_center_radius_layers=fix_center_radius_layers,
+                        repo_root=ROOT,
+                    )
+                    st.session_state["opt_job"] = job
+                    st.session_state["opt_job_fix_center_radius_layers"] = fix_center_radius_layers
+                    st.success(f"Started optimization: {job.out_dir}")
+                except Exception as exc:
+                    st.error(f"Failed to start optimization: {exc}")
+
+        if stop_clicked and job is not None:
+            stop_opt_job(job)
+            st.warning("Terminate signal sent.")
+
+        auto_refresh = False
+        refresh_secs = 1.0
+        if job_running:
+            auto_refresh = st.checkbox("Auto-refresh log", value=True)
+            refresh_secs = float(
+                st.number_input(
+                    "Log refresh (s)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
+                )
+            )
+
+        if job is not None:
+            exit_code = poll_opt_job(job)
+            st.write(f"Status: {'running' if exit_code is None else f'exit {exit_code}'}")
+            st.write(f"Out dir: `{job.out_dir}`")
+            cmd = build_command(
+                opt_in_path,
+                job.out_dir,
+                maxiter=maxiter,
+                gtol=gtol,
+                roi_r=roi_r_opt,
+                roi_step=roi_step_opt,
+                angle_model=angle_model,
+                grad_backend=grad_backend,
+                fourier_H=fourier_H,
+                lambda0=lambda0,
+                lambda_theta=lambda_theta,
+                lambda_z=lambda_z,
+                angle_init=angle_init,
+                r_bound_mode=r_bound_mode,
+                r_lower_delta_mm=r_lower_delta_mm,
+                r_upper_delta_mm=r_upper_delta_mm,
+                r_no_upper=r_no_upper,
+                r_min_mm=r_min_mm,
+                r_max_mm=r_max_mm,
+                fix_center_radius_layers=fix_center_radius_layers,
+            )
+            st.code(" ".join(cmd))
+
+            fixed_layers = st.session_state.get("opt_job_fix_center_radius_layers")
+            if fixed_layers is not None:
+                st.write(f"Fixed center radius layers: {fixed_layers}")
+
+            log_text = tail_log(job.log_path, n_lines=200)
+            st.text_area("opt.log (tail)", log_text, height=240)
+
+            if exit_code is not None:
+                set_cols = st.columns(2)
+                with set_cols[0]:
+                    if st.button("Set optimized run"):
+                        st.session_state["pending_opt_path"] = str(job.out_dir)
+                        st.session_state["pending_opt_select"] = ""
+                        st.session_state["flash_message"] = "Optimized run path updated."
+                        st.rerun()
+                with set_cols[1]:
+                    if st.button("Clear job"):
+                        st.session_state["opt_job"] = None
+
+        if job_running and auto_refresh:
+            time.sleep(max(0.1, refresh_secs))
+            st.rerun()
 
 
 if __name__ == "__main__":
