@@ -7,6 +7,8 @@ from numpy.typing import NDArray
 
 from halbach.numba_compat import njit
 
+EPS = 1e-30
+
 
 @njit(cache=True)
 def compute_B_and_B0(
@@ -209,9 +211,84 @@ def objective_only(
     return float(np.mean(DBx * DBx + DBy * DBy + DBz * DBz))
 
 
+@njit(cache=True, parallel=True)
+def compute_B_all_from_m_flat(
+    pts: NDArray[np.float64],
+    r0_flat: NDArray[np.float64],
+    m_flat: NDArray[np.float64],
+    factor: float,
+) -> NDArray[np.float64]:
+    """
+    Compute B at arbitrary points for per-magnet m vectors.
+    """
+    P = pts.shape[0]
+    M = r0_flat.shape[0]
+    out = np.zeros((P, 3), dtype=np.float64)
+    for p in range(P):
+        Bx = 0.0
+        By = 0.0
+        Bz = 0.0
+        px = pts[p, 0]
+        py = pts[p, 1]
+        pz = pts[p, 2]
+        for i in range(M):
+            dx = px - r0_flat[i, 0]
+            dy = py - r0_flat[i, 1]
+            dz = pz - r0_flat[i, 2]
+            r2 = dx * dx + dy * dy + dz * dz
+            rmag = math.sqrt(r2) + EPS
+            invr3 = 1.0 / (rmag * r2 + EPS)
+            rx = dx / rmag
+            ry = dy / rmag
+            rz = dz / rmag
+            mx = m_flat[i, 0]
+            my = m_flat[i, 1]
+            mz = m_flat[i, 2]
+            mdotr = mx * rx + my * ry + mz * rz
+            Bx += factor * (3.0 * mdotr * rx - mx) * invr3
+            By += factor * (3.0 * mdotr * ry - my) * invr3
+            Bz += factor * (3.0 * mdotr * rz - mz) * invr3
+        out[p, 0] = Bx
+        out[p, 1] = By
+        out[p, 2] = Bz
+    return out
+
+
+@njit(cache=True, parallel=True)
+def compute_B_and_B0_from_m_flat(
+    pts: NDArray[np.float64],
+    r0_flat: NDArray[np.float64],
+    m_flat: NDArray[np.float64],
+    factor: float,
+    origin: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """
+    Compute B at pts+origin and B0 at origin for per-magnet m vectors.
+    """
+    P = pts.shape[0]
+    pts_all = np.empty((P + 1, 3), dtype=np.float64)
+    ox = origin[0]
+    oy = origin[1]
+    oz = origin[2]
+    for p in range(P):
+        pts_all[p, 0] = pts[p, 0] + ox
+        pts_all[p, 1] = pts[p, 1] + oy
+        pts_all[p, 2] = pts[p, 2] + oz
+    pts_all[P, 0] = ox
+    pts_all[P, 1] = oy
+    pts_all[P, 2] = oz
+
+    B_all = compute_B_all_from_m_flat(pts_all, r0_flat, m_flat, factor)
+    B = B_all[:-1]
+    B0 = B_all[-1]
+    return B, B0
+
+
 __all__ = [
     "compute_B_and_B0",
     "compute_B_and_B0_phi_rkn",
+    "compute_B_all_from_m_flat",
+    "compute_B_and_B0_from_m_flat",
     "objective_only",
     "objective_only_phi_rkn",
 ]

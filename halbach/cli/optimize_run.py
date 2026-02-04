@@ -27,11 +27,15 @@ from halbach.geom import (
     pack_x,
     unpack_x,
 )
+from halbach.magnetization_runtime import compute_p_flat_self_consistent_jax, sc_cfg_fingerprint
 from halbach.objective import objective_with_grads_fixed
 from halbach.run_io import load_run
+from halbach.sc_debug import make_sc_debug_bundle
 from halbach.solvers.lbfgsb import solve_lbfgsb
 from halbach.solvers.types import LBFGSBOptions, SolveResult
-from halbach.symmetry import build_mirror_x0
+from halbach.symmetry import build_mirror_x0, expand_delta_phi
+from halbach.symmetry_fourier import build_fourier_x0_features, delta_full_from_fourier
+from halbach.types import Geometry
 
 logger = logging.getLogger(__name__)
 
@@ -155,9 +159,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--sc-near-kernel",
         type=str,
-        choices=["dipole", "multi-dipole"],
+        choices=["dipole", "multi-dipole", "cellavg", "cube-average", "gl-double-mixed"],
         default="dipole",
         help="near-field kernel model",
+    )
+    ap.add_argument(
+        "--sc-gl-order",
+        type=int,
+        choices=[2, 3],
+        default=None,
+        help="gl-double-mixed order (2 or 3). When omitted, uses mixed 2/3.",
     )
     ap.add_argument("--sc-subdip-n", type=int, default=2, help="sub-dipole grid size")
     ap.add_argument(
@@ -211,6 +222,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="dump stack traces every N seconds (0 disables)",
+    )
+    ap.add_argument("--sc-debug", action="store_true", help="write self-consistent debug bundle")
+    ap.add_argument(
+        "--sc-debug-scale-check",
+        dest="sc_debug_scale_check",
+        action="store_true",
+        default=True,
+        help="enable field-scale debug checks",
+    )
+    ap.add_argument(
+        "--no-sc-debug-scale-check",
+        dest="sc_debug_scale_check",
+        action="store_false",
+        help="disable field-scale debug checks",
     )
     ap.add_argument("--dry-run", action="store_true", help="evaluate once and exit")
     return ap.parse_args(argv)
@@ -304,6 +329,65 @@ def _pack_r_grad(grad_r_bases: NDArray[np.float64], param_map: ParamMap) -> NDAr
         else:
             g_r[idx] = grad_r_bases[k_low]
     return g_r
+
+
+def _build_r0_rkn_from_r_bases(r_bases: NDArray[np.float64], geom: Geometry) -> NDArray[np.float64]:
+    r_bases_f = np.asarray(r_bases, dtype=np.float64)
+    rho = r_bases_f[None, :] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None]
+    px = rho[:, :, None] * np.asarray(geom.cth, dtype=np.float64)[None, None, :]
+    py = rho[:, :, None] * np.asarray(geom.sth, dtype=np.float64)[None, None, :]
+    pz = np.broadcast_to(
+        np.asarray(geom.z_layers, dtype=np.float64)[None, :, None],
+        px.shape,
+    )
+    return np.stack([px, py, pz], axis=-1)
+
+
+def _phi_rkn_from_final(
+    angle_model: str,
+    geom: Geometry,
+    alphas: NDArray[np.float64],
+    delta_rep_opt: NDArray[np.float64] | None,
+    coeffs_opt: NDArray[np.float64] | None,
+    *,
+    fourier_H: int,
+    phi0_val: float,
+) -> NDArray[np.float64]:
+    theta = np.asarray(geom.theta, dtype=np.float64)
+    base = 2.0 * theta + float(phi0_val)
+    R = int(geom.R)
+    K = int(geom.K)
+    N = int(geom.N)
+
+    if angle_model == "legacy-alpha":
+        sin2 = np.asarray(geom.sin2, dtype=np.float64)
+        phi_rkn = (
+            base[None, None, :]
+            + np.asarray(alphas, dtype=np.float64)[:, :, None] * sin2[None, None, :]
+        )
+        return np.asarray(phi_rkn, dtype=np.float64)
+
+    if angle_model == "delta-rep-x0":
+        if delta_rep_opt is None:
+            raise ValueError("delta-rep-x0 requires delta_rep_opt to build phi")
+        mirror = build_mirror_x0(N)
+        if delta_rep_opt.shape[1] != mirror.rep_idx.size:
+            raise ValueError("delta_rep_opt width does not match mirror rep size")
+        delta_full = expand_delta_phi(delta_rep_opt, mirror.basis)
+        phi_kn = base[None, :] + delta_full
+        phi_rkn = np.broadcast_to(phi_kn[None, :, :], (R, K, N))
+        return np.asarray(phi_rkn, dtype=np.float64)
+
+    if angle_model == "fourier-x0":
+        if coeffs_opt is None:
+            raise ValueError("fourier-x0 requires fourier_coeffs_opt to build phi")
+        cos_odd, sin_even = build_fourier_x0_features(theta, int(fourier_H))
+        delta_full = delta_full_from_fourier(coeffs_opt, cos_odd, sin_even)
+        phi_kn = base[None, :] + delta_full
+        phi_rkn = np.broadcast_to(phi_kn[None, :, :], (R, K, N))
+        return np.asarray(phi_rkn, dtype=np.float64)
+
+    raise ValueError(f"Unsupported angle_model: {angle_model}")
 
 
 def _opt_log_path(out_dir: Path) -> Path:
@@ -495,6 +579,9 @@ def run_optimize(args: argparse.Namespace) -> int:
             mag_model_requested,
         )
 
+    if str(args.sc_near_kernel) == "cube-average":
+        args.sc_near_kernel = "cellavg"
+
     if int(args.sc_near_wr) < 0 or int(args.sc_near_wz) < 0 or int(args.sc_near_wphi) < 0:
         raise ValueError("self-consistent near window must be >= 0")
     if int(args.sc_iters) < 1:
@@ -507,6 +594,26 @@ def run_optimize(args: argparse.Namespace) -> int:
         raise ValueError("self-consistent Nd must be in [0, 1]")
     if str(args.sc_near_kernel) == "multi-dipole" and int(args.sc_subdip_n) < 2:
         raise ValueError("self-consistent subdip_n must be >= 2 for multi-dipole")
+
+    sc_cfg_payload: dict[str, Any] = dict(
+        chi=float(args.sc_chi),
+        Nd=float(args.sc_Nd),
+        p0=float(args.sc_p0),
+        volume_mm3=float(args.sc_volume_mm3),
+        iters=int(args.sc_iters),
+        omega=float(args.sc_omega),
+        near_window=dict(
+            wr=int(args.sc_near_wr),
+            wz=int(args.sc_near_wz),
+            wphi=int(args.sc_near_wphi),
+        ),
+        near_kernel=str(args.sc_near_kernel),
+        subdip_n=int(args.sc_subdip_n),
+    )
+    sc_gl_order = 0
+    if str(args.sc_near_kernel) == "gl-double-mixed" and args.sc_gl_order is not None:
+        sc_gl_order = int(args.sc_gl_order)
+        sc_cfg_payload["gl_order"] = sc_gl_order
 
     sc_final_extras: dict[str, Any] | None = None
     if angle_model == "legacy-alpha":
@@ -713,6 +820,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                             volume_m3=sc_volume_m3,
                             near_kernel=str(args.sc_near_kernel),
                             subdip_n=int(args.sc_subdip_n),
+                            gl_order=sc_gl_order,
                             iters=int(args.sc_iters),
                             omega=float(args.sc_omega),
                             factor=factor,
@@ -759,6 +867,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         omega=float(args.sc_omega),
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         lambda0=float(args.lambda0),
                         lambda_theta=float(args.lambda_theta),
                         lambda_z=float(args.lambda_z),
@@ -817,6 +926,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         omega=float(args.sc_omega),
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         lambda0=float(args.lambda0),
                         lambda_theta=float(args.lambda_theta),
                         lambda_z=float(args.lambda_z),
@@ -957,21 +1067,7 @@ def run_optimize(args: argparse.Namespace) -> int:
             magnetization=dict(
                 model_requested=mag_model_requested,
                 model_effective=mag_model_effective,
-                self_consistent=dict(
-                    chi=float(args.sc_chi),
-                    Nd=float(args.sc_Nd),
-                    p0=float(args.sc_p0),
-                    volume_mm3=float(args.sc_volume_mm3),
-                    iters=int(args.sc_iters),
-                    omega=float(args.sc_omega),
-                    near_window=dict(
-                        wr=int(args.sc_near_wr),
-                        wz=int(args.sc_near_wz),
-                        wphi=int(args.sc_near_wphi),
-                    ),
-                    near_kernel=str(args.sc_near_kernel),
-                    subdip_n=int(args.sc_subdip_n),
-                ),
+                self_consistent=sc_cfg_payload,
             ),
             fix_center_radius_layers=int(args.fix_center_radius_layers),
             fixed_k_radius=param_map.fixed_k_radius.tolist(),
@@ -1023,6 +1119,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         volume_m3=sc_volume_m3,
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         iters=int(args.sc_iters),
                         omega=float(args.sc_omega),
                         factor=factor,
@@ -1068,6 +1165,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     omega=float(args.sc_omega),
                     near_kernel=str(args.sc_near_kernel),
                     subdip_n=int(args.sc_subdip_n),
+                    gl_order=sc_gl_order,
                     lambda0=float(args.lambda0),
                     lambda_theta=float(args.lambda_theta),
                     lambda_z=float(args.lambda_z),
@@ -1122,6 +1220,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     omega=float(args.sc_omega),
                     near_kernel=str(args.sc_near_kernel),
                     subdip_n=int(args.sc_subdip_n),
+                    gl_order=sc_gl_order,
                     lambda0=float(args.lambda0),
                     lambda_theta=float(args.lambda_theta),
                     lambda_z=float(args.lambda_z),
@@ -1162,6 +1261,36 @@ def run_optimize(args: argparse.Namespace) -> int:
     Jn_hist = np.array([float(e.get("J", np.nan)) for e in extras], dtype=float)
     B0_hist = np.array([float(e.get("B0", np.nan)) for e in extras], dtype=float)
 
+    sc_p_flat: NDArray[np.float64] | None = None
+    sc_cfg_fp: str | None = None
+    phi_rkn_final: NDArray[np.float64] | None = None
+    r0_rkn_final: NDArray[np.float64] | None = None
+    if mag_model_effective == "self-consistent-easy-axis":
+        try:
+            sc_cfg_fp = sc_cfg_fingerprint(sc_cfg_payload)
+            phi_rkn = _phi_rkn_from_final(
+                angle_model,
+                geom,
+                al_opt,
+                delta_rep_opt,
+                coeffs_opt,
+                fourier_H=fourier_H,
+                phi0_val=phi0,
+            )
+            r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
+            phi_rkn_final = phi_rkn
+            r0_rkn_final = r0_rkn
+            sc_p_flat = compute_p_flat_self_consistent_jax(
+                phi_rkn,
+                r0_rkn,
+                geom,
+                sc_cfg_payload,
+            )
+        except Exception as exc:
+            logger.warning("sc_p_flat save skipped: %s", exc)
+            sc_p_flat = None
+            sc_cfg_fp = None
+
     logger.info("save start")
     t_save = perf_counter()
     results_path = out_dir / "results.npz"
@@ -1178,6 +1307,9 @@ def run_optimize(args: argparse.Namespace) -> int:
         Jn_hist=Jn_hist,
         B0_hist=B0_hist,
     )
+    if sc_p_flat is not None and sc_cfg_fp is not None:
+        save_payload["sc_p_flat"] = sc_p_flat
+        save_payload["sc_cfg_fingerprint"] = sc_cfg_fp
     if mag_model_effective == "self-consistent-easy-axis" and sc_final_extras is not None:
         save_payload["extras_sc_stats"] = dict(sc_final_extras)
     if delta_rep_opt is not None:
@@ -1226,21 +1358,7 @@ def run_optimize(args: argparse.Namespace) -> int:
         magnetization=dict(
             model_requested=mag_model_requested,
             model_effective=mag_model_effective,
-            self_consistent=dict(
-                chi=float(args.sc_chi),
-                Nd=float(args.sc_Nd),
-                p0=float(args.sc_p0),
-                volume_mm3=float(args.sc_volume_mm3),
-                iters=int(args.sc_iters),
-                omega=float(args.sc_omega),
-                near_window=dict(
-                    wr=int(args.sc_near_wr),
-                    wz=int(args.sc_near_wz),
-                    wphi=int(args.sc_near_wphi),
-                ),
-                near_kernel=str(args.sc_near_kernel),
-                subdip_n=int(args.sc_subdip_n),
-            ),
+            self_consistent=sc_cfg_payload,
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
         fixed_k_radius=param_map.fixed_k_radius.tolist(),
@@ -1259,6 +1377,38 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     _write_trace(out_dir, res)
     logger.info("save done in %.3fs", perf_counter() - t_save)
+
+    if bool(args.sc_debug) and mag_model_effective == "self-consistent-easy-axis":
+        try:
+            if phi_rkn_final is None or r0_rkn_final is None:
+                phi_rkn_final = _phi_rkn_from_final(
+                    angle_model,
+                    geom,
+                    al_opt,
+                    delta_rep_opt,
+                    coeffs_opt,
+                    fourier_H=fourier_H,
+                    phi0_val=phi0,
+                )
+                r0_rkn_final = _build_r0_rkn_from_r_bases(rb_opt, geom)
+            pts_debug = build_roi_points(roi_r=0.05, roi_step=0.05)
+            if pts_debug.shape[0] > 100:
+                rng = np.random.default_rng(0)
+                sample_idx = rng.choice(pts_debug.shape[0], size=100, replace=False)
+                pts_debug = pts_debug[sample_idx]
+            make_sc_debug_bundle(
+                run_dir=out_dir,
+                out_dir=out_dir,
+                geom=geom,
+                phi_rkn=phi_rkn_final,
+                r0_rkn=r0_rkn_final,
+                pts=pts_debug,
+                factor=FACTOR,
+                field_scale_check=bool(args.sc_debug_scale_check),
+                scale_factor=10.0,
+            )
+        except Exception as exc:
+            logger.warning("sc_debug bundle failed: %s", exc)
 
     return 0
 

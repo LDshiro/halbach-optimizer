@@ -122,6 +122,8 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         fix_center_radius_layers=2,
         log_level="INFO",
         debug_stacks_secs=0,
+        sc_debug=False,
+        sc_debug_scale_check=True,
         dry_run=True,
     )
 

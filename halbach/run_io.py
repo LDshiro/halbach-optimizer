@@ -218,6 +218,47 @@ def _load_results(results_path: Path) -> RunResults:
     )
 
 
+def _load_results_dc(results_path: Path, meta: dict[str, Any]) -> RunResults:
+    geom = meta.get("geom", {})
+    R = int(geom.get("R", 1))
+    K = int(geom.get("K", 1))
+    N = int(geom.get("N", 1))
+    radius_m = float(geom.get("radius_m", 0.0))
+    length_m = float(geom.get("length_m", 0.0))
+
+    theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False, dtype=np.float64)
+    sin2th = np.sin(2.0 * theta)
+    cth = np.cos(theta)
+    sth = np.sin(theta)
+
+    if K > 1:
+        half = 0.5 * length_m
+        z_layers = np.linspace(-half, half, K, dtype=np.float64)
+    else:
+        z_layers = np.array([0.0], dtype=np.float64)
+
+    r_bases = np.full(K, radius_m, dtype=np.float64)
+    alphas = np.zeros((R, K), dtype=np.float64)
+    ring_offsets = np.zeros(R, dtype=np.float64)
+
+    extras: dict[str, Any] = {}
+    with np.load(results_path, allow_pickle=True) as data:
+        for key in data.files:
+            extras[key] = np.array(data[key], copy=True)
+
+    return RunResults(
+        alphas=alphas,
+        r_bases=r_bases,
+        theta=theta,
+        sin2th=sin2th,
+        cth=cth,
+        sth=sth,
+        z_layers=z_layers,
+        ring_offsets=ring_offsets,
+        extras=extras,
+    )
+
+
 def _build_geometry(results: RunResults) -> Geometry:
     N = int(results.theta.size)
     R, K = results.alphas.shape
@@ -268,11 +309,15 @@ def load_run(path: str | Path, *, name: str | None = None) -> RunBundle:
     )
     trace_candidate = run_dir / _TRACE_NAME
     trace_path = trace_candidate if trace_candidate.is_file() else None
-
-    results = _load_results(results_path)
-    geometry = _build_geometry(results)
     meta = _load_json_dict(meta_path) if meta_path is not None else {}
-    trace = _load_trace(trace_path) if trace_path is not None else None
+    if meta.get("framework") == "dc":
+        results = _load_results_dc(results_path, meta)
+        geometry = _build_geometry(results)
+        trace = None
+    else:
+        results = _load_results(results_path)
+        geometry = _build_geometry(results)
+        trace = _load_trace(trace_path) if trace_path is not None else None
 
     resolved_name = name
     if resolved_name is None:

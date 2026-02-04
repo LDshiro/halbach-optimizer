@@ -3,7 +3,6 @@ from typing import Any
 import numpy as np
 import pytest
 
-from halbach.autodiff.jax_self_consistent import solve_p_easy_axis_near
 from halbach.near import NearWindow, build_near_graph
 
 
@@ -12,6 +11,13 @@ def _jnp() -> Any:
     import jax.numpy as jnp
 
     return jnp
+
+
+def _solve_p_easy_axis_near() -> Any:
+    pytest.importorskip("jax")
+    from halbach.autodiff.jax_self_consistent import solve_p_easy_axis_near
+
+    return solve_p_easy_axis_near
 
 
 def _build_positions(R: int, K: int, N: int) -> Any:
@@ -34,6 +40,7 @@ def _build_positions(R: int, K: int, N: int) -> Any:
 
 def test_chi_zero_returns_p0() -> None:
     jnp = _jnp()
+    solve_p_easy_axis_near = _solve_p_easy_axis_near()
     R, K, N = 1, 2, 6
     graph = build_near_graph(R, K, N, NearWindow(wr=0, wz=1, wphi=1))
     phi = jnp.linspace(0.0, 2.0 * np.pi, R * K * N)
@@ -56,6 +63,7 @@ def test_chi_zero_returns_p0() -> None:
 
 def test_mask_padding_no_nan() -> None:
     jnp = _jnp()
+    solve_p_easy_axis_near = _solve_p_easy_axis_near()
     R, K, N = 1, 2, 6
     graph = build_near_graph(R, K, N, NearWindow(wr=0, wz=1, wphi=1))
     phi = jnp.linspace(0.0, 2.0 * np.pi, R * K * N)
@@ -77,6 +85,7 @@ def test_mask_padding_no_nan() -> None:
 
 def test_convergence_sanity() -> None:
     jnp = _jnp()
+    solve_p_easy_axis_near = _solve_p_easy_axis_near()
     R, K, N = 1, 2, 6
     graph = build_near_graph(R, K, N, NearWindow(wr=0, wz=1, wphi=1))
     phi = jnp.linspace(0.0, 2.0 * np.pi, R * K * N)

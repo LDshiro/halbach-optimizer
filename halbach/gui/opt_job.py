@@ -41,6 +41,19 @@ def build_command(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    mag_model: str = "fixed",
+    sc_chi: float = 0.0,
+    sc_Nd: float = 1.0 / 3.0,
+    sc_p0: float = 1.0,
+    sc_volume_mm3: float = 1000.0,
+    sc_iters: int = 30,
+    sc_omega: float = 0.6,
+    sc_near_wr: int = 0,
+    sc_near_wz: int = 1,
+    sc_near_wphi: int = 2,
+    sc_near_kernel: str = "dipole",
+    sc_subdip_n: int = 2,
+    sc_gl_order: int | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -88,6 +101,158 @@ def build_command(
         cmd.append("--r-no-upper")
     if grad_backend is not None:
         cmd.extend(["--grad-backend", str(grad_backend)])
+    if mag_model != "fixed":
+        cmd.extend(["--mag-model", str(mag_model)])
+        cmd.extend(["--sc-chi", str(sc_chi)])
+        cmd.extend(["--sc-Nd", str(sc_Nd)])
+        cmd.extend(["--sc-p0", str(sc_p0)])
+        cmd.extend(["--sc-volume-mm3", str(sc_volume_mm3)])
+        cmd.extend(["--sc-iters", str(sc_iters)])
+        cmd.extend(["--sc-omega", str(sc_omega)])
+        cmd.extend(["--sc-near-wr", str(sc_near_wr)])
+        cmd.extend(["--sc-near-wz", str(sc_near_wz)])
+        cmd.extend(["--sc-near-wphi", str(sc_near_wphi)])
+        cmd.extend(["--sc-near-kernel", str(sc_near_kernel)])
+        if sc_near_kernel == "gl-double-mixed" and sc_gl_order is not None:
+            cmd.extend(["--sc-gl-order", str(sc_gl_order)])
+        cmd.extend(["--sc-subdip-n", str(sc_subdip_n)])
+    return cmd
+
+
+def build_dc_ccp_sc_command(
+    out_dir: str | Path,
+    *,
+    N: int,
+    K: int,
+    R: int,
+    radius_m: float,
+    length_m: float,
+    roi_radius_m: float,
+    roi_grid_n: int,
+    wx: float,
+    wy: float,
+    wz: float,
+    factor: float,
+    phi0: float,
+    delta_nom_deg: float,
+    delta_step_deg: float | None,
+    tau0: float,
+    tau_mult: float,
+    tau_max: float,
+    iters: int,
+    tol: float,
+    tol_f: float,
+    reg_x: float,
+    reg_p: float,
+    reg_z: float,
+    sc_eq: bool,
+    p_fix: float | None,
+    sc_chi: float,
+    sc_Nd: float,
+    sc_p0: float,
+    sc_volume_mm3: float,
+    sc_near_wr: int,
+    sc_near_wz: int,
+    sc_near_wphi: int,
+    sc_near_kernel: str,
+    sc_subdip_n: int,
+    sc_gl_order: int | None = None,
+    pmin: float,
+    pmax: float,
+    solver: str,
+    init_run: str | Path | None = None,
+    verbose: bool = False,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-u",
+        "-m",
+        "halbach.cli.dc_ccp_sc_optimize_run",
+        "--out",
+        str(out_dir),
+        "--N",
+        str(N),
+        "--K",
+        str(K),
+        "--R",
+        str(R),
+        "--radius-m",
+        str(radius_m),
+        "--length-m",
+        str(length_m),
+        "--roi-radius-m",
+        str(roi_radius_m),
+        "--roi-grid-n",
+        str(roi_grid_n),
+        "--wx",
+        str(wx),
+        "--wy",
+        str(wy),
+        "--wz",
+        str(wz),
+        "--factor",
+        str(factor),
+        "--phi0",
+        str(phi0),
+        "--delta-nom-deg",
+        str(delta_nom_deg),
+        "--delta-step-deg",
+        str(-1.0 if delta_step_deg is None else delta_step_deg),
+        "--tau0",
+        str(tau0),
+        "--tau-mult",
+        str(tau_mult),
+        "--tau-max",
+        str(tau_max),
+        "--iters",
+        str(iters),
+        "--tol",
+        str(tol),
+        "--tol-f",
+        str(tol_f),
+        "--reg-x",
+        str(reg_x),
+        "--reg-p",
+        str(reg_p),
+        "--reg-z",
+        str(reg_z),
+        "--sc-chi",
+        str(sc_chi),
+        "--sc-Nd",
+        str(sc_Nd),
+        "--sc-p0",
+        str(sc_p0),
+        "--sc-volume-mm3",
+        str(sc_volume_mm3),
+        "--sc-near-wr",
+        str(sc_near_wr),
+        "--sc-near-wz",
+        str(sc_near_wz),
+        "--sc-near-wphi",
+        str(sc_near_wphi),
+        "--sc-near-kernel",
+        str(sc_near_kernel),
+        "--sc-subdip-n",
+        str(sc_subdip_n),
+        "--pmin",
+        str(pmin),
+        "--pmax",
+        str(pmax),
+        "--solver",
+        str(solver),
+    ]
+    if sc_near_kernel == "gl-double-mixed" and sc_gl_order is not None:
+        cmd.extend(["--sc-gl-order", str(sc_gl_order)])
+    if init_run:
+        cmd.extend(["--init-run", str(init_run)])
+    if sc_eq:
+        cmd.append("--sc-eq")
+    else:
+        cmd.append("--no-sc-eq")
+        if p_fix is not None:
+            cmd.extend(["--p-fix", str(p_fix)])
+    if verbose:
+        cmd.append("--verbose")
     return cmd
 
 
@@ -193,6 +358,19 @@ def start_opt_job(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    mag_model: str = "fixed",
+    sc_chi: float = 0.0,
+    sc_Nd: float = 1.0 / 3.0,
+    sc_p0: float = 1.0,
+    sc_volume_mm3: float = 1000.0,
+    sc_iters: int = 30,
+    sc_omega: float = 0.6,
+    sc_near_wr: int = 0,
+    sc_near_wz: int = 1,
+    sc_near_wphi: int = 2,
+    sc_near_kernel: str = "dipole",
+    sc_subdip_n: int = 2,
+    sc_gl_order: int | None = None,
     repo_root: Path | None = None,
 ) -> OptJob:
     out_path = Path(out_dir)
@@ -219,6 +397,122 @@ def start_opt_job(
         r_min_mm=r_min_mm,
         r_max_mm=r_max_mm,
         fix_center_radius_layers=fix_center_radius_layers,
+        mag_model=mag_model,
+        sc_chi=sc_chi,
+        sc_Nd=sc_Nd,
+        sc_p0=sc_p0,
+        sc_volume_mm3=sc_volume_mm3,
+        sc_iters=sc_iters,
+        sc_omega=sc_omega,
+        sc_near_wr=sc_near_wr,
+        sc_near_wz=sc_near_wz,
+        sc_near_wphi=sc_near_wphi,
+        sc_near_kernel=sc_near_kernel,
+        sc_subdip_n=sc_subdip_n,
+        sc_gl_order=sc_gl_order,
+    )
+    cwd = repo_root or Path(__file__).resolve().parents[2]
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            text=True,
+        )
+    return OptJob(proc=proc, out_dir=out_path, log_path=log_path, command=cmd)
+
+
+def start_dc_ccp_sc_job(
+    out_dir: str | Path,
+    *,
+    N: int,
+    K: int,
+    R: int,
+    radius_m: float,
+    length_m: float,
+    roi_radius_m: float,
+    roi_grid_n: int,
+    wx: float,
+    wy: float,
+    wz: float,
+    factor: float,
+    phi0: float,
+    delta_nom_deg: float,
+    delta_step_deg: float | None,
+    tau0: float,
+    tau_mult: float,
+    tau_max: float,
+    iters: int,
+    tol: float,
+    tol_f: float,
+    reg_x: float,
+    reg_p: float,
+    reg_z: float,
+    sc_eq: bool,
+    p_fix: float | None,
+    sc_chi: float,
+    sc_Nd: float,
+    sc_p0: float,
+    sc_volume_mm3: float,
+    sc_near_wr: int,
+    sc_near_wz: int,
+    sc_near_wphi: int,
+    sc_near_kernel: str,
+    sc_subdip_n: int,
+    sc_gl_order: int | None = None,
+    pmin: float,
+    pmax: float,
+    solver: str,
+    init_run: str | Path | None = None,
+    verbose: bool = False,
+    repo_root: Path | None = None,
+) -> OptJob:
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    log_path = out_path / "dc_ccp_sc.log"
+    cmd = build_dc_ccp_sc_command(
+        out_path,
+        N=N,
+        K=K,
+        R=R,
+        radius_m=radius_m,
+        length_m=length_m,
+        roi_radius_m=roi_radius_m,
+        roi_grid_n=roi_grid_n,
+        wx=wx,
+        wy=wy,
+        wz=wz,
+        factor=factor,
+        phi0=phi0,
+        delta_nom_deg=delta_nom_deg,
+        delta_step_deg=delta_step_deg,
+        tau0=tau0,
+        tau_mult=tau_mult,
+        tau_max=tau_max,
+        iters=iters,
+        tol=tol,
+        tol_f=tol_f,
+        reg_x=reg_x,
+        reg_p=reg_p,
+        reg_z=reg_z,
+        sc_eq=sc_eq,
+        p_fix=p_fix,
+        sc_chi=sc_chi,
+        sc_Nd=sc_Nd,
+        sc_p0=sc_p0,
+        sc_volume_mm3=sc_volume_mm3,
+        sc_near_wr=sc_near_wr,
+        sc_near_wz=sc_near_wz,
+        sc_near_wphi=sc_near_wphi,
+        sc_near_kernel=sc_near_kernel,
+        sc_subdip_n=sc_subdip_n,
+        sc_gl_order=sc_gl_order,
+        pmin=pmin,
+        pmax=pmax,
+        solver=solver,
+        init_run=init_run,
+        verbose=verbose,
     )
     cwd = repo_root or Path(__file__).resolve().parents[2]
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -253,10 +547,12 @@ def tail_log(path: str | Path, n_lines: int = 200) -> str:
 __all__ = [
     "OptJob",
     "build_command",
+    "build_dc_ccp_sc_command",
     "build_generate_command",
     "build_generate_out_dir",
     "run_generate_command",
     "start_opt_job",
+    "start_dc_ccp_sc_job",
     "poll_opt_job",
     "stop_opt_job",
     "tail_log",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -9,7 +10,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, m0
-from halbach.near import NearWindow, build_near_graph
+from halbach.near import NearWindow, build_near_graph, edges_from_near
+from halbach.physics import compute_B_and_B0_from_m_flat
 from halbach.types import Geometry
 
 EPS = 1e-30
@@ -53,6 +55,15 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
     near_window = sc_cfg.get("near_window", {})
     if not isinstance(near_window, dict):
         raise ValueError("self_consistent.near_window must be a dict")
+    near_kernel = str(sc_cfg.get("near_kernel", "dipole"))
+    if near_kernel == "cube-average":
+        near_kernel = "cellavg"
+    gl_order_raw = sc_cfg.get("gl_order")
+    gl_order: int | None = None
+    if gl_order_raw is not None:
+        gl_order = int(gl_order_raw)
+        if gl_order not in (2, 3):
+            raise ValueError("self_consistent.gl_order must be 2 or 3 when provided")
     return dict(
         chi=float(sc_cfg.get("chi", 0.0)),
         Nd=float(sc_cfg.get("Nd", 1.0 / 3.0)),
@@ -65,9 +76,55 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
             wz=int(near_window.get("wz", 1)),
             wphi=int(near_window.get("wphi", 2)),
         ),
-        near_kernel=str(sc_cfg.get("near_kernel", "dipole")),
+        near_kernel=near_kernel,
         subdip_n=int(sc_cfg.get("subdip_n", 2)),
+        gl_order=gl_order,
     )
+
+
+def _edge_partition_face_to_face(
+    i_edge: NDArray[np.int32],
+    j_edge: NDArray[np.int32],
+    *,
+    R: int,
+    K: int,
+    N: int,
+) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
+    n_i = (i_edge % N).astype(np.int32)
+    n_j = (j_edge % N).astype(np.int32)
+    dn_raw = (n_i - n_j) % N
+    dn = np.where(dn_raw > (N // 2), dn_raw - N, dn_raw).astype(np.int32)
+
+    k_i = ((i_edge // N) % K).astype(np.int32)
+    k_j = ((j_edge // N) % K).astype(np.int32)
+    dk = (k_i - k_j).astype(np.int32)
+
+    r_i = (i_edge // (K * N)).astype(np.int32)
+    r_j = (j_edge // (K * N)).astype(np.int32)
+
+    hi_mask = (r_i == r_j) & (np.abs(dk) == 1) & (dn == 0)
+    idx_hi = np.nonzero(hi_mask)[0].astype(np.int32)
+    idx_lo = np.nonzero(~hi_mask)[0].astype(np.int32)
+    return idx_lo, idx_hi
+
+
+def sc_cfg_fingerprint(sc_cfg: dict[str, Any]) -> str:
+    sc = _parse_sc_cfg(sc_cfg)
+    core = dict(
+        chi=float(sc["chi"]),
+        Nd=float(sc["Nd"]),
+        p0=float(sc["p0"]),
+        volume_mm3=float(sc["volume_mm3"]),
+        iters=int(sc["iters"]),
+        omega=float(sc["omega"]),
+        near_window=dict(sc["near_window"]),
+        near_kernel=str(sc["near_kernel"]),
+        subdip_n=int(sc["subdip_n"]),
+    )
+    if sc["near_kernel"] == "gl-double-mixed" and sc.get("gl_order") in (2, 3):
+        core["gl_order"] = int(sc["gl_order"])
+    payload = json.dumps(core, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def compute_p_flat_self_consistent_jax(
@@ -83,7 +140,11 @@ def compute_p_flat_self_consistent_jax(
     import jax.numpy as jnp
 
     from halbach.autodiff.jax_self_consistent import (
+        _gl_double_delta_table_n2,
+        _gl_double_delta_table_n3,
         solve_p_easy_axis_near,
+        solve_p_easy_axis_near_cellavg,
+        solve_p_easy_axis_near_gl_double_mixed,
         solve_p_easy_axis_near_multi_dipole,
     )
 
@@ -135,6 +196,62 @@ def compute_p_flat_self_consistent_jax(
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
             )
+        elif sc["near_kernel"] == "cellavg":
+            p_flat = solve_p_easy_axis_near_cellavg(
+                phi_j,
+                r0_j,
+                nbr_idx_j,
+                nbr_mask_j,
+                p0=float(sc["p0"]),
+                chi=float(sc["chi"]),
+                Nd=float(sc["Nd"]),
+                volume_m3=volume_m3,
+                iters=int(sc["iters"]),
+                omega=float(sc["omega"]),
+            )
+        elif sc["near_kernel"] == "gl-double-mixed":
+            i_edge_np, j_edge_np = edges_from_near(near.nbr_idx, near.nbr_mask)
+            idx_lo_np, idx_hi_np = _edge_partition_face_to_face(
+                i_edge_np,
+                j_edge_np,
+                R=int(geom.R),
+                K=int(geom.K),
+                N=int(geom.N),
+            )
+            i_edge_j = jnp.asarray(i_edge_np, dtype=jnp.int32)
+            j_edge_j = jnp.asarray(j_edge_np, dtype=jnp.int32)
+            idx_lo_j = jnp.asarray(idx_lo_np, dtype=jnp.int32)
+            idx_hi_j = jnp.asarray(idx_hi_np, dtype=jnp.int32)
+            cube_edge = float(volume_m3) ** (1.0 / 3.0)
+            gl_order = sc.get("gl_order")
+            if gl_order == 2:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n2(cube_edge)
+            elif gl_order == 3:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n3(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+            else:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+            p_flat = solve_p_easy_axis_near_gl_double_mixed(
+                phi_j,
+                r0_j,
+                p0=float(sc["p0"]),
+                chi=float(sc["chi"]),
+                Nd=float(sc["Nd"]),
+                volume_m3=volume_m3,
+                iters=int(sc["iters"]),
+                omega=float(sc["omega"]),
+                i_edge=i_edge_j,
+                j_edge=j_edge_j,
+                idx_lo=idx_lo_j,
+                idx_hi=idx_hi_j,
+                delta_lo_offsets=delta_lo_offsets,
+                delta_lo_w=delta_lo_w,
+                delta_hi_offsets=delta_hi_offsets,
+                delta_hi_w=delta_hi_w,
+                implicit_diff=False,
+            )
         else:
             raise ValueError(f"Unsupported near_kernel: {sc['near_kernel']}")
 
@@ -146,7 +263,7 @@ def build_m_flat_from_phi_and_p(
     p_flat: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     u = np.stack([np.cos(phi_flat), np.sin(phi_flat), np.zeros_like(phi_flat)], axis=1)
-    return p_flat[:, None] * u
+    return np.asarray(p_flat[:, None] * u, dtype=np.float64)
 
 
 def compute_b_and_b0_from_m_flat(
@@ -163,19 +280,11 @@ def compute_b_and_b0_from_m_flat(
     float,
     float,
 ]:
-    origin = np.zeros((1, 3), dtype=np.float64)
-    pts_all = np.concatenate([pts, origin], axis=0)
-
-    r = pts_all[None, :, :] - r0_flat[:, None, :]
-    r2 = np.sum(r * r, axis=2)
-    rmag = np.sqrt(r2) + EPS
-    invr3 = 1.0 / (rmag * r2 + EPS)
-    rhat = r / rmag[:, :, None]
-    mdotr = np.sum(m_flat[:, None, :] * rhat, axis=2)
-    term = (3.0 * mdotr[:, :, None] * rhat - m_flat[:, None, :]) * invr3[:, :, None]
-    B_all = float(factor) * np.sum(term, axis=0)
-    B = B_all[:-1]
-    B0 = B_all[-1]
+    origin = np.zeros(3, dtype=np.float64)
+    pts_f = np.asarray(pts, dtype=np.float64)
+    r0_f = np.asarray(r0_flat, dtype=np.float64)
+    m_f = np.asarray(m_flat, dtype=np.float64)
+    B, B0 = compute_B_and_B0_from_m_flat(pts_f, r0_f, m_f, float(factor), origin)
     return (
         np.asarray(B[:, 0], dtype=np.float64),
         np.asarray(B[:, 1], dtype=np.float64),
@@ -191,19 +300,60 @@ def compute_m_flat_from_run(
     geom: Geometry,
     phi_rkn: NDArray[np.float64],
     r0_rkn: NDArray[np.float64],
+    *,
+    sc_cfg_override: dict[str, Any] | None = None,
 ) -> tuple[NDArray[np.float64], dict[str, Any]]:
     meta = _load_meta(run_dir)
-    model_effective, sc_cfg = get_magnetization_config_from_meta(meta)
+    model_effective_meta, sc_cfg_meta = get_magnetization_config_from_meta(meta)
+    if sc_cfg_override is not None:
+        if not isinstance(sc_cfg_override, dict):
+            raise TypeError("sc_cfg_override must be a dict when provided")
+        model_effective = "self-consistent-easy-axis"
+        sc_cfg = sc_cfg_override
+    else:
+        model_effective = model_effective_meta
+        sc_cfg = sc_cfg_meta
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     if model_effective == "self-consistent-easy-axis":
-        p_flat = compute_p_flat_self_consistent_jax(phi_rkn, r0_rkn, geom, sc_cfg)
+        fp_expected = sc_cfg_fingerprint(sc_cfg)
+        p_flat = None
+        sc_source = "computed"
+        results_path = run_dir / "results.npz"
+        if results_path.is_file():
+            try:
+                with np.load(results_path, allow_pickle=False) as data:
+                    if "sc_p_flat" in data and "sc_cfg_fingerprint" in data:
+                        p_candidate = np.asarray(data["sc_p_flat"], dtype=np.float64)
+                        fp_raw = data["sc_cfg_fingerprint"]
+                        if isinstance(fp_raw, np.ndarray):
+                            if fp_raw.shape == ():
+                                fp_saved = str(fp_raw.item())
+                            else:
+                                fp_saved = str(fp_raw.reshape(-1)[0])
+                        else:
+                            fp_saved = str(fp_raw)
+                        if fp_saved == fp_expected and p_candidate.shape == (phi_flat.size,):
+                            p_flat = p_candidate
+                            sc_source = "saved"
+            except Exception:
+                p_flat = None
+        if p_flat is None:
+            if importlib.util.find_spec("jax") is None:
+                raise RuntimeError(
+                    "self-consistent visualization requires JAX unless sc_p_flat is saved in results.npz"
+                )
+            p_flat = compute_p_flat_self_consistent_jax(phi_rkn, r0_rkn, geom, sc_cfg)
     else:
         p_flat = np.full(phi_flat.shape, float(m0), dtype=np.float64)
 
+    assert p_flat is not None
     m_flat = build_m_flat_from_phi_and_p(phi_flat, p_flat)
 
     debug: dict[str, Any] = {"model_effective": model_effective}
+    if sc_cfg_override is not None:
+        debug["model_effective_meta"] = model_effective_meta
+        debug["model_effective_eval"] = model_effective
     if model_effective == "self-consistent-easy-axis":
         p_min = float(np.min(p_flat))
         p_max = float(np.max(p_flat))
@@ -213,6 +363,8 @@ def compute_m_flat_from_run(
         sc = _parse_sc_cfg(sc_cfg)
         debug.update(
             dict(
+                sc_p_source=sc_source,
+                sc_cfg_fingerprint=fp_expected,
                 sc_p_min=p_min,
                 sc_p_max=p_max,
                 sc_p_mean=p_mean,
@@ -229,11 +381,14 @@ def compute_m_flat_from_run(
                 sc_volume_mm3=float(sc["volume_mm3"]),
             )
         )
+        if sc["near_kernel"] == "gl-double-mixed":
+            debug["sc_gl_order"] = sc.get("gl_order")
     return m_flat, debug
 
 
 __all__ = [
     "get_magnetization_config_from_meta",
+    "sc_cfg_fingerprint",
     "compute_p_flat_self_consistent_jax",
     "build_m_flat_from_phi_and_p",
     "compute_b_and_b0_from_m_flat",

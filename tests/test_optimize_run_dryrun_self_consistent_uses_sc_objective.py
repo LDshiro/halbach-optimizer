@@ -128,6 +128,8 @@ def test_dryrun_uses_self_consistent_objective(
         fix_center_radius_layers=2,
         log_level="INFO",
         debug_stacks_secs=0,
+        sc_debug=False,
+        sc_debug_scale_check=True,
         dry_run=True,
     )
 

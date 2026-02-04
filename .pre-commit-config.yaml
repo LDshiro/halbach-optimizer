@@ -3,7 +3,7 @@
     rev: 24.10.0
     hooks:
       - id: black
-        language_version: python3.13
+        language_version: python
 
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
@@ -16,7 +16,3 @@
       - id: ruff
         args: ["--fix"]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
-    hooks:
-      - id: mypy

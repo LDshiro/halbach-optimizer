@@ -37,6 +37,9 @@ def enumerate_magnets(
     if stride <= 0:
         raise ValueError("stride must be >= 1")
 
+    if run.meta.get("framework") == "dc":
+        return _enumerate_magnets_dc(run, stride=stride, hide_x_negative=hide_x_negative)
+
     theta = run.geometry.theta
     cth = run.geometry.cth
     sth = run.geometry.sth
@@ -78,6 +81,56 @@ def enumerate_magnets(
     phi = np.concatenate(phi_list)
     ring_id = np.concatenate(ring_list)
     layer_id = np.concatenate(layer_list)
+
+    if hide_x_negative:
+        mask = centers[:, 0] >= 0.0
+        centers = centers[mask]
+        phi = phi[mask]
+        ring_id = ring_id[mask]
+        layer_id = layer_id[mask]
+
+    return centers, phi, ring_id, layer_id
+
+
+def _enumerate_magnets_dc(
+    run: RunBundle,
+    *,
+    stride: int,
+    hide_x_negative: bool,
+) -> tuple[FloatArray, FloatArray, NDArray[np.int_], NDArray[np.int_]]:
+    extras = run.results.extras
+    if "r0_flat" not in extras:
+        raise KeyError("DC run requires r0_flat in results")
+    centers = np.asarray(extras["r0_flat"], dtype=np.float64)
+    M = int(centers.shape[0])
+    if "phi_opt" in extras:
+        phi = np.asarray(extras["phi_opt"], dtype=np.float64).reshape(-1)
+    elif "phi_flat" in extras:
+        phi = np.asarray(extras["phi_flat"], dtype=np.float64).reshape(-1)
+    elif "x_opt" in extras:
+        x_opt = np.asarray(extras["x_opt"], dtype=np.float64).reshape(-1)
+        if x_opt.size != 2 * M:
+            raise ValueError("x_opt length does not match r0_flat")
+        phi = np.arctan2(x_opt[1::2], x_opt[0::2])
+    elif "m_flat" in extras:
+        m_flat = np.asarray(extras["m_flat"], dtype=np.float64)
+        if m_flat.shape[0] != M:
+            raise ValueError("m_flat length does not match r0_flat")
+        phi = np.arctan2(m_flat[:, 1], m_flat[:, 0])
+    else:
+        raise KeyError("DC run requires phi_opt/phi_flat/x_opt/m_flat in results")
+
+    K = int(run.geometry.K)
+    N = int(run.geometry.N)
+    idx = np.arange(M, dtype=np.int_)
+    if stride > 1 and N > 0:
+        n_idx = idx % N
+        mask_stride = (n_idx % stride) == 0
+        idx = idx[mask_stride]
+    centers = centers[idx]
+    phi = phi[idx]
+    ring_id = (idx // (K * N)).astype(np.int_) if K > 0 and N > 0 else np.zeros_like(idx)
+    layer_id = ((idx // N) % K).astype(np.int_) if N > 0 else np.zeros_like(idx)
 
     if hide_x_negative:
         mask = centers[:, 0] >= 0.0
