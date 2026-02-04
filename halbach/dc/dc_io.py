@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -26,7 +26,7 @@ def write_dc_run(
     npz_payload: dict[str, NDArray[np.generic]] = {}
     for key, value in results.items():
         npz_payload[str(key)] = np.asarray(value)
-    np.savez_compressed(out_path / "results.npz", **npz_payload)
+    np.savez_compressed(out_path / "results.npz", **cast(Any, npz_payload))
 
 
 __all__ = ["write_dc_run"]

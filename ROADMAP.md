@@ -89,3 +89,4 @@
 - DC/CCP は既存 L-BFGS-B フレームに混ぜず、別ソルババックエンドとして追加（衝突回避）。
 - self-consistent near kernel: multi-dipole (source split only) implemented.
 - TODO: replace near kernel with cube-average tensor (analytic/high-accuracy).
+- self-consistent JAX objective supports implicit diff via custom_linear_solve (jit cached).

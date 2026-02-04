@@ -443,7 +443,7 @@ def main() -> None:
                 )
                 sc_near_kernel = st.selectbox(
                     "near kernel (2D eval)",
-                    ["dipole", "multi-dipole"],
+                    ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
                     index=0,
                     key="map_sc_near_kernel",
                 )
@@ -458,6 +458,16 @@ def main() -> None:
                             step=1,
                         )
                     )
+                sc_gl_order: int | None = None
+                if sc_near_kernel == "gl-double-mixed":
+                    gl_choice = st.selectbox(
+                        "gl order (2D eval)",
+                        ["mixed (2/3)", "2", "3"],
+                        index=0,
+                        key="map_sc_gl_order",
+                    )
+                    if gl_choice in ("2", "3"):
+                        sc_gl_order = int(gl_choice)
             sc_cfg_eval = dict(
                 chi=sc_chi,
                 Nd=sc_Nd,
@@ -469,6 +479,8 @@ def main() -> None:
                 near_kernel=sc_near_kernel,
                 subdip_n=sc_subdip_n,
             )
+            if sc_gl_order is not None:
+                sc_cfg_eval["gl_order"] = sc_gl_order
             sc_cfg_key = json.dumps(sc_cfg_eval, sort_keys=True)
             if not _jax_available():
                 st.error(
@@ -959,6 +971,7 @@ def main() -> None:
             sc_near_wphi = 2
             sc_near_kernel = "dipole"
             sc_subdip_n = 2
+            sc_gl_order: int | None = None
             if mag_model == "self-consistent-easy-axis":
                 with st.expander("Self-consistent settings", expanded=True):
                     sc_chi = float(
@@ -1001,7 +1014,7 @@ def main() -> None:
                     )
                     sc_near_kernel = st.selectbox(
                         "near kernel",
-                        ["dipole", "multi-dipole"],
+                        ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
                         index=0,
                         key="sc_near_kernel",
                     )
@@ -1009,6 +1022,15 @@ def main() -> None:
                         sc_subdip_n = int(
                             st.number_input("subdip_n", min_value=2, max_value=10, value=2, step=1)
                         )
+                    if sc_near_kernel == "gl-double-mixed":
+                        gl_choice = st.selectbox(
+                            "gl order",
+                            ["mixed (2/3)", "2", "3"],
+                            index=0,
+                            key="sc_gl_order",
+                        )
+                        if gl_choice in ("2", "3"):
+                            sc_gl_order = int(gl_choice)
             jax_issue: str | None = None
             if (angle_model != "legacy-alpha" or grad_backend == "jax") and not jax_available:
                 jax_issue = (
@@ -1238,6 +1260,7 @@ def main() -> None:
                                         sc_near_wphi=sc_near_wphi,
                                         sc_near_kernel=sc_near_kernel,
                                         sc_subdip_n=sc_subdip_n,
+                                        sc_gl_order=sc_gl_order,
                                         repo_root=ROOT,
                                     )
                                     st.session_state["opt_job"] = job
@@ -1308,6 +1331,7 @@ def main() -> None:
                             sc_near_wphi=sc_near_wphi,
                             sc_near_kernel=sc_near_kernel,
                             sc_subdip_n=sc_subdip_n,
+                            sc_gl_order=sc_gl_order,
                             repo_root=ROOT,
                         )
                         st.session_state["opt_job"] = job
@@ -1370,6 +1394,7 @@ def main() -> None:
                     sc_near_wphi=sc_near_wphi,
                     sc_near_kernel=sc_near_kernel,
                     sc_subdip_n=sc_subdip_n,
+                    sc_gl_order=sc_gl_order,
                 )
                 st.code(" ".join(cmd))
 
@@ -1651,17 +1676,27 @@ def main() -> None:
             )
             dc_sc_near_kernel = st.selectbox(
                 "near kernel",
-                ["dipole", "multi-dipole", "cellavg"],
+                ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
                 index=0,
                 key="dc_sc_near_kernel",
             )
             dc_sc_subdip_n = 2
+            dc_sc_gl_order: int | None = None
             if dc_sc_near_kernel == "multi-dipole":
                 dc_sc_subdip_n = int(
                     st.number_input(
                         "subdip_n", min_value=2, max_value=10, value=2, step=1, key="dc_sc_subdip_n"
                     )
                 )
+            if dc_sc_near_kernel == "gl-double-mixed":
+                gl_choice = st.selectbox(
+                    "gl order",
+                    ["mixed (2/3)", "2", "3"],
+                    index=0,
+                    key="dc_sc_gl_order",
+                )
+                if gl_choice in ("2", "3"):
+                    dc_sc_gl_order = int(gl_choice)
 
             st.markdown("**p bounds**")
             dc_pmin = float(
@@ -1758,6 +1793,7 @@ def main() -> None:
                             sc_near_wphi=dc_sc_near_wphi,
                             sc_near_kernel=dc_sc_near_kernel,
                             sc_subdip_n=dc_sc_subdip_n,
+                            sc_gl_order=dc_sc_gl_order,
                             pmin=dc_pmin,
                             pmax=dc_pmax,
                             solver=dc_solver,
@@ -1815,6 +1851,7 @@ def main() -> None:
                     sc_near_wphi=dc_sc_near_wphi,
                     sc_near_kernel=dc_sc_near_kernel,
                     sc_subdip_n=dc_sc_subdip_n,
+                    sc_gl_order=dc_sc_gl_order,
                     pmin=dc_pmin,
                     pmax=dc_pmax,
                     solver=dc_solver,

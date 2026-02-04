@@ -49,9 +49,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--sc-near-kernel",
         type=str,
-        choices=["dipole", "multi-dipole"],
+        choices=["dipole", "multi-dipole", "gl-double-mixed"],
         default="dipole",
         help="near kernel",
+    )
+    ap.add_argument(
+        "--sc-gl-order",
+        type=int,
+        choices=[2, 3],
+        default=None,
+        help="gl-double-mixed order (2 or 3). When omitted, uses mixed 2/3.",
     )
     ap.add_argument("--sc-subdip-n", type=int, default=2, help="sub-dipole grid size")
     return ap.parse_args(argv)
@@ -119,6 +126,8 @@ def run() -> int:
             near_kernel=str(args.sc_near_kernel),
             subdip_n=int(args.sc_subdip_n),
         )
+        if str(args.sc_near_kernel) == "gl-double-mixed" and args.sc_gl_order is not None:
+            sc_cfg_override["gl_order"] = int(args.sc_gl_order)
     mag_model_eval = cast(
         Literal["auto", "fixed", "self-consistent-easy-axis"], args.mag_model_eval
     )

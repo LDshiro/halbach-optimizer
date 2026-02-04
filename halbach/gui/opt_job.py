@@ -53,6 +53,7 @@ def build_command(
     sc_near_wphi: int = 2,
     sc_near_kernel: str = "dipole",
     sc_subdip_n: int = 2,
+    sc_gl_order: int | None = None,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -112,6 +113,8 @@ def build_command(
         cmd.extend(["--sc-near-wz", str(sc_near_wz)])
         cmd.extend(["--sc-near-wphi", str(sc_near_wphi)])
         cmd.extend(["--sc-near-kernel", str(sc_near_kernel)])
+        if sc_near_kernel == "gl-double-mixed" and sc_gl_order is not None:
+            cmd.extend(["--sc-gl-order", str(sc_gl_order)])
         cmd.extend(["--sc-subdip-n", str(sc_subdip_n)])
     return cmd
 
@@ -153,6 +156,7 @@ def build_dc_ccp_sc_command(
     sc_near_wphi: int,
     sc_near_kernel: str,
     sc_subdip_n: int,
+    sc_gl_order: int | None = None,
     pmin: float,
     pmax: float,
     solver: str,
@@ -237,6 +241,8 @@ def build_dc_ccp_sc_command(
         "--solver",
         str(solver),
     ]
+    if sc_near_kernel == "gl-double-mixed" and sc_gl_order is not None:
+        cmd.extend(["--sc-gl-order", str(sc_gl_order)])
     if init_run:
         cmd.extend(["--init-run", str(init_run)])
     if sc_eq:
@@ -364,6 +370,7 @@ def start_opt_job(
     sc_near_wphi: int = 2,
     sc_near_kernel: str = "dipole",
     sc_subdip_n: int = 2,
+    sc_gl_order: int | None = None,
     repo_root: Path | None = None,
 ) -> OptJob:
     out_path = Path(out_dir)
@@ -402,6 +409,7 @@ def start_opt_job(
         sc_near_wphi=sc_near_wphi,
         sc_near_kernel=sc_near_kernel,
         sc_subdip_n=sc_subdip_n,
+        sc_gl_order=sc_gl_order,
     )
     cwd = repo_root or Path(__file__).resolve().parents[2]
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -452,6 +460,7 @@ def start_dc_ccp_sc_job(
     sc_near_wphi: int,
     sc_near_kernel: str,
     sc_subdip_n: int,
+    sc_gl_order: int | None = None,
     pmin: float,
     pmax: float,
     solver: str,
@@ -498,6 +507,7 @@ def start_dc_ccp_sc_job(
         sc_near_wphi=sc_near_wphi,
         sc_near_kernel=sc_near_kernel,
         sc_subdip_n=sc_subdip_n,
+        sc_gl_order=sc_gl_order,
         pmin=pmin,
         pmax=pmax,
         solver=solver,

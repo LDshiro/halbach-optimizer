@@ -42,7 +42,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--override-sc-near-kernel",
         type=str,
-        choices=["dipole", "multi-dipole", "cellavg"],
+        choices=["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
         default=None,
         help="override near_kernel in sc_cfg",
     )
@@ -51,6 +51,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="override subdip_n in sc_cfg",
+    )
+    ap.add_argument(
+        "--override-sc-gl-order",
+        type=int,
+        choices=[2, 3],
+        default=None,
+        help="override gl-double-mixed order (2 or 3) in sc_cfg",
     )
     ap.add_argument(
         "--linear-check",
@@ -107,12 +114,18 @@ def run(argv: list[str] | None = None) -> int:
         factor = float(FACTOR)
 
     sc_cfg_override: dict[str, Any] | None = None
-    if args.override_sc_near_kernel is not None or args.override_sc_subdip_n is not None:
+    if (
+        args.override_sc_near_kernel is not None
+        or args.override_sc_subdip_n is not None
+        or args.override_sc_gl_order is not None
+    ):
         sc_cfg_override = {}
         if args.override_sc_near_kernel is not None:
             sc_cfg_override["near_kernel"] = str(args.override_sc_near_kernel)
         if args.override_sc_subdip_n is not None:
             sc_cfg_override["subdip_n"] = int(args.override_sc_subdip_n)
+        if args.override_sc_gl_order is not None:
+            sc_cfg_override["gl_order"] = int(args.override_sc_gl_order)
 
     debug_dir = make_sc_debug_bundle(
         run_dir=run.run_dir,

@@ -159,9 +159,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--sc-near-kernel",
         type=str,
-        choices=["dipole", "multi-dipole", "cellavg", "cube-average"],
+        choices=["dipole", "multi-dipole", "cellavg", "cube-average", "gl-double-mixed"],
         default="dipole",
         help="near-field kernel model",
+    )
+    ap.add_argument(
+        "--sc-gl-order",
+        type=int,
+        choices=[2, 3],
+        default=None,
+        help="gl-double-mixed order (2 or 3). When omitted, uses mixed 2/3.",
     )
     ap.add_argument("--sc-subdip-n", type=int, default=2, help="sub-dipole grid size")
     ap.add_argument(
@@ -603,6 +610,10 @@ def run_optimize(args: argparse.Namespace) -> int:
         near_kernel=str(args.sc_near_kernel),
         subdip_n=int(args.sc_subdip_n),
     )
+    sc_gl_order = 0
+    if str(args.sc_near_kernel) == "gl-double-mixed" and args.sc_gl_order is not None:
+        sc_gl_order = int(args.sc_gl_order)
+        sc_cfg_payload["gl_order"] = sc_gl_order
 
     sc_final_extras: dict[str, Any] | None = None
     if angle_model == "legacy-alpha":
@@ -809,6 +820,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                             volume_m3=sc_volume_m3,
                             near_kernel=str(args.sc_near_kernel),
                             subdip_n=int(args.sc_subdip_n),
+                            gl_order=sc_gl_order,
                             iters=int(args.sc_iters),
                             omega=float(args.sc_omega),
                             factor=factor,
@@ -855,6 +867,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         omega=float(args.sc_omega),
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         lambda0=float(args.lambda0),
                         lambda_theta=float(args.lambda_theta),
                         lambda_z=float(args.lambda_z),
@@ -913,6 +926,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         omega=float(args.sc_omega),
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         lambda0=float(args.lambda0),
                         lambda_theta=float(args.lambda_theta),
                         lambda_z=float(args.lambda_z),
@@ -1105,6 +1119,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         volume_m3=sc_volume_m3,
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
+                        gl_order=sc_gl_order,
                         iters=int(args.sc_iters),
                         omega=float(args.sc_omega),
                         factor=factor,
@@ -1150,6 +1165,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     omega=float(args.sc_omega),
                     near_kernel=str(args.sc_near_kernel),
                     subdip_n=int(args.sc_subdip_n),
+                    gl_order=sc_gl_order,
                     lambda0=float(args.lambda0),
                     lambda_theta=float(args.lambda_theta),
                     lambda_z=float(args.lambda_z),
@@ -1204,6 +1220,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     omega=float(args.sc_omega),
                     near_kernel=str(args.sc_near_kernel),
                     subdip_n=int(args.sc_subdip_n),
+                    gl_order=sc_gl_order,
                     lambda0=float(args.lambda0),
                     lambda_theta=float(args.lambda_theta),
                     lambda_z=float(args.lambda_z),

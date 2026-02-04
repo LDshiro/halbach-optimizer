@@ -69,7 +69,14 @@ def _parse_args() -> argparse.Namespace:
         "--sc-near-kernel",
         type=str,
         default="dipole",
-        choices=["dipole", "multi-dipole", "cellavg", "cube-average"],
+        choices=["dipole", "multi-dipole", "cellavg", "cube-average", "gl-double-mixed"],
+    )
+    parser.add_argument(
+        "--sc-gl-order",
+        type=int,
+        choices=[2, 3],
+        default=None,
+        help="gl-double-mixed order (2 or 3). When omitted, uses mixed 2/3.",
     )
     parser.add_argument("--sc-subdip-n", type=int, default=2)
     parser.add_argument("--pmin", type=float, default=0.0)
@@ -341,6 +348,8 @@ def main() -> None:
         "factor": float(args.factor),
         "solver": str(args.solver),
     }
+    if sc_near_kernel == "gl-double-mixed" and args.sc_gl_order is not None:
+        meta["sc_cfg"]["gl_order"] = int(args.sc_gl_order)
     if args.init_run:
         meta["init_source"] = "lbfgs"
         meta["init_from_run"] = str(args.init_run)

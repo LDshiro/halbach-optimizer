@@ -69,14 +69,19 @@ def test_build_command_includes_self_consistent_flags(tmp_path: Path) -> None:
         sc_near_wr=0,
         sc_near_wz=1,
         sc_near_wphi=2,
-        sc_near_kernel="dipole",
+        sc_near_kernel="gl-double-mixed",
         sc_subdip_n=2,
+        sc_gl_order=3,
     )
     assert "--mag-model" in cmd
     assert "self-consistent-easy-axis" in cmd
     assert "--sc-chi" in cmd
     assert cmd[cmd.index("--sc-chi") + 1] == "0.05"
     assert "--sc-near-wphi" in cmd
+    assert "--sc-near-kernel" in cmd
+    assert cmd[cmd.index("--sc-near-kernel") + 1] == "gl-double-mixed"
+    assert "--sc-gl-order" in cmd
+    assert cmd[cmd.index("--sc-gl-order") + 1] == "3"
 
 
 def test_build_generate_command_basic(tmp_path: Path) -> None:

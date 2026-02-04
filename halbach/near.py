@@ -69,6 +69,18 @@ def get_near_graph_from_geom(geom: Geometry, window: NearWindow) -> NearGraph:
     return build_near_graph(int(geom.R), int(geom.K), int(geom.N), window)
 
 
+def edges_from_near(nbr_idx: Int32Array, nbr_mask: BoolArray) -> tuple[Int32Array, Int32Array]:
+    M, deg = nbr_idx.shape
+    i_all = np.repeat(np.arange(M, dtype=np.int32), deg)
+    j_all = nbr_idx.reshape(-1).astype(np.int32)
+    m_all = nbr_mask.reshape(-1).astype(bool)
+    return i_all[m_all], j_all[m_all]
+
+
+def edges_from_graph(graph: NearGraph) -> tuple[Int32Array, Int32Array]:
+    return edges_from_near(graph.nbr_idx, graph.nbr_mask)
+
+
 @cache
 def _build_near_graph_cached(R: int, K: int, N: int, wr: int, wz: int, wphi: int) -> NearGraph:
     window = NearWindow(wr=wr, wz=wz, wphi=wphi)
@@ -118,4 +130,6 @@ __all__ = [
     "unflatten_index",
     "build_near_graph",
     "get_near_graph_from_geom",
+    "edges_from_near",
+    "edges_from_graph",
 ]

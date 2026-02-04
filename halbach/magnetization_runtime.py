@@ -10,7 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, m0
-from halbach.near import NearWindow, build_near_graph
+from halbach.near import NearWindow, build_near_graph, edges_from_near
 from halbach.physics import compute_B_and_B0_from_m_flat
 from halbach.types import Geometry
 
@@ -58,6 +58,12 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
     near_kernel = str(sc_cfg.get("near_kernel", "dipole"))
     if near_kernel == "cube-average":
         near_kernel = "cellavg"
+    gl_order_raw = sc_cfg.get("gl_order")
+    gl_order: int | None = None
+    if gl_order_raw is not None:
+        gl_order = int(gl_order_raw)
+        if gl_order not in (2, 3):
+            raise ValueError("self_consistent.gl_order must be 2 or 3 when provided")
     return dict(
         chi=float(sc_cfg.get("chi", 0.0)),
         Nd=float(sc_cfg.get("Nd", 1.0 / 3.0)),
@@ -72,7 +78,34 @@ def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
         ),
         near_kernel=near_kernel,
         subdip_n=int(sc_cfg.get("subdip_n", 2)),
+        gl_order=gl_order,
     )
+
+
+def _edge_partition_face_to_face(
+    i_edge: NDArray[np.int32],
+    j_edge: NDArray[np.int32],
+    *,
+    R: int,
+    K: int,
+    N: int,
+) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
+    n_i = (i_edge % N).astype(np.int32)
+    n_j = (j_edge % N).astype(np.int32)
+    dn_raw = (n_i - n_j) % N
+    dn = np.where(dn_raw > (N // 2), dn_raw - N, dn_raw).astype(np.int32)
+
+    k_i = ((i_edge // N) % K).astype(np.int32)
+    k_j = ((j_edge // N) % K).astype(np.int32)
+    dk = (k_i - k_j).astype(np.int32)
+
+    r_i = (i_edge // (K * N)).astype(np.int32)
+    r_j = (j_edge // (K * N)).astype(np.int32)
+
+    hi_mask = (r_i == r_j) & (np.abs(dk) == 1) & (dn == 0)
+    idx_hi = np.nonzero(hi_mask)[0].astype(np.int32)
+    idx_lo = np.nonzero(~hi_mask)[0].astype(np.int32)
+    return idx_lo, idx_hi
 
 
 def sc_cfg_fingerprint(sc_cfg: dict[str, Any]) -> str:
@@ -88,6 +121,8 @@ def sc_cfg_fingerprint(sc_cfg: dict[str, Any]) -> str:
         near_kernel=str(sc["near_kernel"]),
         subdip_n=int(sc["subdip_n"]),
     )
+    if sc["near_kernel"] == "gl-double-mixed" and sc.get("gl_order") in (2, 3):
+        core["gl_order"] = int(sc["gl_order"])
     payload = json.dumps(core, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -105,8 +140,11 @@ def compute_p_flat_self_consistent_jax(
     import jax.numpy as jnp
 
     from halbach.autodiff.jax_self_consistent import (
+        _gl_double_delta_table_n2,
+        _gl_double_delta_table_n3,
         solve_p_easy_axis_near,
         solve_p_easy_axis_near_cellavg,
+        solve_p_easy_axis_near_gl_double_mixed,
         solve_p_easy_axis_near_multi_dipole,
     )
 
@@ -170,6 +208,49 @@ def compute_p_flat_self_consistent_jax(
                 volume_m3=volume_m3,
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
+            )
+        elif sc["near_kernel"] == "gl-double-mixed":
+            i_edge_np, j_edge_np = edges_from_near(near.nbr_idx, near.nbr_mask)
+            idx_lo_np, idx_hi_np = _edge_partition_face_to_face(
+                i_edge_np,
+                j_edge_np,
+                R=int(geom.R),
+                K=int(geom.K),
+                N=int(geom.N),
+            )
+            i_edge_j = jnp.asarray(i_edge_np, dtype=jnp.int32)
+            j_edge_j = jnp.asarray(j_edge_np, dtype=jnp.int32)
+            idx_lo_j = jnp.asarray(idx_lo_np, dtype=jnp.int32)
+            idx_hi_j = jnp.asarray(idx_hi_np, dtype=jnp.int32)
+            cube_edge = float(volume_m3) ** (1.0 / 3.0)
+            gl_order = sc.get("gl_order")
+            if gl_order == 2:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n2(cube_edge)
+            elif gl_order == 3:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n3(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+            else:
+                delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+                delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+            p_flat = solve_p_easy_axis_near_gl_double_mixed(
+                phi_j,
+                r0_j,
+                p0=float(sc["p0"]),
+                chi=float(sc["chi"]),
+                Nd=float(sc["Nd"]),
+                volume_m3=volume_m3,
+                iters=int(sc["iters"]),
+                omega=float(sc["omega"]),
+                i_edge=i_edge_j,
+                j_edge=j_edge_j,
+                idx_lo=idx_lo_j,
+                idx_hi=idx_hi_j,
+                delta_lo_offsets=delta_lo_offsets,
+                delta_lo_w=delta_lo_w,
+                delta_hi_offsets=delta_hi_offsets,
+                delta_hi_w=delta_hi_w,
+                implicit_diff=False,
             )
         else:
             raise ValueError(f"Unsupported near_kernel: {sc['near_kernel']}")
@@ -300,6 +381,8 @@ def compute_m_flat_from_run(
                 sc_volume_mm3=float(sc["volume_mm3"]),
             )
         )
+        if sc["near_kernel"] == "gl-double-mixed":
+            debug["sc_gl_order"] = sc.get("gl_order")
     return m_flat, debug
 
 
