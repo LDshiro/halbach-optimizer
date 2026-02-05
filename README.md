@@ -1,14 +1,14 @@
-# halbach-optimizer
+ï»¿# halbach-optimizer
 
-Halbach ”z—ñ‚Ì**¥ê‹Ïˆê‰»Å“K‰»**iL-BFGS-Bj‚Æ 2D/3D ‰Â‹‰»‚ğs‚¤ƒc[ƒ‹ŒQ‚Å‚·B  
-å‚É `generate_run` / `optimize_run` / GUIiStreamlitj‚ğg‚Á‚ÄA
-Šô‰½EŠp“xƒ‚ƒfƒ‹E©ŒÈ–³“³’…ƒ‚ƒfƒ‹‚ğØ‚è‘Ö‚¦‚È‚ª‚çÅ“K‰»‚Å‚«‚Ü‚·B
+Halbach é…åˆ—ã®**ç£å ´å‡ä¸€åŒ–æœ€é©åŒ–**ï¼ˆL-BFGS-Bï¼‰ã¨ 2D/3D å¯è¦–åŒ–ã‚’è¡Œã†ãƒ„ãƒ¼ãƒ«ç¾¤ã§ã™ã€‚  
+ä¸»ã« `generate_run` / `optimize_run` / GUIï¼ˆStreamlitï¼‰ã‚’ä½¿ã£ã¦ã€
+å¹¾ä½•ãƒ»è§’åº¦ãƒ¢ãƒ‡ãƒ«ãƒ»è‡ªå·±ç„¡æ’ç€ãƒ¢ãƒ‡ãƒ«ã‚’åˆ‡ã‚Šæ›¿ãˆãªãŒã‚‰æœ€é©åŒ–ã§ãã¾ã™ã€‚
 
 ---
 
-## 1. ƒZƒbƒgƒAƒbƒv
+## 1. ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—
 
-### 1.1 ‰¼‘zŠÂ‹«
+### 1.1 ä»®æƒ³ç’°å¢ƒ
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -16,27 +16,27 @@ python -m pip install -U pip
 pip install -r requirements-dev.txt -r requirements-gui.txt
 ```
 
-### 1.2 JAXiJAX•K{‚Ìƒ‚ƒfƒ‹j
-`delta-rep-x0` / `fourier-x0` ‚Æ©ŒÈ–³“³’…ƒ‚ƒfƒ‹iself-consistentj‚Í JAX ‚ª•K{‚Å‚·B
+### 1.2 JAXï¼ˆJAXå¿…é ˆã®ãƒ¢ãƒ‡ãƒ«ï¼‰
+`delta-rep-x0` / `fourier-x0` ã¨è‡ªå·±ç„¡æ’ç€ãƒ¢ãƒ‡ãƒ«ï¼ˆself-consistentï¼‰ã¯ JAX ãŒå¿…é ˆã§ã™ã€‚
 ```powershell
 python -m pip install jax jaxlib
 ```
 
 ---
 
-## 2. g‚¢•û
+## 2. ä½¿ã„æ–¹
 
-### 2.1 ‰Šú run ‚Ì¶¬
+### 2.1 åˆæœŸ run ã®ç”Ÿæˆ
 ```powershell
 python -m halbach.cli.generate_run --out runs/demo `
   --N 48 --R 3 --K 24 --Lz 0.64 --diameter-mm 400 --ring-offset-step-mm 12
 ```
 
-¶¬•¨:
+ç”Ÿæˆç‰©:
 - `runs/demo/results.npz`
 - `runs/demo/meta.json`
 
-### 2.2 Å“K‰»iL-BFGS-Bj
+### 2.2 æœ€é©åŒ–ï¼ˆL-BFGS-Bï¼‰
 ```powershell
 python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
   --maxiter 900 --gtol 1e-12 `
@@ -47,7 +47,7 @@ python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
   --r-bound-mode relative --r-lower-delta-mm 30 --r-upper-delta-mm 30
 ```
 
-o—Í:
+å‡ºåŠ›:
 - `runs/demo_opt/results.npz`
 - `runs/demo_opt/meta.json`
 - `runs/demo_opt/trace.json`
@@ -58,110 +58,110 @@ python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
 python -m streamlit run app\streamlit_app.py
 ```
 
-GUI ‚Å‚Å‚«‚é‚±‚Æ:
-- run ‚Ì‰Â‹‰»i2D/3Dj
-- `generate_run` / `optimize_run` ‚ÌÀs
-- Šp“xƒ‚ƒfƒ‹ / ©ŒÈ–³“³’… / ROI “™‚Ìƒpƒ‰ƒ[ƒ^İ’è
+GUI ã§ã§ãã‚‹ã“ã¨:
+- run ã®å¯è¦–åŒ–ï¼ˆ2D/3Dï¼‰
+- `generate_run` / `optimize_run` ã®å®Ÿè¡Œ
+- è§’åº¦ãƒ¢ãƒ‡ãƒ« / è‡ªå·±ç„¡æ’ç€ / ROI ç­‰ã®ãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿è¨­å®š
 
 ---
 
-## 3. ŒvZƒ‚ƒfƒ‹
+## 3. è¨ˆç®—ãƒ¢ãƒ‡ãƒ«
 
-### 3.1 Šp“xƒ‚ƒfƒ‹iangle_modelj
+### 3.1 è§’åº¦ãƒ¢ãƒ‡ãƒ«ï¼ˆangle_modelï¼‰
 
 **legacy-alpha**  
-ƒŠƒ“ƒO‚²‚Æ‚É `alpha[r,k]` ‚ğ‚ÂŠÈˆÕƒ‚ƒfƒ‹B
+ãƒªãƒ³ã‚°ã”ã¨ã« `alpha[r,k]` ã‚’æŒã¤ç°¡æ˜“ãƒ¢ãƒ‡ãƒ«ã€‚
 \[
 \phi(\theta) = 2\theta + \phi_0 + \alpha_{r,k}\sin(2\theta)
 \]
 
 **delta-rep-x0**  
-x=0 –Ê‚Ì‘ÎÌğŒ‚ğ–‚½‚·‚æ‚¤‚ÉA\(\delta\phi\) ‚ğ•\Œ»‚·‚éƒ‚ƒfƒ‹B
+x=0 é¢ã®å¯¾ç§°æ¡ä»¶ã‚’æº€ãŸã™ã‚ˆã†ã«ã€\(\delta\phi\) ã‚’è¡¨ç¾ã™ã‚‹ãƒ¢ãƒ‡ãƒ«ã€‚
 
 **fourier-x0**  
-\(\delta\phi\) ‚ğ Fourier “WŠJ‚Å•\Œ»‚·‚éƒ‚ƒfƒ‹B
+\(\delta\phi\) ã‚’ Fourier å±•é–‹ã§è¡¨ç¾ã™ã‚‹ãƒ¢ãƒ‡ãƒ«ã€‚
 \[
 \delta\phi(\theta)=\sum_{h=0}^{H-1} a_h\cos((2h+1)\theta)
 + \sum_{h=0}^{H-1} b_h\sin(2(h+1)\theta)
 \]
 
-### 3.2 ¥‰»ƒ‚ƒfƒ‹imag_modelj
+### 3.2 ç£åŒ–ãƒ¢ãƒ‡ãƒ«ï¼ˆmag_modelï¼‰
 
 **fixed**  
-¥‰»ƒ‚[ƒƒ“ƒg‚Ì‘å‚«‚³‚ÍŒÅ’èi`m0`jB
+ç£åŒ–ãƒ¢ãƒ¼ãƒ¡ãƒ³ãƒˆã®å¤§ãã•ã¯å›ºå®šï¼ˆ`m0`ï¼‰ã€‚
 
 **self-consistent-easy-axis**  
-‹ß–T‘ŠŒİì—p‚É‚æ‚é©ŒÈ–³“³’…ip-solverj‚Å `p_i` ‚ğXVB
-- H ŒvZ‚Í `H_FACTOR = FACTOR / mu0 = 1/(4ƒÎ)` ‚ğg—p
-- **field_scale ‚É‚ÍˆË‘¶‚µ‚È‚¢**i•s•Ï«ƒ`ƒFƒbƒN‚ ‚èj
+è¿‘å‚ç›¸äº’ä½œç”¨ã«ã‚ˆã‚‹è‡ªå·±ç„¡æ’ç€ï¼ˆp-solverï¼‰ã§ `p_i` ã‚’æ›´æ–°ã€‚
+- H è¨ˆç®—ã¯ `H_FACTOR = FACTOR / mu0 = 1/(4Ï€)` ã‚’ä½¿ç”¨
+- **field_scale ã«ã¯ä¾å­˜ã—ãªã„**ï¼ˆä¸å¤‰æ€§ãƒã‚§ãƒƒã‚¯ã‚ã‚Šï¼‰
 
-### 3.3 ‹ß–TƒJ[ƒlƒ‹inear_kernelj
-©ŒÈ–³“³’…‚Ì‹ß–T‘ŠŒİì—p‚Ég—pB
+### 3.3 è¿‘å‚ã‚«ãƒ¼ãƒãƒ«ï¼ˆnear_kernelï¼‰
+è‡ªå·±ç„¡æ’ç€ã®è¿‘å‚ç›¸äº’ä½œç”¨ã«ä½¿ç”¨ã€‚
 
-- **dipole**: “_‘o‹Éq‚Ì‹ß–T‘ŠŒİì—p
-- **multi-dipole**: ƒTƒu‘o‹Éq•ªŠ„i`subdip_n`j‚Å‹ß—
-- **cellavg**: ƒZƒ‹•½‹Ï demag tensor ‚É‚æ‚é‹ß–T‘ŠŒİì—p
-- **gl-double-mixed**: Gauss?Legendre “ñd•½‹Ïi¬‡j
-  - ’áŸ”in=2j‚ğ‘SƒGƒbƒW‚ÉA
-  - **face-to-face** ƒGƒbƒW‚É‚Ì‚İ‚Ÿ”in=3j‚ğ“K—p
-  - `gl_order` ‚ğ `2 / 3 / mixed` ‚ÅØ‚è‘Ö‚¦‰Â”\
-
----
-
-## 4. ŒvZƒtƒ[iÅ“K‰»j
-
-1. **run ‚ğ“Ç‚İ‚İ**iŠô‰½E‰ŠúŠp“x‚È‚Çj
-2. **ROI “_ŒQ‚ğ¶¬**ivolume-grid / surface-fibonacci “™j
-3. **–Ú“IŠÖ” J ‚ÆŒù”z‚ğ•]‰¿**
-   - ŒÅ’èƒ‚ƒfƒ‹‚È‚ç `m0` ŒÅ’è
-   - self-consistent ‚Ìê‡‚Í **p-solver** ‚ğ‰ğ‚­
-4. **L-BFGS-B ”½•œ**i§–ñ•t‚«Å“K‰»j
-5. **Œ‹‰Ê•Û‘¶**i`results.npz` / `trace.json`j
-
-self-consistent ‚Ì“à•”:
-- NearGraph ‚Å‹ß–T‚ğ\’z
-- p-solveriŒÅ’è“_”½•œ / ‰ğÍ“I”½•œj‚Å `p` ‚ğXV
-- **p ‚Í field_scale ‚ÉˆË‘¶‚µ‚È‚¢**
+- **dipole**: ç‚¹åŒæ¥µå­ã®è¿‘å‚ç›¸äº’ä½œç”¨
+- **multi-dipole**: ã‚µãƒ–åŒæ¥µå­åˆ†å‰²ï¼ˆ`subdip_n`ï¼‰ã§è¿‘ä¼¼
+- **cellavg**: ã‚»ãƒ«å¹³å‡ demag tensor ã«ã‚ˆã‚‹è¿‘å‚ç›¸äº’ä½œç”¨
+- **gl-double-mixed**: Gaussâ€“Legendre äºŒé‡å¹³å‡ï¼ˆæ··åˆï¼‰
+  - ä½æ¬¡æ•°ï¼ˆn=2ï¼‰ã‚’å…¨ã‚¨ãƒƒã‚¸ã«ã€
+  - **face-to-face** ã‚¨ãƒƒã‚¸ã«ã®ã¿é«˜æ¬¡æ•°ï¼ˆn=3ï¼‰ã‚’é©ç”¨
+  - `gl_order` ã‚’ `2 / 3 / mixed` ã§åˆ‡ã‚Šæ›¿ãˆå¯èƒ½
 
 ---
 
-## 5. •¨—ƒ‚ƒfƒ‹‚Æ–Ú“IŠÖ”
+## 4. è¨ˆç®—ãƒ•ãƒ­ãƒ¼ï¼ˆæœ€é©åŒ–ï¼‰
 
-### 5.1 ‘o‹Éq¥ê
+1. **run ã‚’èª­ã¿è¾¼ã¿**ï¼ˆå¹¾ä½•ãƒ»åˆæœŸè§’åº¦ãªã©ï¼‰
+2. **ROI ç‚¹ç¾¤ã‚’ç”Ÿæˆ**ï¼ˆvolume-grid / surface-fibonacci ç­‰ï¼‰
+3. **ç›®çš„é–¢æ•° J ã¨å‹¾é…ã‚’è©•ä¾¡**
+   - å›ºå®šãƒ¢ãƒ‡ãƒ«ãªã‚‰ `m0` å›ºå®š
+   - self-consistent ã®å ´åˆã¯ **p-solver** ã‚’è§£ã
+4. **L-BFGS-B åå¾©**ï¼ˆåˆ¶ç´„ä»˜ãæœ€é©åŒ–ï¼‰
+5. **çµæœä¿å­˜**ï¼ˆ`results.npz` / `trace.json`ï¼‰
+
+self-consistent ã®å†…éƒ¨:
+- NearGraph ã§è¿‘å‚ã‚’æ§‹ç¯‰
+- p-solverï¼ˆå›ºå®šç‚¹åå¾© / è§£æçš„åå¾©ï¼‰ã§ `p` ã‚’æ›´æ–°
+- **p ã¯ field_scale ã«ä¾å­˜ã—ãªã„**
+
+---
+
+## 5. ç‰©ç†ãƒ¢ãƒ‡ãƒ«ã¨ç›®çš„é–¢æ•°
+
+### 5.1 åŒæ¥µå­ç£å ´
 \[
 B(r) = \frac{\mu_0}{4\pi}\left(\frac{3(m\cdot\hat{r})\hat{r} - m}{\|r\|^3}\right)
 \]
-’è”‚Í `FACTOR = mu0/(4ƒÎ)` ‚Æ‚µ‚Äˆµ‚¢‚Ü‚·B
+å®šæ•°ã¯ `FACTOR = mu0/(4Ï€)` ã¨ã—ã¦æ‰±ã„ã¾ã™ã€‚
 
-### 5.2 –Ú“IŠÖ”
-ROI ã‚Ì¥ê·•ª‚Ì•½‹Ï“ñæB
+### 5.2 ç›®çš„é–¢æ•°
+ROI ä¸Šã®ç£å ´å·®åˆ†ã®å¹³å‡äºŒä¹—ã€‚
 \[
 J = \frac{1}{M}\sum_{p\in ROI} \|B(p) - B_0\|^2
 \]
 
 ### 5.3 field_scale
-•]‰¿—p‚ÌƒXƒP[ƒŠƒ“ƒOB
+è©•ä¾¡ç”¨ã®ã‚¹ã‚±ãƒ¼ãƒªãƒ³ã‚°ã€‚
 \[
-FACTOR_{eff} = FACTOR \times field\_scale
+FACTOR_{eff} = FACTOR \times field_scale
 \]
-©ŒÈ–³“³’…‘¤ip-solverj‚É‚Í **field_scale ‚ğ¬‚º‚È‚¢**B
+è‡ªå·±ç„¡æ’ç€å´ï¼ˆp-solverï¼‰ã«ã¯ **field_scale ã‚’æ··ãœãªã„**ã€‚
 
 ---
 
-## 6. ROI ƒTƒ“ƒvƒŠƒ“ƒO
+## 6. ROI ã‚µãƒ³ãƒ—ãƒªãƒ³ã‚°
 
-`halbach.geom.build_roi_points(...)` ‚É‚æ‚è ROI “_‚ğì‚è‚Ü‚·B
+`halbach.geom.build_roi_points(...)` ã«ã‚ˆã‚Š ROI ç‚¹ã‚’ä½œã‚Šã¾ã™ã€‚
 
 - `volume-grid`
 - `volume-subsample`
 - `surface-fibonacci`
 - `surface-random`
 
-`optimize_run` ‚ÌŠù’è‚Í `surface-fibonacci` ‚Å‚·B
+`optimize_run` ã®æ—¢å®šã¯ `surface-fibonacci` ã§ã™ã€‚
 
 ---
 
-## 7. o—Íƒtƒ@ƒCƒ‹
+## 7. å‡ºåŠ›ãƒ•ã‚¡ã‚¤ãƒ«
 
 ```
 runs/<run_name>/
@@ -171,60 +171,83 @@ runs/<run_name>/
   opt.log
 ```
 
-### 7.1 results.npziåƒL[j
-- `alphas_opt` (R,K)
-- `r_bases_opt` (K,)
+### 7.1 results.npzï¼ˆä¸»ã‚­ãƒ¼ï¼‰
+- `alphas_opt` (R,K) / `r_bases_opt` (K,)
 - `theta`, `sin2th`, `cth`, `sth`, `z_layers`, `ring_offsets`
-- `J_hist`, `Jn_hist`, `B0_hist`
+- `J_hist`, `Jn_hist`, `B0_hist`ï¼ˆå±¥æ­´ï¼‰
 
-Šp“xƒ‚ƒfƒ‹‚É‰‚¶‚Ä’Ç‰Á:
+è§’åº¦ãƒ¢ãƒ‡ãƒ«ã«å¿œã˜ã¦è¿½åŠ :
 - `delta_rep_opt` (K, n_rep)
 - `fourier_coeffs_opt` (K, 2H)
 
-©ŒÈ–³“³’…‚ª—LŒø‚Èê‡:
-- `sc_p_flat` / `sc_cfg_fingerprint` ‚ª•Û‘¶‚³‚ê‚é‚±‚Æ‚ª‚ ‚è‚Ü‚·
+è‡ªå·±ç„¡æ’ç€ãŒæœ‰åŠ¹ãªå ´åˆ:
+- `sc_p_flat` / `sc_cfg_fingerprint` ãŒä¿å­˜ã•ã‚Œã‚‹ã“ã¨ãŒã‚ã‚Šã¾ã™
+
+### 7.2 meta.json / trace.json / opt.log
+- `meta.json`: å¹¾ä½•ãƒ»æœ€é©åŒ–æ¡ä»¶ãƒ»ãƒ¢ãƒ‡ãƒ«è¨­å®šï¼ˆangle_model / mag_model / near_kernel ãªã©ï¼‰
+- `trace.json`: åå¾©å±¥æ­´ï¼ˆJ, B0, gnorm, sc_extras ãªã©ï¼‰
+- `opt.log`: CLI å®Ÿè¡Œãƒ­ã‚°ï¼ˆGUI ã‹ã‚‰ã®èµ·å‹•ã‚‚åŒæ§˜ã«å‡ºåŠ›ï¼‰
+
+### 7.3 debug bundleï¼ˆä»»æ„ï¼‰
+`debug_sc_run` å®Ÿè¡Œæ™‚ã¯ `runs/<run_name>/sc_debug/` ã«ä»¥ä¸‹ãŒè¿½åŠ ã•ã‚Œã¾ã™:
+- `summary.json`, `near_graph.json`, `solver_trace.csv`, `check_report.json` ãªã©
 
 ---
 
-## 8. ‰Â‹‰»
+## 8. å¯è¦–åŒ–
 
 ### 8.1 2D Error Map (ppm)
 \[
 ppm = \frac{|B|-|B_0|}{|B_0|}\times 10^6
 \]
 
-### 8.2 3D ‰Â‹‰»
-Plotly ‚É‚æ‚é 3D •\¦B
+### 8.2 3D å¯è¦–åŒ–
+Plotly ã«ã‚ˆã‚‹ 3D è¡¨ç¤ºã€‚
 - `fast` / `pretty`
 - `cubes` / `cubes_arrows`
 
 ---
 
-## 9. å—vƒtƒ@ƒCƒ‹
+## 9. ä¸»è¦ãƒ•ã‚¡ã‚¤ãƒ«
 
 ```
 app/
   streamlit_app.py          # GUI
 halbach/
   constants.py              # mu0, FACTOR, phi0, m0
-  physics.py                # ¥êŒvZ
-  objective.py              # –Ú“IŠÖ” + Œù”z
-  geom.py                   # ROI/Šô‰½ƒwƒ‹ƒp
+  physics.py                # ç£å ´è¨ˆç®—
+  objective.py              # ç›®çš„é–¢æ•° + å‹¾é…
+  geom.py                   # ROI/å¹¾ä½•ãƒ˜ãƒ«ãƒ‘
+  types.py                  # Geometry/å‹å®šç¾©
+  near.py                   # è¿‘å‚ã‚°ãƒ©ãƒ•ã¨è¿‘å‚ã‚¤ãƒ³ãƒ‡ãƒƒã‚¯ã‚¹
+  symmetry.py               # x=0 å¯¾ç§°å‡¦ç†
+  io.py                     # run å…¥å‡ºåŠ›è£œåŠ©
+  robust.py                 # ãƒ­ãƒã‚¹ãƒˆç›®çš„ï¼ˆgradnorm ãªã©ï¼‰
+  magnetization_runtime.py  # self-consistent ç£åŒ–ã®å®Ÿè¡Œæ™‚æ§‹ç¯‰
+  sc_debug.py               # self-consistent ãƒ‡ãƒãƒƒã‚° bundle
+  sc_linear_system.py       # self-consistent è¿‘å‚ã®ç·šå½¢åŒ–
+  demag_cellavg.py          # ã‚»ãƒ«å¹³å‡ demag tensorï¼ˆNï¼‰
+  numba_compat.py           # Numba äº’æ› (TYPE_CHECKING)
+  logging_utils.py          # logging è¨­å®š
   run_io.py / run_types.py  # run IO
   viz2d.py                  # 2D ppm
-  viz3d.py                  # 3D ‰Â‹‰»
+  viz3d.py                  # 3D å¯è¦–åŒ–
+  autodiff/
+    jax_self_consistent.py                  # self-consistent solver
+    jax_objective_self_consistent_*.py      # self-consistent JAX objective
+    jax_demag_cellavg.py                    # JAXç‰ˆ demag tensor
   cli/
     generate_run.py
     optimize_run.py
   gui/
-    opt_job.py              # GUI ¨ CLI ŒÄ‚Ño‚µ
+    opt_job.py              # GUI â†’ CLI å‘¼ã³å‡ºã—
   solvers/
-    lbfgsb.py               # L-BFGS-B ƒ‰ƒbƒp
+    lbfgsb.py               # L-BFGS-B ãƒ©ãƒƒãƒ‘
 ```
 
 ---
 
-## 10. ƒRƒ}ƒ“ƒh
+## 10. ã‚³ãƒãƒ³ãƒ‰
 ```powershell
 ruff check .
 mypy .
