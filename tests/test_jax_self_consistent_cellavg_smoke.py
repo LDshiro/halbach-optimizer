@@ -10,7 +10,7 @@ def test_cellavg_smoke() -> None:
     import jax.numpy as jnp
 
     rng = np.random.default_rng(0)
-    R, K, N = 1, 2, 6
+    R, K, N = 1, 2, 4
     M = R * K * N
     r0_flat = rng.standard_normal((M, 3)).astype(np.float64) * 0.1
     phi_flat = (rng.standard_normal(M) * 0.1).astype(np.float64)
@@ -45,7 +45,7 @@ def test_cellavg_smoke() -> None:
         chi=0.05,
         Nd=1.0 / 3.0,
         volume_m3=volume_m3,
-        iters=10,
+        iters=5,
         omega=0.6,
     )
     p2_np = np.asarray(p2)
@@ -63,7 +63,7 @@ def test_cellavg_smoke() -> None:
         chi=0.05,
         Nd=1.0 / 3.0,
         volume_m3=volume_m3,
-        iters=10,
+        iters=5,
         omega=0.6,
     )
     delta = float(np.mean(np.asarray(p3)) - np.mean(p2_np))

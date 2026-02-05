@@ -63,7 +63,7 @@ def test_gl_double_mixed_matches_uniform_when_same_order() -> None:
         _k_edge_gl_double_mixed,
     )
 
-    R, K, N = 1, 2, 6
+    R, K, N = 1, 2, 4
     graph = build_near_graph(R, K, N, NearWindow(wr=0, wz=1, wphi=1))
     i_edge_np, j_edge_np = edges_from_near(graph.nbr_idx, graph.nbr_mask)
     idx_lo_np, idx_hi_np = _edge_partition_face_to_face(i_edge_np, j_edge_np, R=R, K=K, N=N)

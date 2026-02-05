@@ -1,21 +1,14 @@
 # halbach-optimizer
 
-Halbach ç£çŸ³ã‚¢ãƒ¬ã‚¤ã®æœ€é©åŒ–ãƒ»å¯è¦–åŒ–ãƒ„ãƒ¼ãƒ«ã§ã™ã€‚  
-L-BFGS-B ã«ã‚ˆã‚‹æœ€é©åŒ–ã¨ã€Streamlit + Plotly ã«ã‚ˆã‚‹ 2D/3D è¡¨ç¤ºã‚’æä¾›ã—ã¾ã™ã€‚
-
-ä¸»ãªæ©Ÿèƒ½:
-- `generate_run` ã§åˆæœŸãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿ï¼ˆrunï¼‰ã‚’ç”Ÿæˆ
-- `optimize_run` ã§æœ€é©åŒ–ï¼ˆè§’åº¦ãƒ¢ãƒ‡ãƒ«ã®åˆ‡æ›¿ã‚’å«ã‚€ï¼‰
-- GUI ã§ run ã®æ¯”è¼ƒãƒ»å¯è¦–åŒ–ãƒ»æœ€é©åŒ–å®Ÿè¡Œ
-
-> æœ¬ãƒªãƒã‚¸ãƒˆãƒªã§ã¯ã€Œãƒ­ãƒã‚¹ãƒˆåŒ–ï¼ˆGNæ­£å‰‡åŒ–ãƒ»Monte Carlo è©•ä¾¡ï¼‰ã€ã®æ©Ÿèƒ½ã¯é™¤å»ã•ã‚Œã¦ã„ã¾ã™ã€‚  
-> æœ€é©åŒ–è¨ˆç®—ã®åŸºæœ¬æ©Ÿèƒ½ã¯ç¶­æŒã—ã¤ã¤ã€é–¢é€£ãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿ã‚„ UI ã‚’å‰Šé™¤ã—ã¦ã„ã¾ã™ã€‚
+Halbach ”z—ñ‚Ì**¥ê‹Ïˆê‰»Å“K‰»**iL-BFGS-Bj‚Æ 2D/3D ‰Â‹‰»‚ğs‚¤ƒc[ƒ‹ŒQ‚Å‚·B  
+å‚É `generate_run` / `optimize_run` / GUIiStreamlitj‚ğg‚Á‚ÄA
+Šô‰½EŠp“xƒ‚ƒfƒ‹E©ŒÈ–³“³’…ƒ‚ƒfƒ‹‚ğØ‚è‘Ö‚¦‚È‚ª‚çÅ“K‰»‚Å‚«‚Ü‚·B
 
 ---
 
-## 1. ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—
+## 1. ƒZƒbƒgƒAƒbƒv
 
-### 1.1 ä»®æƒ³ç’°å¢ƒ
+### 1.1 ‰¼‘zŠÂ‹«
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -23,27 +16,27 @@ python -m pip install -U pip
 pip install -r requirements-dev.txt -r requirements-gui.txt
 ```
 
-### 1.2 JAXï¼ˆè§’åº¦ãƒ¢ãƒ‡ãƒ« delta/fourier ç”¨ï¼‰
-`delta-rep-x0` / `fourier-x0`ã€ã¾ãŸã¯ legacy ã® JAX å‹¾é…ã‚’ä½¿ã†å ´åˆã¯ JAX ãŒå¿…è¦ã§ã™ã€‚
+### 1.2 JAXiJAX•K{‚Ìƒ‚ƒfƒ‹j
+`delta-rep-x0` / `fourier-x0` ‚Æ©ŒÈ–³“³’…ƒ‚ƒfƒ‹iself-consistentj‚Í JAX ‚ª•K{‚Å‚·B
 ```powershell
 python -m pip install jax jaxlib
 ```
 
 ---
 
-## 2. ä½¿ã„æ–¹
+## 2. g‚¢•û
 
-### 2.1 åˆæœŸ run ã®ç”Ÿæˆ
+### 2.1 ‰Šú run ‚Ì¶¬
 ```powershell
 python -m halbach.cli.generate_run --out runs/demo `
   --N 48 --R 3 --K 24 --Lz 0.64 --diameter-mm 400 --ring-offset-step-mm 12
 ```
 
-ç”Ÿæˆç‰©:
+¶¬•¨:
 - `runs/demo/results.npz`
 - `runs/demo/meta.json`
 
-### 2.2 æœ€é©åŒ–ï¼ˆCLIï¼‰
+### 2.2 Å“K‰»iL-BFGS-Bj
 ```powershell
 python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
   --maxiter 900 --gtol 1e-12 `
@@ -54,125 +47,121 @@ python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
   --r-bound-mode relative --r-lower-delta-mm 30 --r-upper-delta-mm 30
 ```
 
-å‡ºåŠ›:
+o—Í:
 - `runs/demo_opt/results.npz`
 - `runs/demo_opt/meta.json`
 - `runs/demo_opt/trace.json`
 - `runs/demo_opt/opt.log`
 
-### 2.3 GUI èµ·å‹•
+### 2.3 GUI
 ```powershell
 python -m streamlit run app\streamlit_app.py
 ```
 
-GUI ã‹ã‚‰:
-- run ã®é¸æŠãƒ»æ¯”è¼ƒï¼ˆ2D/3Dï¼‰
-- `generate_run` â†’ `optimize_run` ã®å®Ÿè¡Œ
-- è§’åº¦ãƒ¢ãƒ‡ãƒ«ã‚„å¢ƒç•Œæ¡ä»¶ã®è¨­å®š
+GUI ‚Å‚Å‚«‚é‚±‚Æ:
+- run ‚Ì‰Â‹‰»i2D/3Dj
+- `generate_run` / `optimize_run` ‚ÌÀs
+- Šp“xƒ‚ƒfƒ‹ / ©ŒÈ–³“³’… / ROI “™‚Ìƒpƒ‰ƒ[ƒ^İ’è
 
 ---
 
-## 3. è§’åº¦ãƒ¢ãƒ‡ãƒ«
+## 3. ŒvZƒ‚ƒfƒ‹
 
-### 3.1 legacy-alpha
-ãƒªãƒ³ã‚°ã”ã¨ã« `alpha[r,k]` ã‚’æŒã¤å¾“æ¥ãƒ¢ãƒ‡ãƒ«ã€‚
+### 3.1 Šp“xƒ‚ƒfƒ‹iangle_modelj
+
+**legacy-alpha**  
+ƒŠƒ“ƒO‚²‚Æ‚É `alpha[r,k]` ‚ğ‚ÂŠÈˆÕƒ‚ƒfƒ‹B
 \[
 \phi(\theta) = 2\theta + \phi_0 + \alpha_{r,k}\sin(2\theta)
 \]
 
-### 3.2 delta-rep-x0ï¼ˆé¡æ˜ åå¯¾ç§°ï¼‰
-x=0 é¢ï¼ˆxâ†’-xï¼‰ã®é¡æ˜ å¯¾ç§°ã‚’æº€ãŸã™ Î´Ï† è¡¨ç¾ã§ã™ã€‚  
-é¡æ˜ ãƒšã‚¢ã§ã¯ Î´Ï† ãŒç¬¦å·åè»¢ã—ã€å›ºå®šç‚¹ã¯ 0 å›ºå®šã«ãªã‚Šã¾ã™ã€‚
+**delta-rep-x0**  
+x=0 –Ê‚Ì‘ÎÌğŒ‚ğ–‚½‚·‚æ‚¤‚ÉA\(\delta\phi\) ‚ğ•\Œ»‚·‚éƒ‚ƒfƒ‹B
 
-### 3.3 fourier-x0ï¼ˆé¡æ˜ åå¯¾ç§° Fourierï¼‰
-é¡æ˜ åå¯¾ç§°ã‚’æº€ãŸã™ Fourier åŸºåº•ã§ Î´Ï† ã‚’è¡¨ç¾ã—ã¾ã™ã€‚
+**fourier-x0**  
+\(\delta\phi\) ‚ğ Fourier “WŠJ‚Å•\Œ»‚·‚éƒ‚ƒfƒ‹B
 \[
 \delta\phi(\theta)=\sum_{h=0}^{H-1} a_h\cos((2h+1)\theta)
- + \sum_{h=0}^{H-1} b_h\sin(2(h+1)\theta)
++ \sum_{h=0}^{H-1} b_h\sin(2(h+1)\theta)
 \]
 
-### 3.4 JAX ã¨å‹¾é…
-- `delta-rep-x0` / `fourier-x0` ã¯ JAX å‹¾é…ã‚’ä½¿ç”¨
-- `legacy-alpha` ã¯ `analytic` / `jax` ã‚’é¸æŠå¯èƒ½
+### 3.2 ¥‰»ƒ‚ƒfƒ‹imag_modelj
+
+**fixed**  
+¥‰»ƒ‚[ƒƒ“ƒg‚Ì‘å‚«‚³‚ÍŒÅ’èi`m0`jB
+
+**self-consistent-easy-axis**  
+‹ß–T‘ŠŒİì—p‚É‚æ‚é©ŒÈ–³“³’…ip-solverj‚Å `p_i` ‚ğXVB
+- H ŒvZ‚Í `H_FACTOR = FACTOR / mu0 = 1/(4ƒÎ)` ‚ğg—p
+- **field_scale ‚É‚ÍˆË‘¶‚µ‚È‚¢**i•s•Ï«ƒ`ƒFƒbƒN‚ ‚èj
+
+### 3.3 ‹ß–TƒJ[ƒlƒ‹inear_kernelj
+©ŒÈ–³“³’…‚Ì‹ß–T‘ŠŒİì—p‚Ég—pB
+
+- **dipole**: “_‘o‹Éq‚Ì‹ß–T‘ŠŒİì—p
+- **multi-dipole**: ƒTƒu‘o‹Éq•ªŠ„i`subdip_n`j‚Å‹ß—
+- **cellavg**: ƒZƒ‹•½‹Ï demag tensor ‚É‚æ‚é‹ß–T‘ŠŒİì—p
+- **gl-double-mixed**: Gauss?Legendre “ñd•½‹Ïi¬‡j
+  - ’áŸ”in=2j‚ğ‘SƒGƒbƒW‚ÉA
+  - **face-to-face** ƒGƒbƒW‚É‚Ì‚İ‚Ÿ”in=3j‚ğ“K—p
+  - `gl_order` ‚ğ `2 / 3 / mixed` ‚ÅØ‚è‘Ö‚¦‰Â”\
 
 ---
 
-## 4. ç‰©ç†ãƒ¢ãƒ‡ãƒ«ã¨ç›®çš„é–¢æ•°
+## 4. ŒvZƒtƒ[iÅ“K‰»j
 
-### 4.1 å¹¾ä½•
-`N` å€‹ã®ç£çŸ³è§’åº¦:
-\[
-\theta_i = \frac{2\pi i}{N}
-\]
+1. **run ‚ğ“Ç‚İ‚İ**iŠô‰½E‰ŠúŠp“x‚È‚Çj
+2. **ROI “_ŒQ‚ğ¶¬**ivolume-grid / surface-fibonacci “™j
+3. **–Ú“IŠÖ” J ‚ÆŒù”z‚ğ•]‰¿**
+   - ŒÅ’èƒ‚ƒfƒ‹‚È‚ç `m0` ŒÅ’è
+   - self-consistent ‚Ìê‡‚Í **p-solver** ‚ğ‰ğ‚­
+4. **L-BFGS-B ”½•œ**i§–ñ•t‚«Å“K‰»j
+5. **Œ‹‰Ê•Û‘¶**i`results.npz` / `trace.json`j
 
-åŠå¾„ã¨ä½ç½®:
-\[
-\rho_{r,k} = r\_bases[k] + ring\_offsets[r]
-\]
-\[
-p_{i,r,k} = (\rho_{r,k}\cos\theta_i,\ \rho_{r,k}\sin\theta_i,\ z\_layers[k])
-\]
+self-consistent ‚Ì“à•”:
+- NearGraph ‚Å‹ß–T‚ğ\’z
+- p-solveriŒÅ’è“_”½•œ / ‰ğÍ“I”½•œj‚Å `p` ‚ğXV
+- **p ‚Í field_scale ‚ÉˆË‘¶‚µ‚È‚¢**
 
-### 4.2 ç£åŒ–ãƒ™ã‚¯ãƒˆãƒ«
-ç£åŒ–ã¯ xy å¹³é¢å†…:
-\[
-m(\phi) = m_0(\cos\phi,\ \sin\phi,\ 0)
-\]
+---
 
-### 4.3 ç‚¹åŒæ¥µå­ç£å ´
-ç£çŸ³ä¸­å¿ƒã‹ã‚‰è¦³æ¸¬ç‚¹ã¸ã®ãƒ™ã‚¯ãƒˆãƒ«ã‚’ \(r\) ã¨ã™ã‚‹ã¨:
+## 5. •¨—ƒ‚ƒfƒ‹‚Æ–Ú“IŠÖ”
+
+### 5.1 ‘o‹Éq¥ê
 \[
 B(r) = \frac{\mu_0}{4\pi}\left(\frac{3(m\cdot\hat{r})\hat{r} - m}{\|r\|^3}\right)
 \]
-å®Ÿè£…ã§ã¯ `FACTOR = mu0/(4Ï€)` ã‚’ç”¨ã„ã¾ã™ã€‚
+’è”‚Í `FACTOR = mu0/(4ƒÎ)` ‚Æ‚µ‚Äˆµ‚¢‚Ü‚·B
 
-### 4.4 ç›®çš„é–¢æ•°
-åŸç‚¹ã®ç£å ´ã‚’ \(B_0 = B(0)\) ã¨ã™ã‚‹ã¨:
+### 5.2 –Ú“IŠÖ”
+ROI ã‚Ì¥ê·•ª‚Ì•½‹Ï“ñæB
 \[
 J = \frac{1}{M}\sum_{p\in ROI} \|B(p) - B_0\|^2
 \]
 
-### 4.5 field_scale
-æ•°å€¤å®‰å®šåŒ–ã®ãŸã‚ `field_scale` ã‚’å°å…¥ã—ã¾ã™:
+### 5.3 field_scale
+•]‰¿—p‚ÌƒXƒP[ƒŠƒ“ƒOB
 \[
 FACTOR_{eff} = FACTOR \times field\_scale
 \]
-ãƒ­ã‚°è¡¨ç¤ºã® `|B0|` ã¯ `B0 / field_scale` ã«æˆ»ã—ã¦è¡¨ç¤ºã—ã¾ã™ã€‚
+©ŒÈ–³“³’…‘¤ip-solverj‚É‚Í **field_scale ‚ğ¬‚º‚È‚¢**B
 
 ---
 
-## 5. ROI ã‚µãƒ³ãƒ—ãƒªãƒ³ã‚°
+## 6. ROI ƒTƒ“ƒvƒŠƒ“ƒO
 
-`halbach.geom.build_roi_points(...)` ã«ã‚ˆã‚Š ROI ç‚¹ã‚’ç”Ÿæˆã—ã¾ã™ã€‚
+`halbach.geom.build_roi_points(...)` ‚É‚æ‚è ROI “_‚ğì‚è‚Ü‚·B
 
-- `volume-grid` : 3D ã‚°ãƒªãƒƒãƒ‰
-- `volume-subsample` : ã‚°ãƒªãƒƒãƒ‰ã‹ã‚‰ãƒ©ãƒ³ãƒ€ãƒ ã‚µãƒ–ã‚µãƒ³ãƒ—ãƒ«
-- `surface-fibonacci` : çƒé¢ãƒ•ã‚£ãƒœãƒŠãƒƒãƒ
-- `surface-random` : çƒé¢ãƒ©ãƒ³ãƒ€ãƒ 
+- `volume-grid`
+- `volume-subsample`
+- `surface-fibonacci`
+- `surface-random`
 
-`optimize_run` ã®ãƒ‡ãƒ•ã‚©ãƒ«ãƒˆã¯ `surface-fibonacci` ã§ã™ã€‚
-
----
-
-## 6. æœ€é©åŒ–ãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿ã®è¦ç‚¹
-
-### 6.1 åŠå¾„ bounds
-`--r-bound-mode` ã«ã‚ˆã‚Š `r_bases` ã® bounds ã‚’è¨­å®šã—ã¾ã™ã€‚
-
-- `relative`:
-  - `r >= r0 - r_lower_delta_mm`
-  - `r <= r0 + r_upper_delta_mm`ï¼ˆ`--r-no-upper` ã§ä¸Šé™ç„¡åŠ¹ï¼‰
-- `absolute`:
-  - `r_min_mm <= r <= r_max_mm`
-- `none`: bounds ç„¡åŠ¹
-
-### 6.2 ä¸­å¿ƒ z ãƒ¬ã‚¤ãƒ¤ã®åŠå¾„å›ºå®š
-`--fix-center-radius-layers {0,2,4}`  
-ä¸­å¿ƒ z ãƒ¬ã‚¤ãƒ¤ã® **åŠå¾„ã®ã¿** ã‚’å›ºå®šã—ã€è§’åº¦ã¯å¸¸ã«æœ€é©åŒ–å¯¾è±¡ã§ã™ã€‚
+`optimize_run` ‚ÌŠù’è‚Í `surface-fibonacci` ‚Å‚·B
 
 ---
 
-## 7. å‡ºåŠ›ãƒ•ã‚¡ã‚¤ãƒ«æ§‹é€ 
+## 7. o—Íƒtƒ@ƒCƒ‹
 
 ```
 runs/<run_name>/
@@ -182,71 +171,60 @@ runs/<run_name>/
   opt.log
 ```
 
-### 7.1 results.npz
-ä¸»è¦ã‚­ãƒ¼:
+### 7.1 results.npziåƒL[j
 - `alphas_opt` (R,K)
 - `r_bases_opt` (K,)
 - `theta`, `sin2th`, `cth`, `sth`, `z_layers`, `ring_offsets`
 - `J_hist`, `Jn_hist`, `B0_hist`
 
-è§’åº¦ãƒ¢ãƒ‡ãƒ«ã«å¿œã˜ã¦è¿½åŠ :
+Šp“xƒ‚ƒfƒ‹‚É‰‚¶‚Ä’Ç‰Á:
 - `delta_rep_opt` (K, n_rep)
 - `fourier_coeffs_opt` (K, 2H)
 
-### 7.2 meta.json
-ä¾‹:
-- `angle_model`
-- `grad_backend`
-- `fourier_H`
-- `regularization`ï¼ˆlambda0/lambda_theta/lambda_zï¼‰
-- `r_bound_mode` / `r_lower_delta_mm` / `r_upper_delta_mm` ãªã©
-- `fix_center_radius_layers`
+©ŒÈ–³“³’…‚ª—LŒø‚Èê‡:
+- `sc_p_flat` / `sc_cfg_fingerprint` ‚ª•Û‘¶‚³‚ê‚é‚±‚Æ‚ª‚ ‚è‚Ü‚·
 
 ---
 
-## 8. å¯è¦–åŒ–
+## 8. ‰Â‹‰»
 
 ### 8.1 2D Error Map (ppm)
-ppm ã¯ä»¥ä¸‹ã§è¨ˆç®—ã—ã¾ã™:
 \[
 ppm = \frac{|B|-|B_0|}{|B_0|}\times 10^6
 \]
 
-### 8.2 3D è¡¨ç¤º
-Plotly ã§ä»¥ä¸‹ã®ãƒ¢ãƒ¼ãƒ‰ã‚’åˆ©ç”¨ã§ãã¾ã™:
+### 8.2 3D ‰Â‹‰»
+Plotly ‚É‚æ‚é 3D •\¦B
 - `fast` / `pretty`
-- `cubes`ï¼ˆç«‹æ–¹ä½“ï¼‰
-- `cubes_arrows`ï¼ˆç«‹æ–¹ä½“ + ç£åŒ–æ–¹å‘ï¼‰
-
-GUI ã§ã¯ 3D æ¯”è¼ƒï¼ˆInitial vs Optimizedï¼‰ã‚‚åˆ©ç”¨å¯èƒ½ã§ã™ã€‚
+- `cubes` / `cubes_arrows`
 
 ---
 
-## 9. ä¸»è¦ãƒ•ã‚¡ã‚¤ãƒ«
+## 9. å—vƒtƒ@ƒCƒ‹
 
 ```
 app/
   streamlit_app.py          # GUI
 halbach/
   constants.py              # mu0, FACTOR, phi0, m0
-  physics.py                # ç£å ´è¨ˆç®—
-  objective.py              # ç›®çš„é–¢æ•° + å‹¾é…
-  geom.py                   # ROI/ãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿æ“ä½œ
-  run_io.py / run_types.py  # run ãƒ­ãƒ¼ãƒ‰
+  physics.py                # ¥êŒvZ
+  objective.py              # –Ú“IŠÖ” + Œù”z
+  geom.py                   # ROI/Šô‰½ƒwƒ‹ƒp
+  run_io.py / run_types.py  # run IO
   viz2d.py                  # 2D ppm
-  viz3d.py                  # 3D å¯è¦–åŒ–
+  viz3d.py                  # 3D ‰Â‹‰»
   cli/
     generate_run.py
     optimize_run.py
   gui/
-    opt_job.py              # GUI â†’ CLI å‘¼ã³å‡ºã—
+    opt_job.py              # GUI ¨ CLI ŒÄ‚Ño‚µ
   solvers/
-    lbfgsb.py               # L-BFGS-B ãƒ©ãƒƒãƒ‘
+    lbfgsb.py               # L-BFGS-B ƒ‰ƒbƒp
 ```
 
 ---
 
-## 10. é–‹ç™ºã‚³ãƒãƒ³ãƒ‰
+## 10. ƒRƒ}ƒ“ƒh
 ```powershell
 ruff check .
 mypy .

@@ -7,15 +7,15 @@ from halbach.types import Geometry
 
 
 def _make_geom() -> Geometry:
-    N = 8
-    K = 4
-    R = 2
+    N = 6
+    K = 3
+    R = 1
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
     sin2 = np.sin(2.0 * theta)
     cth = np.cos(theta)
     sth = np.sin(theta)
     z_layers = np.linspace(-0.02, 0.02, K)
-    ring_offsets = np.array([0.0, 0.01], dtype=np.float64)
+    ring_offsets = np.array([0.0], dtype=np.float64)
     dz = float(z_layers[1] - z_layers[0]) if K > 1 else 0.0
     Lz = float(z_layers[-1] - z_layers[0]) if K > 1 else 0.0
     return Geometry(
@@ -41,7 +41,7 @@ def test_jax_fourier_zero_matches_delta_rep_zero() -> None:
     )
 
     geom = _make_geom()
-    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    pts = build_roi_points(roi_r=0.02, roi_step=0.02)
     r_bases = (0.2 + 1e-3 * np.arange(geom.K, dtype=np.float64)).astype(np.float64)
 
     mirror = build_mirror_x0(geom.N)

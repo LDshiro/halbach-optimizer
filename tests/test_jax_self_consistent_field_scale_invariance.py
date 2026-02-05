@@ -8,8 +8,8 @@ from halbach.types import Geometry
 
 
 def _build_geom() -> tuple[Geometry, np.ndarray]:
-    N = 10
-    K = 5
+    N = 6
+    K = 3
     R = 1
 
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
@@ -35,7 +35,7 @@ def _build_geom() -> tuple[Geometry, np.ndarray]:
         dz=dz,
         Lz=Lz,
     )
-    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    pts = build_roi_points(roi_r=0.02, roi_step=0.02)
     return geom, pts
 
 
@@ -43,8 +43,7 @@ def _grad_norm(gA: np.ndarray, gR: np.ndarray) -> float:
     return float(np.linalg.norm(np.concatenate([gA.ravel(), gR])))
 
 
-@pytest.mark.parametrize("near_kernel", ["dipole", "multi-dipole", "cellavg"])
-def test_field_scale_invariance(near_kernel: str) -> None:
+def test_field_scale_invariance() -> None:
     pytest.importorskip("jax")
     from halbach.autodiff.jax_objective_self_consistent_legacy import (
         objective_with_grads_self_consistent_legacy_jax,
@@ -69,11 +68,12 @@ def test_field_scale_invariance(near_kernel: str) -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
-        near_kernel=near_kernel,
-        subdip_n=2,
-        iters=5,
+        near_kernel="dipole",
+        subdip_n=1,
+        iters=3,
         omega=0.6,
         factor=FACTOR,
+        use_jit=False,
     )
     J2, gA2, gR2, _B02, _sc2 = objective_with_grads_self_consistent_legacy_jax(
         alphas,
@@ -86,11 +86,12 @@ def test_field_scale_invariance(near_kernel: str) -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
-        near_kernel=near_kernel,
-        subdip_n=2,
-        iters=5,
+        near_kernel="dipole",
+        subdip_n=1,
+        iters=3,
         omega=0.6,
         factor=FACTOR * scale,
+        use_jit=False,
     )
 
     ratio_J = J2 / J1

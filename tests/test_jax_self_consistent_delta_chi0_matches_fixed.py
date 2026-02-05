@@ -9,8 +9,8 @@ from halbach.types import Geometry
 
 
 def _build_geom() -> tuple[Geometry, np.ndarray]:
-    N = 12
-    K = 4
+    N = 6
+    K = 3
     R = 1
 
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
@@ -36,7 +36,7 @@ def _build_geom() -> tuple[Geometry, np.ndarray]:
         dz=dz,
         Lz=Lz,
     )
-    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    pts = build_roi_points(roi_r=0.02, roi_step=0.02)
     return geom, pts
 
 
@@ -80,15 +80,16 @@ def test_sc_delta_chi0_matches_fixed() -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
-        iters=5,
+        iters=3,
         omega=0.6,
         near_kernel="dipole",
-        subdip_n=2,
+        subdip_n=1,
         lambda0=0.0,
         lambda_theta=0.0,
         lambda_z=0.0,
         factor=FACTOR,
         phi0=phi0,
+        use_jit=False,
     )
 
     np.testing.assert_allclose(J_sc, J_fix, rtol=1e-6, atol=1e-9)

@@ -1584,62 +1584,6 @@ def main() -> None:
                     key="dc_tol_f",
                 )
             )
-            if r_bound_mode == "relative":
-                r_lower_delta_mm = float(
-                    st.number_input(
-                        "Lower delta (mm)",
-                        min_value=0.0,
-                        max_value=200.0,
-                        value=30.0,
-                        step=1.0,
-                        key="r_lower_delta_mm",
-                    )
-                )
-                r_upper_delta_mm = float(
-                    st.number_input(
-                        "Upper delta (mm)",
-                        min_value=0.0,
-                        max_value=200.0,
-                        value=30.0,
-                        step=1.0,
-                        key="r_upper_delta_mm",
-                    )
-                )
-                r_no_upper = st.checkbox("No upper bound", value=False, key="r_no_upper")
-                r_min_mm = 0.0
-                r_max_mm = 1e9
-            else:
-                r_min_mm = float(
-                    st.number_input(
-                        "Min radius (mm)",
-                        min_value=0.0,
-                        max_value=1e9,
-                        value=0.0,
-                        step=1.0,
-                        key="r_min_mm",
-                    )
-                )
-                r_max_mm = float(
-                    st.number_input(
-                        "Max radius (mm)",
-                        min_value=0.0,
-                        max_value=1e9,
-                        value=1e9,
-                        step=1.0,
-                        key="r_max_mm",
-                    )
-                )
-                r_lower_delta_mm = 30.0
-                r_upper_delta_mm = 30.0
-                r_no_upper = False
-        else:
-            r_bound_mode = "none"
-            r_lower_delta_mm = 30.0
-            r_upper_delta_mm = 30.0
-            r_no_upper = False
-            r_min_mm = 0.0
-            r_max_mm = 1e9
-
             st.markdown("**Initial guess (from L-BFGS run)**")
             dc_init_select = st.selectbox(
                 "Init run (optional)",

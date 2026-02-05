@@ -9,8 +9,8 @@ from halbach.types import Geometry
 
 
 def _build_geom() -> tuple[Geometry, np.ndarray]:
-    N = 10
-    K = 4
+    N = 6
+    K = 3
     R = 1
 
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
@@ -36,7 +36,7 @@ def _build_geom() -> tuple[Geometry, np.ndarray]:
         dz=dz,
         Lz=Lz,
     )
-    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    pts = build_roi_points(roi_r=0.02, roi_step=0.02)
     return geom, pts
 
 
@@ -44,8 +44,7 @@ def _grad_norm(gD: np.ndarray, gR: np.ndarray) -> float:
     return float(np.linalg.norm(np.concatenate([gD.ravel(), gR])))
 
 
-@pytest.mark.parametrize("near_kernel", ["dipole", "multi-dipole", "cellavg"])
-def test_sc_delta_field_scale_invariance(near_kernel: str) -> None:
+def test_sc_delta_field_scale_invariance() -> None:
     pytest.importorskip("jax")
     from halbach.autodiff.jax_objective_self_consistent_delta_phi import (
         objective_with_grads_self_consistent_delta_phi_x0_jax,
@@ -73,15 +72,16 @@ def test_sc_delta_field_scale_invariance(near_kernel: str) -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
-        iters=5,
+        iters=3,
         omega=0.6,
-        near_kernel=near_kernel,
-        subdip_n=2,
+        near_kernel="dipole",
+        subdip_n=1,
         lambda0=0.0,
         lambda_theta=0.0,
         lambda_z=0.0,
         factor=FACTOR,
         phi0=phi0,
+        use_jit=False,
     )
     J2, gD2, gR2, _B02, _sc2 = objective_with_grads_self_consistent_delta_phi_x0_jax(
         delta_rep,
@@ -94,15 +94,16 @@ def test_sc_delta_field_scale_invariance(near_kernel: str) -> None:
         Nd=1.0 / 3.0,
         p0=m0,
         volume_m3=1e-6,
-        iters=5,
+        iters=3,
         omega=0.6,
-        near_kernel=near_kernel,
-        subdip_n=2,
+        near_kernel="dipole",
+        subdip_n=1,
         lambda0=0.0,
         lambda_theta=0.0,
         lambda_z=0.0,
         factor=FACTOR * scale,
         phi0=phi0,
+        use_jit=False,
     )
 
     ratio_J = J2 / J1

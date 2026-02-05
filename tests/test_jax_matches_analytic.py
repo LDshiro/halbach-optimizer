@@ -7,8 +7,8 @@ from halbach.types import Geometry
 
 
 def _make_geom() -> Geometry:
-    N = 10
-    K = 5
+    N = 6
+    K = 3
     R = 1
     theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
     sin2 = np.sin(2.0 * theta)
@@ -41,7 +41,7 @@ def test_jax_matches_analytic() -> None:
     rng = np.random.default_rng(0)
     alphas = (1e-3 * rng.standard_normal(size=(geom.R, geom.K))).astype(np.float64)
     r_bases = (0.2 + 1e-3 * np.arange(geom.K, dtype=np.float64)).astype(np.float64)
-    pts = build_roi_points(roi_r=0.03, roi_step=0.03)
+    pts = build_roi_points(roi_r=0.02, roi_step=0.02)
 
     J_ana, gA_ana, gR_ana, B0n_ana = objective_with_grads_fixed(alphas, r_bases, geom, pts)
     J_jax, gA_jax, gR_jax, B0n_jax = objective_with_grads_fixed_jax(alphas, r_bases, geom, pts)

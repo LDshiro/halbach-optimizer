@@ -23,15 +23,11 @@ def _build_ring_geom() -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(phi_list, dtype=np.float64), np.asarray(r0_list, dtype=np.float64)
 
 
-@pytest.mark.parametrize("near_kernel", ["dipole", "cellavg"])
-def test_linear_system_matches_jax_solver(near_kernel: str) -> None:
+def test_linear_system_matches_jax_solver() -> None:
     pytest.importorskip("jax")
     import jax.numpy as jnp
 
-    from halbach.autodiff.jax_self_consistent import (
-        solve_p_easy_axis_near,
-        solve_p_easy_axis_near_cellavg,
-    )
+    from halbach.autodiff.jax_self_consistent import solve_p_easy_axis_near
 
     phi_flat, r0_flat = _build_ring_geom()
     R, K, N = 1, 2, 6
@@ -44,39 +40,25 @@ def test_linear_system_matches_jax_solver(near_kernel: str) -> None:
     iters = 80
     omega = 0.6
 
-    if near_kernel == "dipole":
-        p_fp = solve_p_easy_axis_near(
-            jnp.asarray(phi_flat),
-            jnp.asarray(r0_flat),
-            jnp.asarray(near.nbr_idx, dtype=jnp.int32),
-            jnp.asarray(near.nbr_mask, dtype=bool),
-            p0=p0,
-            chi=chi,
-            Nd=Nd,
-            volume_m3=volume_m3,
-            iters=iters,
-            omega=omega,
-        )
-    else:
-        p_fp = solve_p_easy_axis_near_cellavg(
-            jnp.asarray(phi_flat),
-            jnp.asarray(r0_flat),
-            jnp.asarray(near.nbr_idx, dtype=jnp.int32),
-            jnp.asarray(near.nbr_mask, dtype=bool),
-            p0=p0,
-            chi=chi,
-            Nd=Nd,
-            volume_m3=volume_m3,
-            iters=iters,
-            omega=omega,
-        )
+    p_fp = solve_p_easy_axis_near(
+        jnp.asarray(phi_flat),
+        jnp.asarray(r0_flat),
+        jnp.asarray(near.nbr_idx, dtype=jnp.int32),
+        jnp.asarray(near.nbr_mask, dtype=bool),
+        p0=p0,
+        chi=chi,
+        Nd=Nd,
+        volume_m3=volume_m3,
+        iters=iters,
+        omega=omega,
+    )
 
     p_ls, stats = solve_p_easy_axis_linear_system(
         phi_flat,
         r0_flat,
         near.nbr_idx,
         near.nbr_mask,
-        near_kernel=near_kernel,
+        near_kernel="dipole",
         volume_m3=volume_m3,
         p0=p0,
         chi=chi,

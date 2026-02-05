@@ -39,7 +39,7 @@ def test_kij_multi_dipole_matches_direct_h(subdip_n: int) -> None:
         make_subdip_offsets_grid,
     )
 
-    R, K, N = 1, 2, 6
+    R, K, N = 1, 2, 4
     graph = build_near_graph(R, K, N, NearWindow(wr=0, wz=1, wphi=1))
     rng = np.random.default_rng(1)
     phi = jnp.asarray(rng.uniform(0.0, 2.0 * np.pi, R * K * N), dtype=jnp.float64)

@@ -3,6 +3,7 @@
 import argparse
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -293,7 +294,7 @@ def main() -> None:
         z_unit,
     )
 
-    meta = {
+    meta: dict[str, Any] = {
         "framework": "dc",
         "dc_model": "ccp_sc_linearized",
         "sc_eq_enabled": bool(args.sc_eq),
