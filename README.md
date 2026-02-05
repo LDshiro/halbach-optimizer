@@ -96,15 +96,55 @@ x=0 面の対称条件を満たすように、\(\delta\phi\) を表現するモ�
 - **field_scale には依存しない**（不変性チェックあり）
 
 ### 3.3 近傍カーネル（near_kernel）
-自己無撞着の近傍相互作用に使用。
+自己無撞着（easy-axis）で **近傍相互作用の H を評価するカーネル**です。  
+以下の共通定義を使います。
 
-- **dipole**: 点双極子の近傍相互作用
-- **multi-dipole**: サブ双極子分割（`subdip_n`）で近似
-- **cellavg**: セル平均 demag tensor による近傍相互作用
-- **gl-double-mixed**: Gauss–Legendre 二重平均（混合）
-  - 低次数（n=2）を全エッジに、
-  - **face-to-face** エッジにのみ高次数（n=3）を適用
-  - `gl_order` を `2 / 3 / mixed` で切り替え可能
+- 位置: \(s_{ij} = r_i - r_j\)（target − source）
+- easy-axis 単位ベクトル: \(u_i = [\cos\phi_i,\ \sin\phi_i,\ 0]\)
+- モーメント: \(m_j = p_j\,u_j\)
+- スカラー結合（A/m）: \(h_i = u_i^\top H_i\)
+- 係数: \(H_\mathrm{FACTOR} = \frac{1}{4\pi}\)  
+  **self-consistent では field_scale を混ぜない**（不変性のため）
+
+#### dipole
+点双極子の近傍相互作用。
+\[
+H(r;m)=\frac{1}{4\pi}\left(\frac{3(m\cdot r)\,r}{\|r\|^5}-\frac{m}{\|r\|^3}\right)
+\]
+\[
+h_i=\sum_j k_{ij}p_j,\quad
+k_{ij}=H_\mathrm{FACTOR}\left(
+3\frac{(u_i\cdot r)(u_j\cdot r)}{\|r\|^5}
+-\frac{u_i\cdot u_j}{\|r\|^3}\right)
+\]
+
+#### multi-dipole
+各磁石を \(S=subdip\_n^3\) 個のサブ双極子に分割し、平均を取ります。
+\[
+k_{ij}=\frac{1}{S}\sum_{q=1}^{S}
+H_\mathrm{FACTOR}\left(
+3\frac{(u_i\cdot r_q)(u_j\cdot r_q)}{\|r_q\|^5}
+-\frac{u_i\cdot u_j}{\|r_q\|^3}\right),
+\quad r_q = s_{ij}-\Delta_q
+\]
+
+#### cellavg
+セル平均 demag tensor \(N(s;h)\) を使い、\(H=-N\,M\) と定義します。
+\[
+h_i=\sum_j k_{ij}p_j,\quad
+k_{ij} = -\frac{u_i^\top N(s_{ij};h)\,u_j}{V}
+\]
+\(V\) はセル体積で、**field_scale を含めません**。
+
+#### gl-double-mixed
+Gauss–Legendre 二重平均のデルタ表（\(\delta_d, w_d\)）を使って
+\[
+k_{ij}=H_\mathrm{FACTOR}\sum_d w_d\,f(s_{ij}+\delta_d),\quad
+f(r)=3\frac{(u_i\cdot r)(u_j\cdot r)}{\|r\|^5}-\frac{u_i\cdot u_j}{\|r\|^3}
+\]
+- **mixed** は「低次数（n=2）を全エッジ」＋「face-to-face エッジのみ高次数（n=3）」  
+  （face-to-face: 同一半径層、隣接リング、同一角度インデックス）
+- `gl_order` を `2 / 3 / mixed` で切り替え可能
 
 ---
 
