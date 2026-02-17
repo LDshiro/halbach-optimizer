@@ -84,6 +84,31 @@ def test_build_command_includes_self_consistent_flags(tmp_path: Path) -> None:
     assert cmd[cmd.index("--sc-gl-order") + 1] == "3"
 
 
+def test_build_command_includes_roi_sampling_flags(tmp_path: Path) -> None:
+    in_path = tmp_path / "input.npz"
+    out_dir = tmp_path / "out"
+    cmd = build_command(
+        in_path,
+        out_dir,
+        maxiter=50,
+        gtol=1e-12,
+        roi_r=0.14,
+        roi_step=0.02,
+        roi_mode="surface-fibonacci",
+        roi_samples=500,
+        r_bound_mode="relative",
+        r_lower_delta_mm=25.0,
+        r_upper_delta_mm=35.0,
+        r_no_upper=False,
+        r_min_mm=0.0,
+        r_max_mm=1000.0,
+    )
+    assert "--roi-mode" in cmd
+    assert cmd[cmd.index("--roi-mode") + 1] == "surface-fibonacci"
+    assert "--roi-samples" in cmd
+    assert cmd[cmd.index("--roi-samples") + 1] == "500"
+
+
 def test_build_generate_command_basic(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     cmd = build_generate_command(
