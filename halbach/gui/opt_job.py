@@ -41,6 +41,8 @@ def build_command(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    enable_beta_tilt_x: bool = False,
+    beta_tilt_x_bound_deg: float = 20.0,
     mag_model: str = "fixed",
     sc_chi: float = 0.0,
     sc_Nd: float = 1.0 / 3.0,
@@ -96,7 +98,11 @@ def build_command(
         str(r_max_mm),
         "--fix-center-radius-layers",
         str(fix_center_radius_layers),
+        "--beta-tilt-x-bound-deg",
+        str(beta_tilt_x_bound_deg),
     ]
+    if enable_beta_tilt_x:
+        cmd.append("--enable-beta-tilt-x")
     if r_no_upper:
         cmd.append("--r-no-upper")
     if grad_backend is not None:
@@ -358,6 +364,8 @@ def start_opt_job(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    enable_beta_tilt_x: bool = False,
+    beta_tilt_x_bound_deg: float = 20.0,
     mag_model: str = "fixed",
     sc_chi: float = 0.0,
     sc_Nd: float = 1.0 / 3.0,
@@ -397,6 +405,8 @@ def start_opt_job(
         r_min_mm=r_min_mm,
         r_max_mm=r_max_mm,
         fix_center_radius_layers=fix_center_radius_layers,
+        enable_beta_tilt_x=enable_beta_tilt_x,
+        beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
         mag_model=mag_model,
         sc_chi=sc_chi,
         sc_Nd=sc_Nd,

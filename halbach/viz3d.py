@@ -7,8 +7,10 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
-from halbach.angles_runtime import phi_rkn_from_run
+from halbach.angles_runtime import beta_tilt_x_rk_from_run, phi_rkn_from_run
+from halbach.coil_overlay import CoilPolylineSet, build_plotly_polyline_groups
 from halbach.constants import phi0
+from halbach.obj_mesh import ObjMesh
 from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
@@ -37,8 +39,30 @@ def enumerate_magnets(
     if stride <= 0:
         raise ValueError("stride must be >= 1")
 
+    centers, phi, _u, ring_id, layer_id = _enumerate_magnets_with_u(
+        run, stride=stride, hide_x_negative=hide_x_negative
+    )
+    return centers, phi, ring_id, layer_id
+
+
+def _enumerate_magnets_with_u(
+    run: RunBundle,
+    *,
+    stride: int,
+    hide_x_negative: bool,
+) -> tuple[FloatArray, FloatArray, FloatArray, NDArray[np.int_], NDArray[np.int_]]:
     if run.meta.get("framework") == "dc":
-        return _enumerate_magnets_dc(run, stride=stride, hide_x_negative=hide_x_negative)
+        centers, phi, ring_id, layer_id = _enumerate_magnets_dc(
+            run, stride=stride, hide_x_negative=hide_x_negative
+        )
+        u = np.column_stack(
+            [
+                np.cos(phi),
+                np.sin(phi),
+                np.zeros_like(phi),
+            ]
+        ).astype(np.float64)
+        return centers, phi, u, ring_id, layer_id
 
     theta = run.geometry.theta
     cth = run.geometry.cth
@@ -47,6 +71,8 @@ def enumerate_magnets(
     ring_offsets = run.geometry.ring_offsets
     r_bases = run.results.r_bases
     phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+    beta_rk = beta_tilt_x_rk_from_run(run)
+    beta_rkn = np.broadcast_to(beta_rk[:, :, None], phi_rkn.shape)
 
     R, K, _N = phi_rkn.shape
     idx = np.arange(0, theta.size, stride)
@@ -59,6 +85,7 @@ def enumerate_magnets(
 
     centers_list: list[FloatArray] = []
     phi_list: list[FloatArray] = []
+    u_list: list[FloatArray] = []
     ring_list: list[NDArray[np.int_]] = []
     layer_list: list[NDArray[np.int_]] = []
 
@@ -71,14 +98,25 @@ def enumerate_magnets(
             z = np.full_like(x, z_layers[k], dtype=np.float64)
             centers_list.append(np.column_stack([x, y, z]).astype(np.float64))
 
-            phi = phi_rkn[r, k, idx]
-            phi_list.append(np.asarray(phi, dtype=np.float64))
+            phi = np.asarray(phi_rkn[r, k, idx], dtype=np.float64)
+            beta = np.asarray(beta_rkn[r, k, idx], dtype=np.float64)
+            cos_beta = np.cos(beta)
+            u = np.column_stack(
+                [
+                    cos_beta * np.cos(phi),
+                    cos_beta * np.sin(phi),
+                    np.sin(beta),
+                ]
+            ).astype(np.float64)
+            phi_list.append(phi)
+            u_list.append(u)
 
             ring_list.append(np.full(th.shape, r, dtype=np.int_))
             layer_list.append(np.full(th.shape, k, dtype=np.int_))
 
     centers = np.concatenate(centers_list, axis=0)
     phi = np.concatenate(phi_list)
+    u = np.concatenate(u_list, axis=0)
     ring_id = np.concatenate(ring_list)
     layer_id = np.concatenate(layer_list)
 
@@ -86,10 +124,11 @@ def enumerate_magnets(
         mask = centers[:, 0] >= 0.0
         centers = centers[mask]
         phi = phi[mask]
+        u = u[mask]
         ring_id = ring_id[mask]
         layer_id = layer_id[mask]
 
-    return centers, phi, ring_id, layer_id
+    return centers, phi, u, ring_id, layer_id
 
 
 def _enumerate_magnets_dc(
@@ -182,14 +221,10 @@ def _require_plotly() -> Any:
 
 
 def _magnetization_lines(
-    centers: FloatArray, phi: FloatArray, scale: float
+    centers: FloatArray, u: FloatArray, scale: float
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
-    dx = np.cos(phi) * scale
-    dy = np.sin(phi) * scale
-    dz = np.zeros_like(dx)
-
     start = centers
-    end = centers + np.column_stack([dx, dy, dz]).astype(np.float64)
+    end = centers + np.asarray(u, dtype=np.float64) * float(scale)
 
     n = centers.shape[0]
     xs = np.empty(3 * n, dtype=np.float64)
@@ -217,7 +252,7 @@ def _estimate_arrow_scale(centers: FloatArray) -> float:
 
 def build_magnetization_arrows(
     centers: FloatArray,
-    phi: FloatArray,
+    u: FloatArray,
     length_m: float,
     head_angle_deg: float,
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
@@ -230,23 +265,38 @@ def build_magnetization_arrows(
         empty = np.array([], dtype=np.float64)
         return empty, empty, empty
 
+    u_norm = np.asarray(u, dtype=np.float64)
+    u_len = np.linalg.norm(u_norm, axis=1, keepdims=True)
+    safe = np.where(u_len > 1e-30, u_len, 1.0)
+    u_norm = u_norm / safe
+
+    tip = centers + u_norm * length
     head_length = max(1e-6, 0.25 * length)
-    half_angle = 0.5 * np.deg2rad(head_angle_deg)
+    head_offset = np.tan(np.deg2rad(head_angle_deg / 2.0))
 
-    dir_x = np.cos(phi)
-    dir_y = np.sin(phi)
-    tip = centers + np.column_stack([dir_x, dir_y, np.zeros_like(dir_x)]) * length
+    ref = np.tile(np.array([0.0, 0.0, 1.0], dtype=np.float64), (u_norm.shape[0], 1))
+    side = np.cross(u_norm, ref)
+    side_len = np.linalg.norm(side, axis=1, keepdims=True)
+    fallback_ref = np.tile(np.array([1.0, 0.0, 0.0], dtype=np.float64), (u_norm.shape[0], 1))
+    side = np.where(side_len > 1e-12, side, np.cross(u_norm, fallback_ref))
+    side_len = np.linalg.norm(side, axis=1, keepdims=True)
+    side = side / np.where(side_len > 1e-30, side_len, 1.0)
 
-    back_angle = phi + np.pi
-    a1 = back_angle - half_angle
-    a2 = back_angle + half_angle
-    hx1 = np.cos(a1) * head_length
-    hy1 = np.sin(a1) * head_length
-    hx2 = np.cos(a2) * head_length
-    hy2 = np.sin(a2) * head_length
+    head_dir1 = -u_norm + head_offset * side
+    head_dir2 = -u_norm - head_offset * side
+    head_dir1 = head_dir1 / np.where(
+        np.linalg.norm(head_dir1, axis=1, keepdims=True) > 1e-30,
+        np.linalg.norm(head_dir1, axis=1, keepdims=True),
+        1.0,
+    )
+    head_dir2 = head_dir2 / np.where(
+        np.linalg.norm(head_dir2, axis=1, keepdims=True) > 1e-30,
+        np.linalg.norm(head_dir2, axis=1, keepdims=True),
+        1.0,
+    )
 
-    head1 = tip + np.column_stack([hx1, hy1, np.zeros_like(hx1)])
-    head2 = tip + np.column_stack([hx2, hy2, np.zeros_like(hx2)])
+    head1 = tip + head_length * head_dir1
+    head2 = tip + head_length * head_dir2
 
     n = centers.shape[0]
     xs = np.empty(n * 9, dtype=np.float64)
@@ -417,6 +467,13 @@ def build_magnet_figure(
     scene_ranges: SceneRanges | None = None,
     height: int | None = None,
     compare: RunBundle | None = None,
+    overlay_mesh: ObjMesh | None = None,
+    overlay_name: str = "Human model",
+    overlay_color: str = "rgb(210,180,170)",
+    overlay_opacity: float = 0.35,
+    coil_overlay: CoilPolylineSet | None = None,
+    coil_line_width: float = 4.0,
+    magnet_surface_color: str = "rgb(229,229,229)",
 ) -> PlotlyFigure:
     """
     Build a Plotly figure with magnet centers, optional magnetization vectors, or cubes.
@@ -424,8 +481,46 @@ def build_magnet_figure(
     go = _require_plotly()
     fig = go.Figure()
 
+    if overlay_mesh is not None:
+        fig.add_trace(
+            go.Mesh3d(
+                x=overlay_mesh.vertices[:, 0],
+                y=overlay_mesh.vertices[:, 1],
+                z=overlay_mesh.vertices[:, 2],
+                i=overlay_mesh.faces[:, 0],
+                j=overlay_mesh.faces[:, 1],
+                k=overlay_mesh.faces[:, 2],
+                name=overlay_name,
+                color=overlay_color,
+                opacity=float(overlay_opacity),
+                flatshading=True,
+                lighting={
+                    "ambient": 0.45,
+                    "diffuse": 0.55,
+                    "specular": 0.08,
+                    "roughness": 0.95,
+                    "fresnel": 0.05,
+                },
+                lightposition={"x": 0.0, "y": 0.0, "z": 2.0},
+                showscale=False,
+            )
+        )
+
+    if coil_overlay is not None:
+        for group in build_plotly_polyline_groups(coil_overlay):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=group.x,
+                    y=group.y,
+                    z=group.z,
+                    mode="lines",
+                    name=f"Coil {group.color_css}",
+                    line={"color": group.color_css, "width": float(coil_line_width)},
+                )
+            )
+
     def add_run(run_item: RunBundle, name: str, color: str | None) -> None:
-        centers, phi, _ring_id, layer_id = enumerate_magnets(
+        centers, phi, u, _ring_id, layer_id = _enumerate_magnets_with_u(
             run_item, stride=stride, hide_x_negative=hide_x_negative
         )
         if centers.size == 0:
@@ -438,6 +533,7 @@ def build_magnet_figure(
             ambient = 0.3
             if size_mm < 15.0:
                 ambient = 0.3 + 0.7 * (15.0 - size_mm) / 15.0
+            ambient = min(ambient + 0.3, 1.0)
             vx, vy, vz, i, j, k, ex, ey, ez = build_cubes_mesh(centers, phi, size_m, thickness_m)
             fig.add_trace(
                 go.Mesh3d(
@@ -448,7 +544,7 @@ def build_magnet_figure(
                     j=j,
                     k=k,
                     name=name,
-                    color="rgb(229,229,229)",
+                    color=magnet_surface_color,
                     opacity=1.0,
                     flatshading=True,
                     lighting={
@@ -479,7 +575,7 @@ def build_magnet_figure(
                     length = max(0.01, 1.5 * size_m)
                 ax, ay, az = build_magnetization_arrows(
                     centers,
-                    phi,
+                    u,
                     length_m=length,
                     head_angle_deg=arrow_head_angle_deg,
                 )
@@ -526,7 +622,7 @@ def build_magnet_figure(
             scale = _estimate_arrow_scale(centers)
             if magnet_size_m is not None:
                 scale = max(scale, magnet_size_m)
-            xs, ys, zs = _magnetization_lines(centers, phi, scale)
+            xs, ys, zs = _magnetization_lines(centers, u, scale)
             line_width = 2
             if magnet_thickness_m is not None:
                 line_width = max(1, int(round(magnet_thickness_m * 2000.0)))

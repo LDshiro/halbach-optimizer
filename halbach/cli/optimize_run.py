@@ -136,6 +136,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="initialize angle variables from run or zeros",
     )
     ap.add_argument(
+        "--enable-beta-tilt-x",
+        action="store_true",
+        help="enable extra ring-wise tilt angle beta_tilt_x (legacy-alpha + jax only)",
+    )
+    ap.add_argument(
+        "--beta-tilt-x-bound-deg",
+        type=float,
+        default=20.0,
+        help="symmetric bound for beta_tilt_x in degrees",
+    )
+    ap.add_argument(
         "--mag-model",
         type=str,
         choices=["fixed", "self-consistent-easy-axis"],
@@ -331,6 +342,53 @@ def _pack_r_grad(grad_r_bases: NDArray[np.float64], param_map: ParamMap) -> NDAr
     return g_r
 
 
+def _build_beta_symmetry_indices(K: int) -> tuple[NDArray[np.int_], NDArray[np.int_]]:
+    reps = [k for k in range(K) if k < (K - 1 - k)]
+    mates = [K - 1 - k for k in reps]
+    return np.asarray(reps, dtype=np.int_), np.asarray(mates, dtype=np.int_)
+
+
+def _pack_beta_vars(
+    beta_tilt_x: NDArray[np.float64],
+    beta_rep_k: NDArray[np.int_],
+) -> NDArray[np.float64]:
+    return np.asarray(beta_tilt_x[:, beta_rep_k], dtype=np.float64).reshape(-1)
+
+
+def _apply_beta_vars(
+    beta_vars: NDArray[np.float64],
+    beta0: NDArray[np.float64],
+    beta_rep_k: NDArray[np.int_],
+    beta_mate_k: NDArray[np.int_],
+) -> NDArray[np.float64]:
+    beta = np.array(beta0, dtype=np.float64, copy=True)
+    K = int(beta.shape[1])
+    R = int(beta.shape[0])
+    expected = int(R * beta_rep_k.size)
+    if beta_vars.size != expected:
+        raise ValueError(f"beta_vars size {beta_vars.size} does not match expected {expected}")
+    vals = beta_vars.reshape(R, beta_rep_k.size)
+    for idx, k in enumerate(beta_rep_k):
+        km = int(beta_mate_k[idx])
+        beta[:, k] = vals[:, idx]
+        beta[:, km] = -vals[:, idx]
+    if K % 2 == 1:
+        beta[:, K // 2] = 0.0
+    return beta
+
+
+def _pack_beta_grad(
+    grad_beta: NDArray[np.float64],
+    beta_rep_k: NDArray[np.int_],
+    beta_mate_k: NDArray[np.int_],
+) -> NDArray[np.float64]:
+    g = np.zeros((grad_beta.shape[0], beta_rep_k.size), dtype=np.float64)
+    for idx, k in enumerate(beta_rep_k):
+        km = int(beta_mate_k[idx])
+        g[:, idx] = grad_beta[:, k] - grad_beta[:, km]
+    return g.reshape(-1)
+
+
 def _build_r0_rkn_from_r_bases(r_bases: NDArray[np.float64], geom: Geometry) -> NDArray[np.float64]:
     r_bases_f = np.asarray(r_bases, dtype=np.float64)
     rho = r_bases_f[None, :] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None]
@@ -388,6 +446,19 @@ def _phi_rkn_from_final(
         return np.asarray(phi_rkn, dtype=np.float64)
 
     raise ValueError(f"Unsupported angle_model: {angle_model}")
+
+
+def _beta_rk_from_final(
+    beta_tilt_x_opt: NDArray[np.float64] | None,
+    geom: Geometry,
+) -> NDArray[np.float64]:
+    if beta_tilt_x_opt is None:
+        return np.zeros((int(geom.R), int(geom.K)), dtype=np.float64)
+    beta = np.asarray(beta_tilt_x_opt, dtype=np.float64)
+    expected = (int(geom.R), int(geom.K))
+    if beta.shape != expected:
+        raise ValueError(f"beta_tilt_x_opt shape {beta.shape} does not match expected {expected}")
+    return beta
 
 
 def _opt_log_path(out_dir: Path) -> Path:
@@ -531,6 +602,7 @@ def run_optimize(args: argparse.Namespace) -> int:
     logger.info("load_run done in %.3fs", perf_counter() - t_load)
     geom = run.geometry
     param_map = build_param_map(geom.R, geom.K, n_fix_radius=int(args.fix_center_radius_layers))
+    legacy_alpha_dim = int(param_map.free_alpha_idx.size)
     alphas0 = np.array(run.results.alphas, dtype=np.float64, copy=True)
     r_bases0 = np.array(run.results.r_bases, dtype=np.float64, copy=True)
 
@@ -548,9 +620,20 @@ def run_optimize(args: argparse.Namespace) -> int:
     angle_init = str(args.angle_init)
     if angle_init not in ("from-run", "zeros"):
         raise ValueError(f"Unsupported angle_init: {angle_init}")
+    enable_beta_tilt_x = bool(getattr(args, "enable_beta_tilt_x", False))
+    beta_tilt_x_bound_deg = float(getattr(args, "beta_tilt_x_bound_deg", 20.0))
+    if enable_beta_tilt_x:
+        if angle_model != "legacy-alpha":
+            raise ValueError("beta_tilt_x is supported only with angle_model=legacy-alpha")
+        if grad_backend != "jax":
+            raise ValueError("beta_tilt_x requires grad_backend=jax")
+        if beta_tilt_x_bound_deg <= 0.0:
+            raise ValueError("beta_tilt_x_bound_deg must be > 0")
 
     delta_rep0: NDArray[np.float64] | None = None
     coeffs0: NDArray[np.float64] | None = None
+    beta_tilt_x0: NDArray[np.float64] | None = None
+    beta_rep_k, beta_mate_k = _build_beta_symmetry_indices(int(geom.K))
     fourier_H = int(args.fourier_H)
     if angle_model in ("delta-rep-x0", "fourier-x0") and geom.N % 2 != 0:
         raise ValueError("N must be even for delta/fourier angle models")
@@ -594,6 +677,14 @@ def run_optimize(args: argparse.Namespace) -> int:
         raise ValueError("self-consistent Nd must be in [0, 1]")
     if str(args.sc_near_kernel) == "multi-dipole" and int(args.sc_subdip_n) < 2:
         raise ValueError("self-consistent subdip_n must be >= 2 for multi-dipole")
+    if (
+        enable_beta_tilt_x
+        and mag_model_effective == "self-consistent-easy-axis"
+        and str(args.sc_near_kernel) not in {"dipole", "multi-dipole"}
+    ):
+        raise ValueError(
+            "beta_tilt_x with self-consistent supports sc_near_kernel only in {'dipole','multi-dipole'}"
+        )
 
     sc_cfg_payload: dict[str, Any] = dict(
         chi=float(args.sc_chi),
@@ -611,16 +702,40 @@ def run_optimize(args: argparse.Namespace) -> int:
         subdip_n=int(args.sc_subdip_n),
     )
     sc_gl_order = 0
-    if str(args.sc_near_kernel) == "gl-double-mixed" and args.sc_gl_order is not None:
-        sc_gl_order = int(args.sc_gl_order)
+    sc_gl_order_arg = getattr(args, "sc_gl_order", None)
+    if str(args.sc_near_kernel) == "gl-double-mixed" and sc_gl_order_arg is not None:
+        sc_gl_order = int(sc_gl_order_arg)
         sc_cfg_payload["gl_order"] = sc_gl_order
 
     sc_final_extras: dict[str, Any] | None = None
+    beta_dim = 0
     if angle_model == "legacy-alpha":
         if angle_init == "zeros":
             alphas0 = np.zeros_like(alphas0)
-        angle_dim = int(alphas0.size)
-        x0 = pack_x(alphas0, r_bases0, param_map)
+        if enable_beta_tilt_x:
+            if angle_init == "from-run":
+                raw_beta = run.results.extras.get("beta_tilt_x_opt")
+                if raw_beta is None:
+                    raw_beta = run.results.extras.get("beta_tilt_x")
+                if raw_beta is not None:
+                    beta_tilt_x0 = np.asarray(raw_beta, dtype=np.float64)
+            if beta_tilt_x0 is None:
+                beta_tilt_x0 = np.zeros((geom.R, geom.K), dtype=np.float64)
+            if beta_tilt_x0.shape != (geom.R, geom.K):
+                raise ValueError(
+                    f"beta_tilt_x shape {beta_tilt_x0.shape} does not match {(geom.R, geom.K)}"
+                )
+            if angle_init == "zeros":
+                beta_tilt_x0 = np.zeros_like(beta_tilt_x0)
+            alpha_vars0 = np.asarray(alphas0.ravel()[param_map.free_alpha_idx], dtype=np.float64)
+            beta_vars0 = _pack_beta_vars(beta_tilt_x0, beta_rep_k)
+            r_vars0 = _pack_r_vars(r_bases0, param_map)
+            x0 = cast(Float1DArray, np.concatenate([alpha_vars0, beta_vars0, r_vars0]))
+            beta_dim = int(beta_vars0.size)
+            angle_dim = int(alpha_vars0.size + beta_dim)
+        else:
+            angle_dim = int(alphas0.size)
+            x0 = pack_x(alphas0, r_bases0, param_map)
     elif angle_model == "delta-rep-x0":
         mirror = build_mirror_x0(int(geom.N))
         n_rep = int(mirror.rep_idx.size)
@@ -722,12 +837,19 @@ def run_optimize(args: argparse.Namespace) -> int:
         rmax_mm=float(args.r_max_mm),
         no_upper=bool(args.r_no_upper),
     )
+    if enable_beta_tilt_x and angle_model == "legacy-alpha" and beta_dim > 0:
+        beta_bound_rad = float(np.deg2rad(beta_tilt_x_bound_deg))
+        beta_start = legacy_alpha_dim
+        beta_end = beta_start + beta_dim
+        for idx in range(beta_start, beta_end):
+            bounds[idx] = (-beta_bound_rad, beta_bound_rad)
 
     radius_dim_free = int(param_map.free_r_idx.size)
     logger.info(
-        "x_dim total = %d, angle_dim = %d, radius_dim_free = %d, fixed_radius_layers = %s",
+        "x_dim total = %d, angle_dim = %d (beta_dim=%d), radius_dim_free = %d, fixed_radius_layers = %s",
         x0.size,
         angle_dim,
+        beta_dim,
         radius_dim_free,
         param_map.fixed_k_radius.tolist(),
     )
@@ -790,25 +912,30 @@ def run_optimize(args: argparse.Namespace) -> int:
         sc_extras: dict[str, Any] | None = None
 
         if angle_model == "legacy-alpha":
-            if grad_backend == "analytic":
-                alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
-                J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed(
-                    alphas, r_bases, geom, pts, factor=factor
-                )
-                gx = pack_grad(gA_y, gRb_y, param_map)
-                J_total = float(J_data)
-            else:
-                alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
+            if enable_beta_tilt_x:
+                if beta_tilt_x0 is None:
+                    raise ValueError("beta_tilt_x baseline is missing")
+                alpha_vars = np.asarray(x[:legacy_alpha_dim], dtype=np.float64)
+                beta_vars = np.asarray(x[legacy_alpha_dim:angle_dim], dtype=np.float64)
+                r_vars = np.asarray(x[angle_dim:], dtype=np.float64)
+
+                alphas = np.array(alphas0, dtype=np.float64, copy=True)
+                al_flat = alphas.ravel()
+                al_flat[param_map.free_alpha_idx] = alpha_vars
+                beta_tilt_x = _apply_beta_vars(beta_vars, beta_tilt_x0, beta_rep_k, beta_mate_k)
+                r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
+
                 if mag_model_effective == "self-consistent-easy-axis":
-                    from halbach.autodiff.jax_objective_self_consistent_legacy import (
-                        objective_with_grads_self_consistent_legacy_jax,
+                    from halbach.autodiff.jax_objective_self_consistent_legacy_beta_tilt import (
+                        objective_with_grads_self_consistent_legacy_beta_tilt_jax,
                     )
 
                     if sc_nbr_idx is None or sc_nbr_mask is None:
                         raise ValueError("self-consistent near graph is missing")
-                    J_data, gA_y, gRb_y, B0n, sc_extras = (
-                        objective_with_grads_self_consistent_legacy_jax(
+                    J_data, gA_y, gB_y, gRb_y, B0n, sc_extras = (
+                        objective_with_grads_self_consistent_legacy_beta_tilt_jax(
                             alphas,
+                            beta_tilt_x,
                             r_bases,
                             geom,
                             pts,
@@ -820,7 +947,6 @@ def run_optimize(args: argparse.Namespace) -> int:
                             volume_m3=sc_volume_m3,
                             near_kernel=str(args.sc_near_kernel),
                             subdip_n=int(args.sc_subdip_n),
-                            gl_order=sc_gl_order,
                             iters=int(args.sc_iters),
                             omega=float(args.sc_omega),
                             factor=factor,
@@ -828,13 +954,65 @@ def run_optimize(args: argparse.Namespace) -> int:
                         )
                     )
                 else:
-                    from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+                    from halbach.autodiff.jax_objective_legacy_beta_tilt import (
+                        objective_with_grads_fixed_beta_tilt_jax,
+                    )
 
-                    J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
+                    J_data, gA_y, gB_y, gRb_y, B0n = objective_with_grads_fixed_beta_tilt_jax(
+                        alphas, beta_tilt_x, r_bases, geom, pts, factor=factor
+                    )
+
+                g_alpha_free = np.asarray(gA_y.ravel()[param_map.free_alpha_idx], dtype=np.float64)
+                g_beta_free = _pack_beta_grad(gB_y, beta_rep_k, beta_mate_k)
+                g_r_free = _pack_r_grad(gRb_y, param_map)
+                gx = cast(Float1DArray, np.concatenate([g_alpha_free, g_beta_free, g_r_free]))
+                J_total = float(J_data)
+            else:
+                if grad_backend == "analytic":
+                    alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
+                    J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed(
                         alphas, r_bases, geom, pts, factor=factor
                     )
-                gx = pack_grad(gA_y, gRb_y, param_map)
-                J_total = float(J_data)
+                    gx = pack_grad(gA_y, gRb_y, param_map)
+                    J_total = float(J_data)
+                else:
+                    alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
+                    if mag_model_effective == "self-consistent-easy-axis":
+                        from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                            objective_with_grads_self_consistent_legacy_jax,
+                        )
+
+                        if sc_nbr_idx is None or sc_nbr_mask is None:
+                            raise ValueError("self-consistent near graph is missing")
+                        J_data, gA_y, gRb_y, B0n, sc_extras = (
+                            objective_with_grads_self_consistent_legacy_jax(
+                                alphas,
+                                r_bases,
+                                geom,
+                                pts,
+                                sc_nbr_idx,
+                                sc_nbr_mask,
+                                chi=float(args.sc_chi),
+                                Nd=float(args.sc_Nd),
+                                p0=float(args.sc_p0),
+                                volume_m3=sc_volume_m3,
+                                near_kernel=str(args.sc_near_kernel),
+                                subdip_n=int(args.sc_subdip_n),
+                                gl_order=sc_gl_order,
+                                iters=int(args.sc_iters),
+                                omega=float(args.sc_omega),
+                                factor=factor,
+                                phi0_val=phi0,
+                            )
+                        )
+                    else:
+                        from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                        J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
+                            alphas, r_bases, geom, pts, factor=factor
+                        )
+                    gx = pack_grad(gA_y, gRb_y, param_map)
+                    J_total = float(J_data)
         elif angle_model == "delta-rep-x0":
             from halbach.autodiff.jax_objective_delta_phi import (
                 objective_with_grads_delta_phi_x0_jax,
@@ -1064,6 +1242,17 @@ def run_optimize(args: argparse.Namespace) -> int:
                 lambda_theta=float(args.lambda_theta),
                 lambda_z=float(args.lambda_z),
             ),
+            angle_extra=dict(
+                beta_tilt_x=dict(
+                    enabled=bool(enable_beta_tilt_x),
+                    bound_deg=float(beta_tilt_x_bound_deg),
+                    z_symmetric=True,
+                    z_symmetry="antisymmetric",
+                    mirror_plane="z=0",
+                    center_layer_policy="zero-if-fixed-point",
+                    definition="ux=cos(beta)cos(phi), uy=cos(beta)sin(phi), uz=sin(beta)",
+                )
+            ),
             magnetization=dict(
                 model_requested=mag_model_requested,
                 model_effective=mag_model_effective,
@@ -1095,19 +1284,30 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     delta_rep_opt: NDArray[np.float64] | None = None
     coeffs_opt: NDArray[np.float64] | None = None
+    beta_tilt_x_opt: NDArray[np.float64] | None = None
     if angle_model == "legacy-alpha":
-        al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
-        if grad_backend == "jax":
+        if enable_beta_tilt_x:
+            if beta_tilt_x0 is None:
+                raise ValueError("beta_tilt_x baseline is missing")
+            alpha_vars = np.asarray(res.x[:legacy_alpha_dim], dtype=np.float64)
+            beta_vars = np.asarray(res.x[legacy_alpha_dim:angle_dim], dtype=np.float64)
+            r_vars = np.asarray(res.x[angle_dim:], dtype=np.float64)
+            al_opt = np.array(alphas0, dtype=np.float64, copy=True)
+            al_flat = al_opt.ravel()
+            al_flat[param_map.free_alpha_idx] = alpha_vars
+            beta_tilt_x_opt = _apply_beta_vars(beta_vars, beta_tilt_x0, beta_rep_k, beta_mate_k)
+            rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
             if mag_model_effective == "self-consistent-easy-axis":
-                from halbach.autodiff.jax_objective_self_consistent_legacy import (
-                    objective_with_grads_self_consistent_legacy_jax,
+                from halbach.autodiff.jax_objective_self_consistent_legacy_beta_tilt import (
+                    objective_with_grads_self_consistent_legacy_beta_tilt_jax,
                 )
 
                 if sc_nbr_idx is None or sc_nbr_mask is None:
                     raise ValueError("self-consistent near graph is missing")
-                Jn_f, _gA, _gR, B0_f, sc_final_extras = (
-                    objective_with_grads_self_consistent_legacy_jax(
+                Jn_f, _gA, _gB, _gR, B0_f, sc_final_extras = (
+                    objective_with_grads_self_consistent_legacy_beta_tilt_jax(
                         al_opt,
+                        beta_tilt_x_opt,
                         rb_opt,
                         geom,
                         pts,
@@ -1119,7 +1319,6 @@ def run_optimize(args: argparse.Namespace) -> int:
                         volume_m3=sc_volume_m3,
                         near_kernel=str(args.sc_near_kernel),
                         subdip_n=int(args.sc_subdip_n),
-                        gl_order=sc_gl_order,
                         iters=int(args.sc_iters),
                         omega=float(args.sc_omega),
                         factor=factor,
@@ -1127,15 +1326,59 @@ def run_optimize(args: argparse.Namespace) -> int:
                     )
                 )
             else:
-                from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+                from halbach.autodiff.jax_objective_legacy_beta_tilt import (
+                    objective_with_grads_fixed_beta_tilt_jax,
+                )
 
-                Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
-                    al_opt, rb_opt, geom, pts, factor=factor
+                Jn_f, _gA, _gB, _gR, B0_f = objective_with_grads_fixed_beta_tilt_jax(
+                    al_opt,
+                    beta_tilt_x_opt,
+                    rb_opt,
+                    geom,
+                    pts,
+                    factor=factor,
                 )
         else:
-            Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
-                al_opt, rb_opt, geom, pts, factor=factor
-            )
+            al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
+            if grad_backend == "jax":
+                if mag_model_effective == "self-consistent-easy-axis":
+                    from halbach.autodiff.jax_objective_self_consistent_legacy import (
+                        objective_with_grads_self_consistent_legacy_jax,
+                    )
+
+                    if sc_nbr_idx is None or sc_nbr_mask is None:
+                        raise ValueError("self-consistent near graph is missing")
+                    Jn_f, _gA, _gR, B0_f, sc_final_extras = (
+                        objective_with_grads_self_consistent_legacy_jax(
+                            al_opt,
+                            rb_opt,
+                            geom,
+                            pts,
+                            sc_nbr_idx,
+                            sc_nbr_mask,
+                            chi=float(args.sc_chi),
+                            Nd=float(args.sc_Nd),
+                            p0=float(args.sc_p0),
+                            volume_m3=sc_volume_m3,
+                            near_kernel=str(args.sc_near_kernel),
+                            subdip_n=int(args.sc_subdip_n),
+                            gl_order=sc_gl_order,
+                            iters=int(args.sc_iters),
+                            omega=float(args.sc_omega),
+                            factor=factor,
+                            phi0_val=phi0,
+                        )
+                    )
+                else:
+                    from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
+
+                    Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
+                        al_opt, rb_opt, geom, pts, factor=factor
+                    )
+            else:
+                Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
+                    al_opt, rb_opt, geom, pts, factor=factor
+                )
     elif angle_model == "delta-rep-x0":
         delta_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
         r_vars = np.asarray(res.x[angle_dim:], dtype=np.float64)
@@ -1278,6 +1521,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 phi0_val=phi0,
             )
             r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
+            beta_rk = _beta_rk_from_final(beta_tilt_x_opt, geom)
             phi_rkn_final = phi_rkn
             r0_rkn_final = r0_rkn
             sc_p_flat = compute_p_flat_self_consistent_jax(
@@ -1285,6 +1529,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 r0_rkn,
                 geom,
                 sc_cfg_payload,
+                beta_tilt_x_rk=beta_rk,
             )
         except Exception as exc:
             logger.warning("sc_p_flat save skipped: %s", exc)
@@ -1312,6 +1557,8 @@ def run_optimize(args: argparse.Namespace) -> int:
         save_payload["sc_cfg_fingerprint"] = sc_cfg_fp
     if mag_model_effective == "self-consistent-easy-axis" and sc_final_extras is not None:
         save_payload["extras_sc_stats"] = dict(sc_final_extras)
+    if beta_tilt_x_opt is not None:
+        save_payload["beta_tilt_x_opt"] = beta_tilt_x_opt
     if delta_rep_opt is not None:
         save_payload["delta_rep_opt"] = delta_rep_opt
     if coeffs_opt is not None:
@@ -1354,6 +1601,17 @@ def run_optimize(args: argparse.Namespace) -> int:
             lambda0=float(args.lambda0),
             lambda_theta=float(args.lambda_theta),
             lambda_z=float(args.lambda_z),
+        ),
+        angle_extra=dict(
+            beta_tilt_x=dict(
+                enabled=bool(enable_beta_tilt_x),
+                bound_deg=float(beta_tilt_x_bound_deg),
+                z_symmetric=True,
+                z_symmetry="antisymmetric",
+                mirror_plane="z=0",
+                center_layer_policy="zero-if-fixed-point",
+                definition="ux=cos(beta)cos(phi), uy=cos(beta)sin(phi), uz=sin(beta)",
+            )
         ),
         magnetization=dict(
             model_requested=mag_model_requested,

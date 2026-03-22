@@ -7,13 +7,14 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
 if TYPE_CHECKING:
+    from halbach.perturbation_eval import PerturbationResult
     from halbach.run_types import RunBundle
     from halbach.viz2d import ErrorMap2D
 
@@ -22,6 +23,9 @@ PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+DEFAULT_HUMAN_OVERLAY_OBJ = "10688_GenericMale_v2.obj"
+DEFAULT_COIL_OVERLAY_DIR = "coil"
 
 
 def _scan_runs(runs_dir: Path) -> list[str]:
@@ -37,6 +41,98 @@ def _scan_runs(runs_dir: Path) -> list[str]:
             except ValueError:
                 candidates.append(str(entry))
     return candidates
+
+
+def _default_human_overlay_obj_path() -> Path:
+    return ROOT / DEFAULT_HUMAN_OVERLAY_OBJ
+
+
+def _resolve_human_overlay_obj_path(path_text: str) -> Path:
+    raw = path_text.strip()
+    if not raw:
+        return _default_human_overlay_obj_path()
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate
+
+
+def _human_overlay_unit_scale_m(unit_mode: str) -> float:
+    unit_scale = {
+        "mm": 1e-3,
+        "cm": 1e-2,
+        "m": 1.0,
+    }
+    try:
+        return float(unit_scale[unit_mode])
+    except KeyError as exc:
+        raise ValueError(f"Unsupported OBJ unit: {unit_mode}") from exc
+
+
+def _human_overlay_transform_key(
+    obj_path_text: str,
+    obj_mtime: float,
+    unit_mode: str,
+    uniform_scale: float,
+    rotation_xyz_deg: tuple[float, float, float],
+    translation_xyz_m: tuple[float, float, float],
+) -> str:
+    return json.dumps(
+        {
+            "obj_path": obj_path_text,
+            "obj_mtime": float(obj_mtime),
+            "unit_mode": unit_mode,
+            "uniform_scale": float(uniform_scale),
+            "rotation_xyz_deg": [float(v) for v in rotation_xyz_deg],
+            "translation_xyz_m": [float(v) for v in translation_xyz_m],
+        },
+        sort_keys=True,
+    )
+
+
+def _camera_presets() -> dict[str, dict[str, dict[str, float]]]:
+    return {
+        "Isometric": {"eye": {"x": 1.25, "y": 1.25, "z": 1.25}},
+        "Top": {"eye": {"x": 0.0, "y": 0.0, "z": 2.0}},
+        "Side +X": {"eye": {"x": 2.0, "y": 0.0, "z": 0.0}},
+        "Side +Y": {"eye": {"x": 0.0, "y": 2.0, "z": 0.0}},
+    }
+
+
+def _magnet_surface_color_options() -> dict[str, str]:
+    return {
+        "Current gray": "rgb(229,229,229)",
+        "Cadmium yellow": "rgb(255,246,0)",
+        "Lemon yellow": "rgb(255,255,102)",
+    }
+
+
+def _scan_coil_npz_files(coil_dir: Path) -> list[str]:
+    if not coil_dir.is_dir():
+        return []
+    candidates: list[str] = []
+    for entry in sorted(coil_dir.rglob("*.npz")):
+        if not entry.is_file():
+            continue
+        try:
+            candidates.append(str(entry.relative_to(ROOT)))
+        except ValueError:
+            candidates.append(str(entry))
+    return candidates
+
+
+def _resolve_coil_overlay_path(selected: str) -> Path:
+    candidate = Path(selected.strip())
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate
+
+
+def _coil_x_rotation_quarter_turns(rotation_deg: int) -> int:
+    allowed = {0, 90, 180, 270}
+    if rotation_deg not in allowed:
+        raise ValueError(f"Unsupported coil X rotation: {rotation_deg}")
+    return rotation_deg // 90
 
 
 def _resolve_path(selected: str, manual: str) -> str:
@@ -222,6 +318,143 @@ def _cached_b0(path_text: str, mtime: float, _meta_key: str) -> float:
     return float(np.sqrt(B0x * B0x + B0y * B0y + B0z * B0z))
 
 
+@st.cache_data(show_spinner=False)
+def _cached_variation_eval(
+    path_text: str,
+    mtime: float,
+    _meta_key: str,
+    cfg_key: str,
+) -> tuple[PerturbationResult, dict[str, object]]:
+    from halbach.perturbation_eval import PerturbationConfig, run_perturbation_case
+    from halbach.run_io import load_run
+
+    run = load_run(Path(path_text))
+    cfg_raw = json.loads(cfg_key)
+    cfg = PerturbationConfig(
+        sigma_rel_pct=float(cfg_raw["sigma_rel_pct"]),
+        sigma_phi_deg=float(cfg_raw["sigma_phi_deg"]),
+        seed=int(cfg_raw["seed"]),
+        roi_radius_m=float(cfg_raw["roi_radius_m"]),
+        roi_samples=int(cfg_raw["roi_samples"]),
+        map_radius_m=float(cfg_raw["map_radius_m"]),
+        map_step_m=float(cfg_raw["map_step_m"]),
+        sc_cfg=cast(dict[str, Any], cfg_raw["sc_cfg"]),
+        target_plane_z=float(cfg_raw.get("target_plane_z", 0.0)),
+    )
+    result = run_perturbation_case(run, cfg)
+    debug = {
+        "run_dir": str(run.run_dir),
+        "run_name": run.name,
+    }
+    return result, debug
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_obj_mesh(path_text: str, mtime: float):
+    from halbach.obj_mesh import load_obj_mesh
+
+    return load_obj_mesh(Path(path_text))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_transform_obj_mesh(path_text: str, mtime: float, transform_key: str):
+    from halbach.obj_mesh import transform_obj_mesh
+
+    raw_mesh = _cached_load_obj_mesh(path_text, mtime)
+    cfg = json.loads(transform_key)
+    rotation_xyz_deg = tuple(float(v) for v in cfg["rotation_xyz_deg"])
+    translation_xyz_m = tuple(float(v) for v in cfg["translation_xyz_m"])
+    return transform_obj_mesh(
+        raw_mesh,
+        unit_scale_m=_human_overlay_unit_scale_m(str(cfg["unit_mode"])),
+        uniform_scale=float(cfg["uniform_scale"]),
+        rotation_xyz_deg=cast(tuple[float, float, float], rotation_xyz_deg),
+        translation_xyz_m=cast(tuple[float, float, float], translation_xyz_m),
+        anchor_mode="bbox_center",
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_load_coil_overlay(path_text: str, mtime: float):
+    from halbach.coil_overlay import load_coil_polyline_npz
+
+    return load_coil_polyline_npz(Path(path_text))
+
+
+@st.cache_data(show_spinner=False)
+def _cached_transform_coil_overlay(path_text: str, mtime: float, rotation_x_deg: int):
+    from halbach.coil_overlay import rotate_coil_polyline_x90
+
+    coils = _cached_load_coil_overlay(path_text, mtime)
+    return rotate_coil_polyline_x90(coils, _coil_x_rotation_quarter_turns(int(rotation_x_deg)))
+
+
+def _default_variation_sc_cfg(run: RunBundle | None) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "chi": 0.0,
+        "Nd": 1.0 / 3.0,
+        "p0": 1.0,
+        "volume_mm3": 1000.0,
+        "iters": 30,
+        "omega": 0.6,
+        "near_window": {"wr": 0, "wz": 1, "wphi": 2},
+        "near_kernel": "dipole",
+        "subdip_n": 2,
+    }
+    if run is None:
+        return defaults
+    magnetization = run.meta.get("magnetization")
+    if not isinstance(magnetization, dict):
+        return defaults
+    sc_cfg = magnetization.get("self_consistent")
+    if not isinstance(sc_cfg, dict):
+        return defaults
+
+    near_window_raw = sc_cfg.get("near_window")
+    if isinstance(near_window_raw, dict):
+        defaults["near_window"] = {
+            "wr": int(near_window_raw.get("wr", 0)),
+            "wz": int(near_window_raw.get("wz", 1)),
+            "wphi": int(near_window_raw.get("wphi", 2)),
+        }
+    defaults["chi"] = float(sc_cfg.get("chi", defaults["chi"]))
+    defaults["Nd"] = float(sc_cfg.get("Nd", defaults["Nd"]))
+    defaults["p0"] = float(sc_cfg.get("p0", defaults["p0"]))
+    defaults["volume_mm3"] = float(sc_cfg.get("volume_mm3", defaults["volume_mm3"]))
+    defaults["iters"] = int(sc_cfg.get("iters", defaults["iters"]))
+    defaults["omega"] = float(sc_cfg.get("omega", defaults["omega"]))
+    near_kernel = str(sc_cfg.get("near_kernel", defaults["near_kernel"]))
+    if near_kernel == "cube-average":
+        near_kernel = "cellavg"
+    defaults["near_kernel"] = near_kernel
+    defaults["subdip_n"] = int(sc_cfg.get("subdip_n", defaults["subdip_n"]))
+    if sc_cfg.get("gl_order") is not None:
+        defaults["gl_order"] = int(sc_cfg["gl_order"])
+    return defaults
+
+
+def _seed_variation_sc_state(run_key: str, defaults: dict[str, Any]) -> None:
+    if st.session_state.get("variation_sc_seed_run") == run_key:
+        return
+    near_window = cast(dict[str, Any], defaults.get("near_window", {}))
+    st.session_state["variation_sc_chi"] = float(defaults.get("chi", 0.0))
+    st.session_state["variation_sc_Nd"] = float(defaults.get("Nd", 1.0 / 3.0))
+    st.session_state["variation_sc_p0"] = float(defaults.get("p0", 1.0))
+    st.session_state["variation_sc_volume_mm3"] = float(defaults.get("volume_mm3", 1000.0))
+    st.session_state["variation_sc_iters"] = int(defaults.get("iters", 30))
+    st.session_state["variation_sc_omega"] = float(defaults.get("omega", 0.6))
+    st.session_state["variation_sc_near_wr"] = int(near_window.get("wr", 0))
+    st.session_state["variation_sc_near_wz"] = int(near_window.get("wz", 1))
+    st.session_state["variation_sc_near_wphi"] = int(near_window.get("wphi", 2))
+    st.session_state["variation_sc_near_kernel"] = str(defaults.get("near_kernel", "dipole"))
+    st.session_state["variation_sc_subdip_n"] = int(defaults.get("subdip_n", 2))
+    if "gl_order" in defaults and defaults["gl_order"] is not None:
+        st.session_state["variation_sc_gl_order"] = str(defaults["gl_order"])
+    else:
+        st.session_state["variation_sc_gl_order"] = "mixed (2/3)"
+    st.session_state["variation_sc_seed_run"] = run_key
+
+
 def _try_load(
     path_text: str,
 ) -> tuple[RunBundle | None, float | None, float | None, str | None]:
@@ -244,6 +477,11 @@ def _fmt_num(value: object, fmt: str = ".4f") -> str:
     if isinstance(value, int | float | np.floating):
         return f"{float(value):{fmt}}"
     return "n/a"
+
+
+def _fmt_vec3(value: np.ndarray, fmt: str = ".4f") -> str:
+    arr = np.asarray(value, dtype=np.float64).reshape(3)
+    return ", ".join(f"{float(v):{fmt}}" for v in arr)
 
 
 def _sample_colorscale(name: str, levels: int) -> list[tuple[float, str]]:
@@ -520,6 +758,13 @@ def main() -> None:
                 step=1.0,
             )
         )
+        magnet_surface_palette = _magnet_surface_color_options()
+        magnet_surface_label = st.selectbox(
+            "Magnet surface color",
+            list(magnet_surface_palette.keys()),
+            index=0,
+        )
+        magnet_surface_color = magnet_surface_palette[magnet_surface_label]
 
     init_path = _resolve_path(init_select, init_path_text)
     opt_path = _resolve_path(opt_select, opt_path_text)
@@ -572,7 +817,7 @@ def main() -> None:
 
         vmin, vmax = common_ppm_limits(available_maps, limit_ppm=ppm_limit, symmetric=True)
 
-    tabs = st.tabs(["Overview", "2D", "3D", "Optimize"])
+    tabs = st.tabs(["Overview", "2D", "3D", "Human Overlay", "Variation", "Optimize"])
 
     with tabs[0]:
         st.subheader("Runs")
@@ -746,6 +991,7 @@ def main() -> None:
                     arrow_length_m=arrow_length_mm / 1000.0,
                     arrow_head_angle_deg=arrow_head_angle_deg,
                     height=700,
+                    magnet_surface_color=magnet_surface_color,
                 )
                 st.plotly_chart(fig, use_container_width=True, key="magnet_single")
         with view_tabs[1]:
@@ -758,12 +1004,7 @@ def main() -> None:
                     enumerate_magnets,
                 )
 
-                camera_presets = {
-                    "Isometric": {"eye": {"x": 1.25, "y": 1.25, "z": 1.25}},
-                    "Top": {"eye": {"x": 0.0, "y": 0.0, "z": 2.0}},
-                    "Side +X": {"eye": {"x": 2.0, "y": 0.0, "z": 0.0}},
-                    "Side +Y": {"eye": {"x": 0.0, "y": 2.0, "z": 0.0}},
-                }
+                camera_presets = _camera_presets()
                 preset = st.selectbox(
                     "Camera preset",
                     list(camera_presets.keys()),
@@ -792,6 +1033,7 @@ def main() -> None:
                     scene_camera=scene_camera,
                     scene_ranges=scene_ranges,
                     height=700,
+                    magnet_surface_color=magnet_surface_color,
                 )
                 fig_opt = build_magnet_figure(
                     opt_run,
@@ -805,6 +1047,7 @@ def main() -> None:
                     scene_camera=scene_camera,
                     scene_ranges=scene_ranges,
                     height=700,
+                    magnet_surface_color=magnet_surface_color,
                 )
                 compare_cols = st.columns(2)
                 with compare_cols[0]:
@@ -815,6 +1058,686 @@ def main() -> None:
                     st.plotly_chart(fig_opt, use_container_width=True, key="magnet_compare_opt")
 
     with tabs[3]:
+        st.subheader("Human Overlay")
+        st.caption(
+            "Overlay a Wavefront OBJ body mesh on top of the current magnet layout for fit and scale checks."
+        )
+        overlay_run_target = st.radio(
+            "Overlay run",
+            ["initial", "optimized"],
+            index=1,
+            horizontal=True,
+            key="human_overlay_run_target",
+        )
+        overlay_run = init_run if overlay_run_target == "initial" else opt_run
+
+        obj_path_input = st.text_input(
+            "OBJ path",
+            value=DEFAULT_HUMAN_OVERLAY_OBJ,
+            key="human_overlay_obj_path",
+        )
+        overlay_obj_path = _resolve_human_overlay_obj_path(obj_path_input)
+        st.caption(f"Resolved OBJ path: `{overlay_obj_path}`")
+
+        overlay_cols = st.columns(3)
+        with overlay_cols[0]:
+            overlay_unit = st.selectbox(
+                "OBJ unit",
+                ["mm", "cm", "m"],
+                index=1,
+                key="human_overlay_unit",
+            )
+        with overlay_cols[1]:
+            overlay_opacity = float(
+                st.slider(
+                    "Body opacity",
+                    min_value=0.05,
+                    max_value=1.0,
+                    value=0.35,
+                    step=0.05,
+                    key="human_overlay_opacity",
+                )
+            )
+        with overlay_cols[2]:
+            overlay_scale = float(
+                st.number_input(
+                    "Uniform scale",
+                    min_value=0.01,
+                    max_value=100.0,
+                    value=1.0,
+                    step=0.01,
+                    key="human_overlay_scale",
+                )
+            )
+
+        st.markdown("**Position / rotation**")
+        transform_cols = st.columns(3)
+        with transform_cols[0]:
+            overlay_tx = float(
+                st.number_input(
+                    "Translate X (m)",
+                    min_value=-5.0,
+                    max_value=5.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.3f",
+                    key="human_overlay_tx_m",
+                )
+            )
+            overlay_rx = float(
+                st.number_input(
+                    "Rotate X (deg)",
+                    min_value=-180.0,
+                    max_value=180.0,
+                    value=0.0,
+                    step=1.0,
+                    key="human_overlay_rx_deg",
+                )
+            )
+        with transform_cols[1]:
+            overlay_ty = float(
+                st.number_input(
+                    "Translate Y (m)",
+                    min_value=-5.0,
+                    max_value=5.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.3f",
+                    key="human_overlay_ty_m",
+                )
+            )
+            overlay_ry = float(
+                st.number_input(
+                    "Rotate Y (deg)",
+                    min_value=-180.0,
+                    max_value=180.0,
+                    value=0.0,
+                    step=1.0,
+                    key="human_overlay_ry_deg",
+                )
+            )
+        with transform_cols[2]:
+            overlay_tz = float(
+                st.number_input(
+                    "Translate Z (m)",
+                    min_value=-5.0,
+                    max_value=5.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.3f",
+                    key="human_overlay_tz_m",
+                )
+            )
+            overlay_rz = float(
+                st.number_input(
+                    "Rotate Z (deg)",
+                    min_value=-180.0,
+                    max_value=180.0,
+                    value=0.0,
+                    step=1.0,
+                    key="human_overlay_rz_deg",
+                )
+            )
+
+        camera_presets = _camera_presets()
+        overlay_camera_preset = st.selectbox(
+            "Camera preset",
+            list(camera_presets.keys()),
+            index=0,
+            key="human_overlay_camera_preset",
+        )
+        show_coil_overlay = st.checkbox(
+            "Show coil overlay",
+            value=True,
+            key="human_overlay_show_coil",
+        )
+        coil_candidates = _scan_coil_npz_files(ROOT / DEFAULT_COIL_OVERLAY_DIR)
+        coil_selected = ""
+        coil_line_width = 4.0
+        coil_rotation_x_deg = 0
+        if show_coil_overlay:
+            if coil_candidates:
+                coil_selected = st.selectbox(
+                    "Coil file",
+                    coil_candidates,
+                    index=0,
+                    key="human_overlay_coil_file",
+                )
+                coil_line_width = float(
+                    st.number_input(
+                        "Coil line width",
+                        min_value=1.0,
+                        max_value=12.0,
+                        value=4.0,
+                        step=0.5,
+                        key="human_overlay_coil_line_width",
+                    )
+                )
+                coil_rotation_x_deg = int(
+                    st.selectbox(
+                        "Coil X rotation",
+                        [0, 90, 180, 270],
+                        index=0,
+                        key="human_overlay_coil_rotation_x_deg",
+                    )
+                )
+            else:
+                st.warning(f"No coil NPZ files found under `{ROOT / DEFAULT_COIL_OVERLAY_DIR}`.")
+
+        st.caption(
+            "v1 limitation: OBJ shape only. `.mtl`, textures, normals, and material colors are ignored."
+        )
+
+        raw_overlay_mesh = None
+        transformed_overlay_mesh = None
+        coil_overlay = None
+        overlay_load_error: str | None = None
+        if not overlay_obj_path.is_file():
+            overlay_load_error = f"OBJ file not found: {overlay_obj_path}"
+        else:
+            try:
+                overlay_obj_mtime = float(overlay_obj_path.stat().st_mtime)
+                rotation_xyz_deg = (overlay_rx, overlay_ry, overlay_rz)
+                translation_xyz_m = (overlay_tx, overlay_ty, overlay_tz)
+                transform_key = _human_overlay_transform_key(
+                    str(overlay_obj_path),
+                    overlay_obj_mtime,
+                    overlay_unit,
+                    overlay_scale,
+                    rotation_xyz_deg,
+                    translation_xyz_m,
+                )
+                raw_overlay_mesh = _cached_load_obj_mesh(str(overlay_obj_path), overlay_obj_mtime)
+                transformed_overlay_mesh = _cached_transform_obj_mesh(
+                    str(overlay_obj_path),
+                    overlay_obj_mtime,
+                    transform_key,
+                )
+                if show_coil_overlay and coil_selected:
+                    coil_path = _resolve_coil_overlay_path(coil_selected)
+                    if not coil_path.is_file():
+                        raise FileNotFoundError(f"Coil file not found: {coil_path}")
+                    coil_mtime = float(coil_path.stat().st_mtime)
+                    coil_overlay = _cached_transform_coil_overlay(
+                        str(coil_path),
+                        coil_mtime,
+                        coil_rotation_x_deg,
+                    )
+            except Exception as exc:
+                overlay_load_error = str(exc)
+
+        if overlay_load_error is not None:
+            st.error(overlay_load_error)
+        elif raw_overlay_mesh is not None and transformed_overlay_mesh is not None:
+            unit_scale_m = _human_overlay_unit_scale_m(overlay_unit)
+            converted_size_m = raw_overlay_mesh.bbox_size * unit_scale_m * overlay_scale
+
+            dims_cols = st.columns(2)
+            with dims_cols[0]:
+                st.markdown("**Raw OBJ bbox**")
+                st.write(f"size (OBJ units): {_fmt_vec3(raw_overlay_mesh.bbox_size)}")
+                st.write(f"min (OBJ units): {_fmt_vec3(raw_overlay_mesh.bbox_min)}")
+                st.write(f"max (OBJ units): {_fmt_vec3(raw_overlay_mesh.bbox_max)}")
+            with dims_cols[1]:
+                st.markdown("**Converted / transformed bbox**")
+                st.write(f"size after unit+scale (m): {_fmt_vec3(converted_size_m)}")
+                st.write(f"transformed min (m): {_fmt_vec3(transformed_overlay_mesh.bbox_min)}")
+                st.write(f"transformed max (m): {_fmt_vec3(transformed_overlay_mesh.bbox_max)}")
+                st.write(f"transformed size (m): {_fmt_vec3(transformed_overlay_mesh.bbox_size)}")
+
+            if coil_overlay is not None:
+                coil_cols = st.columns(2)
+                with coil_cols[0]:
+                    st.markdown("**Coil overlay**")
+                    st.write(f"file: `{coil_selected}`")
+                    st.write(f"x rotation (deg): {coil_rotation_x_deg}")
+                    st.write(f"polyline count: {int(coil_overlay.polyline_start.shape[0])}")
+                    st.write(f"point count: {int(coil_overlay.points_xyz.shape[0])}")
+                with coil_cols[1]:
+                    st.markdown("**Displayed coil bbox**")
+                    st.write(
+                        "unique colors: "
+                        f"{int(np.unique(coil_overlay.polyline_color_rgba_u8, axis=0).shape[0])}"
+                    )
+                    st.write(f"bbox min (m): {_fmt_vec3(coil_overlay.bbox_min)}")
+                    st.write(f"bbox max (m): {_fmt_vec3(coil_overlay.bbox_max)}")
+                    st.write(f"bbox size (m): {_fmt_vec3(coil_overlay.bbox_size)}")
+
+            if overlay_run is None:
+                st.info("Select a run to overlay the body mesh on the magnet figure.")
+            else:
+                from halbach.viz3d import (
+                    build_magnet_figure,
+                    compute_scene_ranges,
+                    enumerate_magnets,
+                )
+
+                centers_overlay, _phi_overlay, _ring_overlay, _layer_overlay = enumerate_magnets(
+                    overlay_run,
+                    stride=stride,
+                    hide_x_negative=hide_x_negative,
+                )
+                overlay_range_sources = [centers_overlay, transformed_overlay_mesh.vertices]
+                if coil_overlay is not None:
+                    overlay_range_sources.append(coil_overlay.points_xyz)
+                overlay_scene_ranges = compute_scene_ranges(overlay_range_sources)
+                overlay_fig = build_magnet_figure(
+                    overlay_run,
+                    stride=stride,
+                    hide_x_negative=hide_x_negative,
+                    mode=mode,
+                    magnet_size_m=magnet_size_mm / 1000.0,
+                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                    arrow_length_m=arrow_length_mm / 1000.0,
+                    arrow_head_angle_deg=arrow_head_angle_deg,
+                    scene_camera=camera_presets[overlay_camera_preset],
+                    scene_ranges=overlay_scene_ranges,
+                    height=1520,
+                    overlay_mesh=transformed_overlay_mesh,
+                    overlay_opacity=overlay_opacity,
+                    coil_overlay=coil_overlay,
+                    coil_line_width=coil_line_width,
+                    magnet_surface_color=magnet_surface_color,
+                )
+                st.plotly_chart(
+                    overlay_fig,
+                    use_container_width=True,
+                    key="human_overlay_figure",
+                )
+
+    with tabs[4]:
+        st.subheader("Magnetization Variation Eval (prototype)")
+        st.caption(
+            "One realization: per-magnet amplitude/angle perturbation + self-consistent solve, "
+            "ROI vectors and XY(z=0) map export."
+        )
+        variation_source = st.radio(
+            "Run source",
+            ["initial", "optimized", "custom"],
+            index=1,
+            key="variation_run_source",
+            horizontal=True,
+        )
+        variation_custom_path = ""
+        if variation_source == "custom":
+            variation_custom_path = st.text_input(
+                "Custom run path",
+                value="",
+                key="variation_custom_path",
+            )
+        if variation_source == "initial":
+            variation_path = init_path
+            variation_run = init_run
+            variation_mtime = init_mtime
+        elif variation_source == "optimized":
+            variation_path = opt_path
+            variation_run = opt_run
+            variation_mtime = opt_mtime
+        else:
+            variation_path = variation_custom_path.strip()
+            variation_run, variation_mtime, _variation_meta_mtime, variation_load_err = _try_load(
+                variation_path
+            )
+            if variation_load_err:
+                st.error(f"Variation run load error: {variation_load_err}")
+
+        st.caption(f"Target run: {variation_path or '(not set)'}")
+        if variation_run is None:
+            st.info("Select a run to evaluate variation.")
+        else:
+            run_key = str(variation_run.run_dir)
+            sc_defaults = _default_variation_sc_cfg(variation_run)
+            _seed_variation_sc_state(run_key, sc_defaults)
+
+            cfg_cols = st.columns(3)
+            with cfg_cols[0]:
+                sigma_rel_pct = float(
+                    st.number_input(
+                        "sigma_rel_pct (%)",
+                        min_value=0.0,
+                        max_value=100.0,
+                        value=2.0,
+                        step=0.1,
+                        key="variation_sigma_rel_pct",
+                    )
+                )
+                sigma_phi_deg = float(
+                    st.number_input(
+                        "sigma_phi_deg (deg)",
+                        min_value=0.0,
+                        max_value=180.0,
+                        value=1.0,
+                        step=0.1,
+                        key="variation_sigma_phi_deg",
+                    )
+                )
+                seed = int(
+                    st.number_input(
+                        "seed",
+                        min_value=0,
+                        max_value=2_147_483_647,
+                        value=1234,
+                        step=1,
+                        key="variation_seed",
+                    )
+                )
+            with cfg_cols[1]:
+                roi_radius_var = float(
+                    st.number_input(
+                        "ROI radius (m)",
+                        min_value=0.001,
+                        max_value=0.5,
+                        value=0.14,
+                        step=0.001,
+                        format="%.4f",
+                        key="variation_roi_radius_m",
+                    )
+                )
+                roi_samples_var = int(
+                    st.number_input(
+                        "ROI samples (Fibonacci)",
+                        min_value=1,
+                        max_value=200000,
+                        value=512,
+                        step=1,
+                        key="variation_roi_samples",
+                    )
+                )
+            with cfg_cols[2]:
+                map_radius_var = float(
+                    st.number_input(
+                        "Map radius (m)",
+                        min_value=0.001,
+                        max_value=0.5,
+                        value=0.14,
+                        step=0.001,
+                        format="%.4f",
+                        key="variation_map_radius_m",
+                    )
+                )
+                map_step_var = float(
+                    st.number_input(
+                        "Map step (m)",
+                        min_value=0.001,
+                        max_value=0.05,
+                        value=0.002,
+                        step=0.001,
+                        format="%.4f",
+                        key="variation_map_step_m",
+                    )
+                )
+                st.caption("Map plane: XY (z=0)")
+
+            with st.expander("Self-consistent settings (editable)", expanded=False):
+                sc_chi_var = float(
+                    st.number_input(
+                        "chi",
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.01,
+                        key="variation_sc_chi",
+                    )
+                )
+                sc_Nd_var = float(
+                    st.number_input(
+                        "Nd",
+                        min_value=0.0,
+                        max_value=1.0,
+                        step=0.01,
+                        key="variation_sc_Nd",
+                    )
+                )
+                sc_p0_var = float(
+                    st.number_input(
+                        "p0",
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.01,
+                        key="variation_sc_p0",
+                    )
+                )
+                sc_volume_mm3_var = float(
+                    st.number_input(
+                        "volume_mm3",
+                        min_value=1.0,
+                        max_value=1e7,
+                        step=10.0,
+                        key="variation_sc_volume_mm3",
+                    )
+                )
+                sc_iters_var = int(
+                    st.number_input(
+                        "iters",
+                        min_value=1,
+                        max_value=1000,
+                        step=1,
+                        key="variation_sc_iters",
+                    )
+                )
+                sc_omega_var = float(
+                    st.number_input(
+                        "omega",
+                        min_value=0.01,
+                        max_value=1.0,
+                        step=0.01,
+                        key="variation_sc_omega",
+                    )
+                )
+                sc_wr_var = int(
+                    st.number_input(
+                        "near wr",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="variation_sc_near_wr",
+                    )
+                )
+                sc_wz_var = int(
+                    st.number_input(
+                        "near wz",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="variation_sc_near_wz",
+                    )
+                )
+                sc_wphi_var = int(
+                    st.number_input(
+                        "near wphi",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="variation_sc_near_wphi",
+                    )
+                )
+                sc_kernel_var = st.selectbox(
+                    "near kernel",
+                    ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
+                    index=0,
+                    key="variation_sc_near_kernel",
+                )
+                sc_subdip_n_var = 2
+                if sc_kernel_var == "multi-dipole":
+                    sc_subdip_n_var = int(
+                        st.number_input(
+                            "subdip_n",
+                            min_value=2,
+                            max_value=10,
+                            step=1,
+                            key="variation_sc_subdip_n",
+                        )
+                    )
+                else:
+                    sc_subdip_n_var = int(st.session_state.get("variation_sc_subdip_n", 2))
+                sc_gl_order_var: int | None = None
+                if sc_kernel_var == "gl-double-mixed":
+                    gl_choice_var = st.selectbox(
+                        "gl order",
+                        ["mixed (2/3)", "2", "3"],
+                        index=0,
+                        key="variation_sc_gl_order",
+                    )
+                    if gl_choice_var in ("2", "3"):
+                        sc_gl_order_var = int(gl_choice_var)
+
+            sc_cfg_eval_var: dict[str, object] = {
+                "chi": sc_chi_var,
+                "Nd": sc_Nd_var,
+                "p0": sc_p0_var,
+                "volume_mm3": sc_volume_mm3_var,
+                "iters": sc_iters_var,
+                "omega": sc_omega_var,
+                "near_window": {"wr": sc_wr_var, "wz": sc_wz_var, "wphi": sc_wphi_var},
+                "near_kernel": sc_kernel_var,
+                "subdip_n": sc_subdip_n_var,
+            }
+            if sc_gl_order_var is not None:
+                sc_cfg_eval_var["gl_order"] = sc_gl_order_var
+
+            variation_errors: list[str] = []
+            if not _jax_available():
+                variation_errors.append(
+                    "JAX is required for variation evaluation. Install `jax` and `jaxlib`."
+                )
+            if roi_samples_var < 1:
+                variation_errors.append("ROI samples must be >= 1.")
+            if map_step_var <= 0.0:
+                variation_errors.append("Map step must be > 0.")
+            if sc_kernel_var == "multi-dipole" and sc_subdip_n_var < 2:
+                variation_errors.append("subdip_n must be >= 2 for multi-dipole.")
+            if sc_kernel_var == "cellavg":
+                variation_errors.append(
+                    "near kernel 'cellavg' is not supported for per-magnet p0 variation in this prototype."
+                )
+            for msg in variation_errors:
+                st.error(msg)
+
+            variation_cfg_payload = {
+                "sigma_rel_pct": sigma_rel_pct,
+                "sigma_phi_deg": sigma_phi_deg,
+                "seed": seed,
+                "roi_radius_m": roi_radius_var,
+                "roi_samples": roi_samples_var,
+                "map_radius_m": map_radius_var,
+                "map_step_m": map_step_var,
+                "target_plane_z": 0.0,
+                "sc_cfg": sc_cfg_eval_var,
+            }
+            variation_cfg_key = json.dumps(variation_cfg_payload, sort_keys=True)
+
+            variation_run_key = re.sub(r"[^0-9A-Za-z_-]+", "_", run_key)
+            result_state_key = f"variation_result::{variation_run_key}"
+            debug_state_key = f"variation_result_debug::{variation_run_key}"
+
+            run_eval_clicked = st.button(
+                "Run variation evaluation",
+                key="variation_run_button",
+                disabled=bool(variation_errors),
+            )
+            if run_eval_clicked:
+                try:
+                    if variation_mtime is None:
+                        raise ValueError("Could not resolve results mtime for selected run.")
+                    meta_key = _magnetization_cache_key(variation_run.meta)
+                    variation_result, variation_debug = _cached_variation_eval(
+                        variation_path,
+                        variation_mtime,
+                        meta_key,
+                        variation_cfg_key,
+                    )
+                    st.session_state[result_state_key] = variation_result
+                    st.session_state[debug_state_key] = variation_debug
+                    st.success("Variation evaluation completed.")
+                except Exception as exc:
+                    st.error(f"Variation evaluation failed: {exc}")
+
+            variation_result = st.session_state.get(result_state_key)
+            variation_debug = st.session_state.get(debug_state_key, {})
+            if variation_result is not None:
+                from halbach.perturbation_eval import PerturbationConfig, save_perturbation_result
+
+                result_obj = variation_result
+                B0_norm_var = float(np.linalg.norm(result_obj.B0_vec))
+                ppm_mean_var = float(np.mean(result_obj.ppm_roi))
+                ppm_max_var = float(np.max(np.abs(result_obj.ppm_roi)))
+                st.markdown(
+                    f"**|B0|**: {B0_norm_var:.6e} T  |  "
+                    f"**ppm mean**: {ppm_mean_var:.3f}  |  "
+                    f"**ppm max|.|**: {ppm_max_var:.3f}"
+                )
+                st.write(
+                    f"near_kernel: {result_obj.debug.get('sc_near_kernel')}  "
+                    f"subdip_n: {result_obj.debug.get('sc_subdip_n')}  "
+                    f"near_window: {result_obj.debug.get('sc_near_window')}"
+                )
+                st.write(
+                    "p stats min/max/mean/std/rel_std: "
+                    f"{_fmt_num(result_obj.p_stats.get('sc_p_min'))} / "
+                    f"{_fmt_num(result_obj.p_stats.get('sc_p_max'))} / "
+                    f"{_fmt_num(result_obj.p_stats.get('sc_p_mean'))} / "
+                    f"{_fmt_num(result_obj.p_stats.get('sc_p_std'))} / "
+                    f"{_fmt_num(result_obj.p_stats.get('sc_p_rel_std'))}"
+                )
+                if variation_debug:
+                    st.caption(
+                        f"run: {variation_debug.get('run_name')} ({variation_debug.get('run_dir')})"
+                    )
+
+                map_obj = result_obj.map_xy
+                map_vals = map_obj.ppm[map_obj.mask]
+                if map_vals.size > 0:
+                    map_abs = float(np.max(np.abs(map_vals)))
+                else:
+                    map_abs = 1.0
+                fig_var_map = _plot_error_map(
+                    map_obj,
+                    -map_abs,
+                    map_abs,
+                    contour_level,
+                    "Variation XY(z=0) ppm map",
+                )
+                st.plotly_chart(fig_var_map, use_container_width=True, key="variation_map_plot")
+
+                save_cols = st.columns(2)
+                with save_cols[0]:
+                    save_tag_var = st.text_input(
+                        "Save tag",
+                        value=f"seed{seed}",
+                        key="variation_save_tag",
+                    )
+                with save_cols[1]:
+                    default_var_dir = (
+                        variation_run.run_dir
+                        / "variation_eval"
+                        / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_sanitize_tag(save_tag_var)}"
+                    )
+                    st.caption(f"Output dir: {default_var_dir}")
+                if st.button("Save outputs", key="variation_save_button"):
+                    try:
+                        cfg_obj = PerturbationConfig(
+                            sigma_rel_pct=float(variation_cfg_payload["sigma_rel_pct"]),
+                            sigma_phi_deg=float(variation_cfg_payload["sigma_phi_deg"]),
+                            seed=int(variation_cfg_payload["seed"]),
+                            roi_radius_m=float(variation_cfg_payload["roi_radius_m"]),
+                            roi_samples=int(variation_cfg_payload["roi_samples"]),
+                            map_radius_m=float(variation_cfg_payload["map_radius_m"]),
+                            map_step_m=float(variation_cfg_payload["map_step_m"]),
+                            target_plane_z=float(variation_cfg_payload["target_plane_z"]),
+                            sc_cfg=cast(dict[str, Any], variation_cfg_payload["sc_cfg"]),
+                        )
+                        saved = save_perturbation_result(
+                            result_obj,
+                            default_var_dir,
+                            cfg_obj,
+                            variation_run,
+                        )
+                        st.success(f"Saved variation outputs to: {default_var_dir}")
+                        for name, p in saved.items():
+                            st.write(f"{name}: `{p}`")
+                    except Exception as exc:
+                        st.error(f"Save failed: {exc}")
+
+    with tabs[5]:
         st.subheader("Optimize")
         opt_mode = st.selectbox(
             "Optimization mode",
@@ -953,6 +1876,27 @@ def main() -> None:
                         key="lambda_z",
                     )
                 )
+            beta_cols = st.columns([1, 1])
+            with beta_cols[0]:
+                enable_beta_tilt_x = st.checkbox(
+                    "Enable beta_tilt_x",
+                    value=False,
+                    key="enable_beta_tilt_x",
+                    help="Ring-wise local X-axis tilt angle (legacy-alpha + jax only).",
+                )
+            with beta_cols[1]:
+                beta_tilt_x_bound_deg = float(
+                    st.number_input(
+                        "beta_tilt_x bound (deg)",
+                        min_value=0.1,
+                        max_value=89.0,
+                        value=20.0,
+                        step=0.5,
+                        key="beta_tilt_x_bound_deg",
+                    )
+                )
+            if enable_beta_tilt_x:
+                st.caption("beta_tilt_x requires angle_model=legacy-alpha and grad_backend=jax.")
             st.markdown("**Magnetization model**")
             mag_model = st.selectbox(
                 "Magnetization model",
@@ -1046,6 +1990,20 @@ def main() -> None:
                     sc_errors.append("Self-consistent legacy-alpha requires grad_backend=jax.")
                 if sc_near_kernel == "multi-dipole" and sc_subdip_n < 2:
                     sc_errors.append("subdip_n must be >= 2 for multi-dipole.")
+            if enable_beta_tilt_x:
+                if angle_model != "legacy-alpha" or grad_backend != "jax":
+                    sc_errors.append(
+                        "beta_tilt_x is supported only with angle_model=legacy-alpha and grad_backend=jax."
+                    )
+                if beta_tilt_x_bound_deg <= 0.0:
+                    sc_errors.append("beta_tilt_x bound must be > 0 deg.")
+                if mag_model == "self-consistent-easy-axis" and sc_near_kernel not in {
+                    "dipole",
+                    "multi-dipole",
+                }:
+                    sc_errors.append(
+                        "beta_tilt_x with self-consistent supports near kernel only in {dipole, multi-dipole}."
+                    )
             for msg in sc_errors:
                 st.error(msg)
             can_start = jax_issue is None and not sc_errors
@@ -1248,6 +2206,8 @@ def main() -> None:
                                         r_min_mm=r_min_mm,
                                         r_max_mm=r_max_mm,
                                         fix_center_radius_layers=fix_center_radius_layers,
+                                        enable_beta_tilt_x=enable_beta_tilt_x,
+                                        beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                                         mag_model=mag_model,
                                         sc_chi=sc_chi,
                                         sc_Nd=sc_Nd,
@@ -1319,6 +2279,8 @@ def main() -> None:
                             r_min_mm=r_min_mm,
                             r_max_mm=r_max_mm,
                             fix_center_radius_layers=fix_center_radius_layers,
+                            enable_beta_tilt_x=enable_beta_tilt_x,
+                            beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                             mag_model=mag_model,
                             sc_chi=sc_chi,
                             sc_Nd=sc_Nd,
@@ -1382,6 +2344,8 @@ def main() -> None:
                     r_min_mm=r_min_mm,
                     r_max_mm=r_max_mm,
                     fix_center_radius_layers=fix_center_radius_layers,
+                    enable_beta_tilt_x=enable_beta_tilt_x,
+                    beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                     mag_model=mag_model,
                     sc_chi=sc_chi,
                     sc_Nd=sc_Nd,
@@ -1877,243 +2841,6 @@ def main() -> None:
                 if dc_auto_refresh:
                     time.sleep(max(0.1, dc_refresh_secs))
                     st.rerun()
-        with st.expander("Generate initial run", expanded=False):
-            gen_cols = st.columns(3)
-            with gen_cols[0]:
-                gen_N = int(
-                    st.number_input("N", min_value=1, max_value=512, value=48, step=1, key="gen_N")
-                )
-                gen_Lz = float(
-                    st.number_input(
-                        "Lz (m)", min_value=0.01, max_value=2.0, value=0.64, step=0.01, key="gen_Lz"
-                    )
-                )
-            with gen_cols[1]:
-                gen_R = int(
-                    st.number_input("R", min_value=1, max_value=32, value=3, step=1, key="gen_R")
-                )
-                gen_diameter_mm = float(
-                    st.number_input(
-                        "Diameter (mm)",
-                        min_value=10.0,
-                        max_value=2000.0,
-                        value=400.0,
-                        step=10.0,
-                        key="gen_diameter_mm",
-                    )
-                )
-            with gen_cols[2]:
-                gen_K = int(
-                    st.number_input("K", min_value=1, max_value=256, value=24, step=1, key="gen_K")
-                )
-                gen_ring_offset_step_mm = float(
-                    st.number_input(
-                        "Ring offset step (mm)",
-                        min_value=0.0,
-                        max_value=100.0,
-                        value=12.0,
-                        step=1.0,
-                        key="gen_ring_offset_step_mm",
-                    )
-                )
-
-            gen_tag = st.text_input("Generate output tag", value="init", key="gen_tag")
-            gen_use_as_input = st.checkbox(
-                "Use generated run as input", value=True, key="gen_use_as_input"
-            )
-            gen_start_opt = st.checkbox(
-                "Generate and start optimization", value=False, key="gen_start_opt"
-            )
-
-            gen_out_dir = build_generate_out_dir(
-                ROOT / "runs", tag=gen_tag, N=gen_N, R=gen_R, K=gen_K
-            )
-            st.caption(f"Output dir: {gen_out_dir}")
-
-            gen_clicked = st.button("Generate", key="gen_button")
-            if gen_clicked:
-                cmd = build_generate_command(
-                    gen_out_dir,
-                    N=gen_N,
-                    R=gen_R,
-                    K=gen_K,
-                    Lz=gen_Lz,
-                    diameter_mm=gen_diameter_mm,
-                    ring_offset_step_mm=gen_ring_offset_step_mm,
-                )
-                code, output = run_generate_command(cmd, cwd=ROOT)
-                st.session_state["gen_run_code"] = code
-                st.session_state["gen_run_output"] = output
-                st.session_state["gen_run_dir"] = str(gen_out_dir)
-                if code != 0:
-                    st.error(f"Generate failed (exit {code}).")
-                else:
-                    if gen_use_as_input:
-                        try:
-                            rel_path = str(gen_out_dir.relative_to(ROOT))
-                        except ValueError:
-                            rel_path = str(gen_out_dir)
-                        st.session_state["pending_init_select"] = rel_path
-                        st.session_state["pending_init_path"] = ""
-                    if gen_start_opt:
-                        if not can_start:
-                            st.error(jax_issue or "JAX is required for this configuration.")
-                        elif job_running:
-                            st.error("Optimization is already running.")
-                        else:
-                            opt_out_dir = _default_out_dir(f"{gen_tag}_opt")
-                            try:
-                                job = start_opt_job(
-                                    gen_out_dir,
-                                    opt_out_dir,
-                                    maxiter=maxiter,
-                                    gtol=gtol,
-                                    roi_r=roi_r_opt,
-                                    roi_step=roi_step_opt,
-                                    angle_model=angle_model,
-                                    grad_backend=grad_backend,
-                                    fourier_H=fourier_H,
-                                    lambda0=lambda0,
-                                    lambda_theta=lambda_theta,
-                                    lambda_z=lambda_z,
-                                    angle_init=angle_init,
-                                    r_bound_mode=r_bound_mode,
-                                    r_lower_delta_mm=r_lower_delta_mm,
-                                    r_upper_delta_mm=r_upper_delta_mm,
-                                    r_no_upper=r_no_upper,
-                                    r_min_mm=r_min_mm,
-                                    r_max_mm=r_max_mm,
-                                    fix_center_radius_layers=fix_center_radius_layers,
-                                    repo_root=ROOT,
-                                )
-                                st.session_state["opt_job"] = job
-                                st.session_state["opt_job_fix_center_radius_layers"] = (
-                                    fix_center_radius_layers
-                                )
-                                st.success(f"Started optimization: {job.out_dir}")
-                            except Exception as exc:
-                                st.error(f"Failed to start optimization: {exc}")
-                    st.rerun()
-
-            gen_code = st.session_state.get("gen_run_code")
-            if gen_code is not None:
-                if gen_code == 0:
-                    st.success(f"Generated run: {st.session_state.get('gen_run_dir')}")
-                else:
-                    st.error(f"Generate failed (exit {gen_code}).")
-            gen_output = st.session_state.get("gen_run_output", "")
-            if gen_output:
-                st.text_area("generate_run output", gen_output, height=160)
-
-        start_cols = st.columns(2)
-        with start_cols[0]:
-            start_clicked = st.button("Start", disabled=job_running or not can_start)
-        with start_cols[1]:
-            stop_clicked = st.button("Stop", disabled=not job_running)
-
-        if start_clicked:
-            if not can_start:
-                st.error(jax_issue or "JAX is required for this configuration.")
-            elif job_running:
-                st.error("Optimization is already running.")
-            elif not opt_in_path:
-                st.error("Input run path is empty.")
-            else:
-                out_dir = _default_out_dir(tag)
-                try:
-                    job = start_opt_job(
-                        opt_in_path,
-                        out_dir,
-                        maxiter=maxiter,
-                        gtol=gtol,
-                        roi_r=roi_r_opt,
-                        roi_step=roi_step_opt,
-                        angle_model=angle_model,
-                        grad_backend=grad_backend,
-                        fourier_H=fourier_H,
-                        lambda0=lambda0,
-                        lambda_theta=lambda_theta,
-                        lambda_z=lambda_z,
-                        angle_init=angle_init,
-                        r_bound_mode=r_bound_mode,
-                        r_lower_delta_mm=r_lower_delta_mm,
-                        r_upper_delta_mm=r_upper_delta_mm,
-                        r_no_upper=r_no_upper,
-                        r_min_mm=r_min_mm,
-                        r_max_mm=r_max_mm,
-                        fix_center_radius_layers=fix_center_radius_layers,
-                        repo_root=ROOT,
-                    )
-                    st.session_state["opt_job"] = job
-                    st.session_state["opt_job_fix_center_radius_layers"] = fix_center_radius_layers
-                    st.success(f"Started optimization: {job.out_dir}")
-                except Exception as exc:
-                    st.error(f"Failed to start optimization: {exc}")
-
-        if stop_clicked and job is not None:
-            stop_opt_job(job)
-            st.warning("Terminate signal sent.")
-
-        auto_refresh = False
-        refresh_secs = 1.0
-        if job_running:
-            auto_refresh = st.checkbox("Auto-refresh log", value=True)
-            refresh_secs = float(
-                st.number_input(
-                    "Log refresh (s)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
-                )
-            )
-
-        if job is not None:
-            exit_code = poll_opt_job(job)
-            st.write(f"Status: {'running' if exit_code is None else f'exit {exit_code}'}")
-            st.write(f"Out dir: `{job.out_dir}`")
-            cmd = build_command(
-                opt_in_path,
-                job.out_dir,
-                maxiter=maxiter,
-                gtol=gtol,
-                roi_r=roi_r_opt,
-                roi_step=roi_step_opt,
-                angle_model=angle_model,
-                grad_backend=grad_backend,
-                fourier_H=fourier_H,
-                lambda0=lambda0,
-                lambda_theta=lambda_theta,
-                lambda_z=lambda_z,
-                angle_init=angle_init,
-                r_bound_mode=r_bound_mode,
-                r_lower_delta_mm=r_lower_delta_mm,
-                r_upper_delta_mm=r_upper_delta_mm,
-                r_no_upper=r_no_upper,
-                r_min_mm=r_min_mm,
-                r_max_mm=r_max_mm,
-                fix_center_radius_layers=fix_center_radius_layers,
-            )
-            st.code(" ".join(cmd))
-
-            fixed_layers = st.session_state.get("opt_job_fix_center_radius_layers")
-            if fixed_layers is not None:
-                st.write(f"Fixed center radius layers: {fixed_layers}")
-
-            log_text = tail_log(job.log_path, n_lines=200)
-            st.text_area("opt.log (tail)", log_text, height=240)
-
-            if exit_code is not None:
-                set_cols = st.columns(2)
-                with set_cols[0]:
-                    if st.button("Set optimized run"):
-                        st.session_state["pending_opt_path"] = str(job.out_dir)
-                        st.session_state["pending_opt_select"] = ""
-                        st.session_state["flash_message"] = "Optimized run path updated."
-                        st.rerun()
-                with set_cols[1]:
-                    if st.button("Clear job"):
-                        st.session_state["opt_job"] = None
-
-        if job_running and auto_refresh:
-            time.sleep(max(0.1, refresh_secs))
-            st.rerun()
 
 
 if __name__ == "__main__":

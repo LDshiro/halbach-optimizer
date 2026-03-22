@@ -51,6 +51,27 @@ def _load_meta(run_dir: Path) -> dict[str, Any]:
     return cast(dict[str, Any], data)
 
 
+def _load_beta_tilt_x_rk(run_dir: Path, *, R: int, K: int) -> NDArray[np.float64]:
+    results_path = run_dir / "results.npz"
+    if not results_path.is_file():
+        return np.zeros((R, K), dtype=np.float64)
+    try:
+        with np.load(results_path, allow_pickle=False) as data:
+            key: str | None = None
+            if "beta_tilt_x_opt" in data:
+                key = "beta_tilt_x_opt"
+            elif "beta_tilt_x" in data:
+                key = "beta_tilt_x"
+            if key is None:
+                return np.zeros((R, K), dtype=np.float64)
+            beta = np.asarray(data[key], dtype=np.float64)
+    except Exception:
+        return np.zeros((R, K), dtype=np.float64)
+    if beta.shape != (R, K):
+        return np.zeros((R, K), dtype=np.float64)
+    return beta
+
+
 def _parse_sc_cfg(sc_cfg: dict[str, Any]) -> dict[str, Any]:
     near_window = sc_cfg.get("near_window", {})
     if not isinstance(near_window, dict):
@@ -132,6 +153,8 @@ def compute_p_flat_self_consistent_jax(
     r0_rkn: NDArray[np.float64],
     geom: Geometry,
     sc_cfg: dict[str, Any],
+    *,
+    beta_tilt_x_rk: NDArray[np.float64] | None = None,
 ) -> NDArray[np.float64]:
     """
     Compute p_flat via self-consistent solver (JAX required).
@@ -142,10 +165,10 @@ def compute_p_flat_self_consistent_jax(
     from halbach.autodiff.jax_self_consistent import (
         _gl_double_delta_table_n2,
         _gl_double_delta_table_n3,
-        solve_p_easy_axis_near,
         solve_p_easy_axis_near_cellavg,
+        solve_p_easy_axis_near_from_u,
         solve_p_easy_axis_near_gl_double_mixed,
-        solve_p_easy_axis_near_multi_dipole,
+        solve_p_easy_axis_near_multi_dipole_from_u,
     )
 
     sc = _parse_sc_cfg(sc_cfg)
@@ -160,8 +183,29 @@ def compute_p_flat_self_consistent_jax(
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     r0_flat = np.asarray(r0_rkn, dtype=np.float64).reshape(-1, 3)
+    if beta_tilt_x_rk is None:
+        beta_flat = np.zeros_like(phi_flat)
+    else:
+        beta_rk = np.asarray(beta_tilt_x_rk, dtype=np.float64)
+        if beta_rk.shape != (int(geom.R), int(geom.K)):
+            raise ValueError(
+                f"beta_tilt_x_rk shape {beta_rk.shape} does not match {(int(geom.R), int(geom.K))}"
+            )
+        beta_rkn = np.broadcast_to(beta_rk[:, :, None], np.asarray(phi_rkn).shape)
+        beta_flat = np.asarray(beta_rkn, dtype=np.float64).reshape(-1)
+    has_beta = bool(np.max(np.abs(beta_flat)) > 0.0)
 
     phi_j = jnp.asarray(phi_flat, dtype=jnp.float64)
+    beta_j = jnp.asarray(beta_flat, dtype=jnp.float64)
+    cos_beta = jnp.cos(beta_j)
+    u_j = jnp.stack(
+        [
+            cos_beta * jnp.cos(phi_j),
+            cos_beta * jnp.sin(phi_j),
+            jnp.sin(beta_j),
+        ],
+        axis=1,
+    )
     r0_j = jnp.asarray(r0_flat, dtype=jnp.float64)
     nbr_idx_j = jnp.asarray(near.nbr_idx, dtype=jnp.int32)
     nbr_mask_j = jnp.asarray(near.nbr_mask, dtype=bool)
@@ -170,8 +214,8 @@ def compute_p_flat_self_consistent_jax(
         p_flat = jnp.full((phi_j.shape[0],), float(sc["p0"]), dtype=jnp.float64)
     else:
         if sc["near_kernel"] == "dipole":
-            p_flat = solve_p_easy_axis_near(
-                phi_j,
+            p_flat = solve_p_easy_axis_near_from_u(
+                u_j,
                 r0_j,
                 nbr_idx_j,
                 nbr_mask_j,
@@ -183,8 +227,8 @@ def compute_p_flat_self_consistent_jax(
                 omega=float(sc["omega"]),
             )
         elif sc["near_kernel"] == "multi-dipole":
-            p_flat = solve_p_easy_axis_near_multi_dipole(
-                phi_j,
+            p_flat = solve_p_easy_axis_near_multi_dipole_from_u(
+                u_j,
                 r0_j,
                 nbr_idx_j,
                 nbr_mask_j,
@@ -197,6 +241,10 @@ def compute_p_flat_self_consistent_jax(
                 omega=float(sc["omega"]),
             )
         elif sc["near_kernel"] == "cellavg":
+            if has_beta:
+                raise ValueError(
+                    "beta_tilt_x with self-consistent supports near_kernel only in {'dipole','multi-dipole'}"
+                )
             p_flat = solve_p_easy_axis_near_cellavg(
                 phi_j,
                 r0_j,
@@ -210,6 +258,10 @@ def compute_p_flat_self_consistent_jax(
                 omega=float(sc["omega"]),
             )
         elif sc["near_kernel"] == "gl-double-mixed":
+            if has_beta:
+                raise ValueError(
+                    "beta_tilt_x with self-consistent supports near_kernel only in {'dipole','multi-dipole'}"
+                )
             i_edge_np, j_edge_np = edges_from_near(near.nbr_idx, near.nbr_mask)
             idx_lo_np, idx_hi_np = _edge_partition_face_to_face(
                 i_edge_np,
@@ -266,6 +318,23 @@ def build_m_flat_from_phi_and_p(
     return np.asarray(p_flat[:, None] * u, dtype=np.float64)
 
 
+def build_m_flat_from_phi_beta_and_p(
+    phi_flat: NDArray[np.float64],
+    beta_flat: NDArray[np.float64],
+    p_flat: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    cos_beta = np.cos(beta_flat)
+    u = np.stack(
+        [
+            cos_beta * np.cos(phi_flat),
+            cos_beta * np.sin(phi_flat),
+            np.sin(beta_flat),
+        ],
+        axis=1,
+    )
+    return np.asarray(p_flat[:, None] * u, dtype=np.float64)
+
+
 def compute_b_and_b0_from_m_flat(
     m_flat: NDArray[np.float64],
     r0_flat: NDArray[np.float64],
@@ -315,6 +384,10 @@ def compute_m_flat_from_run(
         sc_cfg = sc_cfg_meta
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
+    beta_rk = _load_beta_tilt_x_rk(run_dir, R=int(geom.R), K=int(geom.K))
+    beta_rkn = np.broadcast_to(beta_rk[:, :, None], np.asarray(phi_rkn).shape)
+    beta_flat = np.asarray(beta_rkn, dtype=np.float64).reshape(-1)
+    has_beta = bool(np.max(np.abs(beta_flat)) > 0.0)
     if model_effective == "self-consistent-easy-axis":
         fp_expected = sc_cfg_fingerprint(sc_cfg)
         p_flat = None
@@ -333,7 +406,11 @@ def compute_m_flat_from_run(
                                 fp_saved = str(fp_raw.reshape(-1)[0])
                         else:
                             fp_saved = str(fp_raw)
-                        if fp_saved == fp_expected and p_candidate.shape == (phi_flat.size,):
+                        if (
+                            fp_saved == fp_expected
+                            and p_candidate.shape == (phi_flat.size,)
+                            and not has_beta
+                        ):
                             p_flat = p_candidate
                             sc_source = "saved"
             except Exception:
@@ -343,12 +420,18 @@ def compute_m_flat_from_run(
                 raise RuntimeError(
                     "self-consistent visualization requires JAX unless sc_p_flat is saved in results.npz"
                 )
-            p_flat = compute_p_flat_self_consistent_jax(phi_rkn, r0_rkn, geom, sc_cfg)
+            p_flat = compute_p_flat_self_consistent_jax(
+                phi_rkn,
+                r0_rkn,
+                geom,
+                sc_cfg,
+                beta_tilt_x_rk=beta_rk,
+            )
     else:
         p_flat = np.full(phi_flat.shape, float(m0), dtype=np.float64)
 
     assert p_flat is not None
-    m_flat = build_m_flat_from_phi_and_p(phi_flat, p_flat)
+    m_flat = build_m_flat_from_phi_beta_and_p(phi_flat, beta_flat, p_flat)
 
     debug: dict[str, Any] = {"model_effective": model_effective}
     if sc_cfg_override is not None:
@@ -379,6 +462,7 @@ def compute_m_flat_from_run(
                 sc_Nd=float(sc["Nd"]),
                 sc_p0=float(sc["p0"]),
                 sc_volume_mm3=float(sc["volume_mm3"]),
+                beta_tilt_x_enabled=has_beta,
             )
         )
         if sc["near_kernel"] == "gl-double-mixed":
@@ -391,6 +475,7 @@ __all__ = [
     "sc_cfg_fingerprint",
     "compute_p_flat_self_consistent_jax",
     "build_m_flat_from_phi_and_p",
+    "build_m_flat_from_phi_beta_and_p",
     "compute_b_and_b0_from_m_flat",
     "compute_m_flat_from_run",
 ]

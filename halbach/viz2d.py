@@ -7,7 +7,7 @@ from typing import Any, Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from halbach.angles_runtime import angle_model_from_run, phi_rkn_from_run
+from halbach.angles_runtime import angle_model_from_run, beta_tilt_x_rk_from_run, phi_rkn_from_run
 from halbach.constants import FACTOR, m0, phi0
 from halbach.magnetization_runtime import (
     compute_b_and_b0_from_m_flat,
@@ -221,20 +221,44 @@ def _compute_error_map_impl(
     else:
         model = angle_model_from_run(run)
         if model == "legacy-alpha":
-            Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
-                run.results.alphas,
-                run.results.r_bases,
-                run.geometry.theta,
-                run.geometry.sin2,
-                run.geometry.cth,
-                run.geometry.sth,
-                run.geometry.z_layers,
-                run.geometry.ring_offsets,
-                pts,
-                FACTOR,
-                phi0,
-                m0,
-            )
+            beta_rk = beta_tilt_x_rk_from_run(run)
+            beta_enabled = bool(np.max(np.abs(beta_rk)) > 0.0)
+            debug["beta_tilt_x_enabled"] = beta_enabled
+            if beta_enabled:
+                phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+                beta_rkn = np.broadcast_to(beta_rk[:, :, None], phi_rkn.shape)
+                cos_beta = np.cos(beta_rkn)
+                m_flat = m0 * np.stack(
+                    [
+                        cos_beta * np.cos(phi_rkn),
+                        cos_beta * np.sin(phi_rkn),
+                        np.sin(beta_rkn),
+                    ],
+                    axis=-1,
+                ).reshape(-1, 3)
+                r0_rkn = _build_r0_rkn(run)
+                r0_flat = r0_rkn.reshape(-1, 3)
+                Bx, By, Bz, B0x, B0y, B0z = compute_b_and_b0_from_m_flat(
+                    m_flat,
+                    r0_flat,
+                    pts,
+                    factor=FACTOR,
+                )
+            else:
+                Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
+                    run.results.alphas,
+                    run.results.r_bases,
+                    run.geometry.theta,
+                    run.geometry.sin2,
+                    run.geometry.cth,
+                    run.geometry.sth,
+                    run.geometry.z_layers,
+                    run.geometry.ring_offsets,
+                    pts,
+                    FACTOR,
+                    phi0,
+                    m0,
+                )
         else:
             phi_rkn = phi_rkn_from_run(run, phi0=phi0)
             Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(

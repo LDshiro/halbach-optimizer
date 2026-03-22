@@ -32,6 +32,19 @@ def _pick_extras_array(run: RunBundle, keys: list[str]) -> NDArray[np.float64] |
     return None
 
 
+def beta_tilt_x_rk_from_run(run: RunBundle) -> NDArray[np.float64]:
+    """Return beta_tilt_x per ring/layer with shape (R, K), defaulting to zeros."""
+    R = int(run.geometry.R)
+    K = int(run.geometry.K)
+    beta = _pick_extras_array(run, ["beta_tilt_x_opt", "beta_tilt_x"])
+    if beta is None:
+        return np.zeros((R, K), dtype=np.float64)
+    beta_arr = np.asarray(beta, dtype=np.float64)
+    if beta_arr.shape != (R, K):
+        raise ValueError(f"beta_tilt_x shape {beta_arr.shape} does not match expected {(R, K)}")
+    return beta_arr
+
+
 def phi_rkn_from_run(run: RunBundle, *, phi0: float = PHI0_DEFAULT) -> NDArray[np.float64]:
     geom = run.geometry
     N = int(geom.N)
@@ -84,4 +97,30 @@ def phi_rkn_from_run(run: RunBundle, *, phi0: float = PHI0_DEFAULT) -> NDArray[n
     raise ValueError(f"Unsupported angle_model: {model}")
 
 
-__all__ = ["AngleModelKind", "angle_model_from_run", "phi_rkn_from_run"]
+def u_rkn_from_run(run: RunBundle, *, phi0: float = PHI0_DEFAULT) -> NDArray[np.float64]:
+    """
+    Return unit magnetization vectors with shape (R, K, N, 3).
+
+    beta_tilt_x uses elevation-style tilt:
+        ux = cos(beta) * cos(phi)
+        uy = cos(beta) * sin(phi)
+        uz = sin(beta)
+    """
+    phi_rkn = phi_rkn_from_run(run, phi0=phi0)
+    beta_rk = beta_tilt_x_rk_from_run(run)
+    beta_rkn = np.broadcast_to(beta_rk[:, :, None], phi_rkn.shape)
+    cos_beta = np.cos(beta_rkn)
+    ux = cos_beta * np.cos(phi_rkn)
+    uy = cos_beta * np.sin(phi_rkn)
+    uz = np.sin(beta_rkn)
+    u = np.stack([ux, uy, uz], axis=-1)
+    return np.asarray(u, dtype=np.float64)
+
+
+__all__ = [
+    "AngleModelKind",
+    "angle_model_from_run",
+    "beta_tilt_x_rk_from_run",
+    "phi_rkn_from_run",
+    "u_rkn_from_run",
+]
