@@ -27,6 +27,10 @@ from halbach.geom import (
     pack_x,
     unpack_x,
 )
+from halbach.magnet_export import (
+    build_magnet_export_payload,
+    equivalent_cube_dimensions_from_volume_mm3,
+)
 from halbach.magnetization_runtime import compute_p_flat_self_consistent_jax, sc_cfg_fingerprint
 from halbach.objective import objective_with_grads_fixed
 from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
@@ -1641,7 +1645,15 @@ def run_optimize(args: argparse.Namespace) -> int:
     sc_cfg_fp: str | None = None
     phi_rkn_final: NDArray[np.float64] | None = None
     r0_rkn_final: NDArray[np.float64] | None = None
+    beta_rk_final = _beta_rk_from_final(beta_tilt_x_opt, geom)
+    magnet_dimensions_m: NDArray[np.float64] | None = None
+    magnet_dimensions_mm: NDArray[np.float64] | None = None
+    magnet_dimensions_source: str | None = None
     if mag_model_effective == "self-consistent-easy-axis":
+        magnet_dimensions_m, magnet_dimensions_mm = equivalent_cube_dimensions_from_volume_mm3(
+            float(args.sc_volume_mm3)
+        )
+        magnet_dimensions_source = "self-consistent-volume-equivalent-cube"
         try:
             sc_cfg_fp = sc_cfg_fingerprint(sc_cfg_payload)
             phi_rkn = _phi_rkn_from_final(
@@ -1654,7 +1666,6 @@ def run_optimize(args: argparse.Namespace) -> int:
                 phi0_val=phi0,
             )
             r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
-            beta_rk = _beta_rk_from_final(beta_tilt_x_opt, geom)
             phi_rkn_final = phi_rkn
             r0_rkn_final = r0_rkn
             sc_p_flat = compute_p_flat_self_consistent_jax(
@@ -1662,13 +1673,32 @@ def run_optimize(args: argparse.Namespace) -> int:
                 r0_rkn,
                 geom,
                 sc_cfg_payload,
-                beta_tilt_x_rk=beta_rk,
+                beta_tilt_x_rk=beta_rk_final,
                 ring_active_mask=ring_active_mask,
             )
         except Exception as exc:
             logger.warning("sc_p_flat save skipped: %s", exc)
             sc_p_flat = None
             sc_cfg_fp = None
+    if phi_rkn_final is None or r0_rkn_final is None:
+        phi_rkn_final = _phi_rkn_from_final(
+            angle_model,
+            geom,
+            al_opt,
+            delta_rep_opt,
+            coeffs_opt,
+            fourier_H=fourier_H,
+            phi0_val=phi0,
+        )
+        r0_rkn_final = _build_r0_rkn_from_r_bases(rb_opt, geom)
+    magnet_export_payload = build_magnet_export_payload(
+        phi_rkn_final,
+        r0_rkn_final,
+        ring_active_mask=ring_active_mask,
+        beta_rk=beta_rk_final,
+        dimensions_m=magnet_dimensions_m,
+        dimensions_mm=magnet_dimensions_mm,
+    )
 
     logger.info("save start")
     t_save = perf_counter()
@@ -1688,6 +1718,7 @@ def run_optimize(args: argparse.Namespace) -> int:
         Jn_hist=Jn_hist,
         B0_hist=B0_hist,
     )
+    save_payload.update(magnet_export_payload)
     if sc_p_flat is not None and sc_cfg_fp is not None:
         save_payload["sc_p_flat"] = sc_p_flat
         save_payload["sc_cfg_fingerprint"] = sc_cfg_fp
@@ -1760,6 +1791,29 @@ def run_optimize(args: argparse.Namespace) -> int:
             model_requested=mag_model_requested,
             model_effective=mag_model_effective,
             self_consistent=sc_cfg_payload,
+        ),
+        fusion360_export=dict(
+            coordinates_unit="m",
+            angles_unit="rad",
+            active_magnets_only=True,
+            keys=dict(
+                centers="magnet_centers_m",
+                phi="magnet_phi_rad",
+                beta="magnet_beta_rad",
+                u="magnet_u",
+                ring_id="magnet_ring_id",
+                layer_id="magnet_layer_id",
+                theta_id="magnet_theta_id",
+                dimensions_m="magnet_dimensions_m",
+                dimensions_mm="magnet_dimensions_mm",
+            ),
+            magnet_dimensions_source=magnet_dimensions_source,
+            magnet_dimensions_m=(
+                None if magnet_dimensions_m is None else magnet_dimensions_m.tolist()
+            ),
+            magnet_dimensions_mm=(
+                None if magnet_dimensions_mm is None else magnet_dimensions_mm.tolist()
+            ),
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
         fix_radius_layer_mode=str(args.fix_radius_layer_mode),

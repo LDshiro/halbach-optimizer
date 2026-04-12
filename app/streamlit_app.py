@@ -5,13 +5,23 @@ import json
 import re
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+
+from app.gui_config import (
+    GUI_DEFAULTS_PATH,
+    default_gui_config_export_path,
+    load_gui_config_values,
+    merge_gui_config_values,
+    normalize_gui_choice,
+    write_gui_config,
+)
 
 if TYPE_CHECKING:
     from halbach.perturbation_eval import PerturbationResult
@@ -26,6 +36,105 @@ if str(ROOT) not in sys.path:
 
 DEFAULT_HUMAN_OVERLAY_OBJ = "10688_GenericMale_v2.obj"
 DEFAULT_COIL_OVERLAY_DIR = "coil"
+_GUI_CONFIG_DEFAULTS_STATE_KEY = "_gui_config_defaults"
+_GUI_CONFIG_WARNING_STATE_KEY = "_gui_config_warnings"
+_GUI_CONFIG_WARNED_KEYS_STATE_KEY = "_gui_config_warned_keys"
+ChoiceT = TypeVar("ChoiceT")
+
+
+def _get_gui_defaults() -> dict[str, object]:
+    defaults = st.session_state.get(_GUI_CONFIG_DEFAULTS_STATE_KEY)
+    if defaults is None:
+        defaults = load_gui_config_values(GUI_DEFAULTS_PATH)
+        st.session_state[_GUI_CONFIG_DEFAULTS_STATE_KEY] = defaults
+    return cast(dict[str, object], defaults)
+
+
+def _seed_gui_state(defaults: Mapping[str, object]) -> None:
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _queue_gui_config_warning(key: str, message: str) -> None:
+    warned_keys = cast(
+        list[str], st.session_state.setdefault(_GUI_CONFIG_WARNED_KEYS_STATE_KEY, [])
+    )
+    if key in warned_keys:
+        return
+    warned_keys.append(key)
+    warnings = cast(list[str], st.session_state.setdefault(_GUI_CONFIG_WARNING_STATE_KEY, []))
+    warnings.append(message)
+
+
+def _consume_gui_config_warnings() -> list[str]:
+    warnings = st.session_state.pop(_GUI_CONFIG_WARNING_STATE_KEY, [])
+    if not isinstance(warnings, list):
+        return []
+    return [str(message) for message in warnings]
+
+
+def _ensure_gui_choice_state(
+    key: str,
+    options: Sequence[ChoiceT],
+    *,
+    fallback: ChoiceT,
+    label: str,
+    warn_on_blank: bool = False,
+) -> None:
+    current = st.session_state.get(key)
+    resolved, should_warn = normalize_gui_choice(
+        current,
+        options,
+        fallback=fallback,
+        warn_on_blank=warn_on_blank,
+    )
+    if current == resolved:
+        return
+    st.session_state[key] = resolved
+    if should_warn:
+        _queue_gui_config_warning(
+            key,
+            f"{label} config value {current!r} is not available; falling back to {resolved!r}.",
+        )
+
+
+def _gui_selectbox(
+    label: str,
+    options: Sequence[ChoiceT],
+    *,
+    key: str,
+    fallback: ChoiceT,
+    warn_on_blank: bool = False,
+    **kwargs: Any,
+) -> ChoiceT:
+    _ensure_gui_choice_state(
+        key,
+        options,
+        fallback=fallback,
+        label=label,
+        warn_on_blank=warn_on_blank,
+    )
+    return cast(ChoiceT, st.selectbox(label, options, key=key, **kwargs))
+
+
+def _gui_radio(
+    label: str,
+    options: Sequence[ChoiceT],
+    *,
+    key: str,
+    fallback: ChoiceT,
+    warn_on_blank: bool = False,
+    **kwargs: Any,
+) -> ChoiceT:
+    _ensure_gui_choice_state(
+        key,
+        options,
+        fallback=fallback,
+        label=label,
+        warn_on_blank=warn_on_blank,
+    )
+    return cast(ChoiceT, st.radio(label, options, key=key, **kwargs))
 
 
 def _scan_runs(runs_dir: Path) -> list[str]:
@@ -434,25 +543,43 @@ def _default_variation_sc_cfg(run: RunBundle | None) -> dict[str, Any]:
 
 
 def _seed_variation_sc_state(run_key: str, defaults: dict[str, Any]) -> None:
+    near_window = cast(dict[str, Any], defaults.get("near_window", {}))
+    seed_values: dict[str, object] = {
+        "variation_sc_chi": float(defaults.get("chi", 0.0)),
+        "variation_sc_Nd": float(defaults.get("Nd", 1.0 / 3.0)),
+        "variation_sc_p0": float(defaults.get("p0", 1.0)),
+        "variation_sc_volume_mm3": float(defaults.get("volume_mm3", 1000.0)),
+        "variation_sc_iters": int(defaults.get("iters", 30)),
+        "variation_sc_omega": float(defaults.get("omega", 0.6)),
+        "variation_sc_near_wr": int(near_window.get("wr", 0)),
+        "variation_sc_near_wz": int(near_window.get("wz", 1)),
+        "variation_sc_near_wphi": int(near_window.get("wphi", 2)),
+        "variation_sc_near_kernel": str(defaults.get("near_kernel", "dipole")),
+        "variation_sc_subdip_n": int(defaults.get("subdip_n", 2)),
+        "variation_sc_gl_order": (
+            str(defaults["gl_order"])
+            if "gl_order" in defaults and defaults["gl_order"] is not None
+            else "mixed (2/3)"
+        ),
+    }
     if st.session_state.get("variation_sc_seed_run") == run_key:
         return
-    near_window = cast(dict[str, Any], defaults.get("near_window", {}))
-    st.session_state["variation_sc_chi"] = float(defaults.get("chi", 0.0))
-    st.session_state["variation_sc_Nd"] = float(defaults.get("Nd", 1.0 / 3.0))
-    st.session_state["variation_sc_p0"] = float(defaults.get("p0", 1.0))
-    st.session_state["variation_sc_volume_mm3"] = float(defaults.get("volume_mm3", 1000.0))
-    st.session_state["variation_sc_iters"] = int(defaults.get("iters", 30))
-    st.session_state["variation_sc_omega"] = float(defaults.get("omega", 0.6))
-    st.session_state["variation_sc_near_wr"] = int(near_window.get("wr", 0))
-    st.session_state["variation_sc_near_wz"] = int(near_window.get("wz", 1))
-    st.session_state["variation_sc_near_wphi"] = int(near_window.get("wphi", 2))
-    st.session_state["variation_sc_near_kernel"] = str(defaults.get("near_kernel", "dipole"))
-    st.session_state["variation_sc_subdip_n"] = int(defaults.get("subdip_n", 2))
-    if "gl_order" in defaults and defaults["gl_order"] is not None:
-        st.session_state["variation_sc_gl_order"] = str(defaults["gl_order"])
+
+    should_seed = False
+    previous_seed = st.session_state.get("variation_sc_seed_values")
+    if isinstance(previous_seed, dict):
+        should_seed = all(
+            st.session_state.get(key) == value for key, value in previous_seed.items()
+        )
     else:
-        st.session_state["variation_sc_gl_order"] = "mixed (2/3)"
+        should_seed = not any(key in st.session_state for key in seed_values)
+
+    if should_seed:
+        for key, value in seed_values.items():
+            st.session_state[key] = value
+
     st.session_state["variation_sc_seed_run"] = run_key
+    st.session_state["variation_sc_seed_values"] = seed_values
 
 
 def _try_load(
@@ -559,6 +686,13 @@ def main() -> None:
     st.set_page_config(page_title="Halbach Run Viewer", layout="wide")
     st.title("Halbach Run Viewer")
 
+    try:
+        gui_defaults = _get_gui_defaults()
+    except Exception as exc:
+        st.error(f"GUI config load error: {exc}")
+        return
+    _seed_gui_state(gui_defaults)
+
     runs_dir = ROOT / "runs"
     candidates = _scan_runs(runs_dir)
 
@@ -579,10 +713,20 @@ def main() -> None:
             st.caption(f"Found {len(candidates)} run(s) under {runs_dir}")
         else:
             st.caption(f"No runs found under {runs_dir}")
-        init_select = st.selectbox("Initial run (runs/)", [""] + candidates, key="init_select")
-        init_path_text = st.text_input("Initial run path", value="", key="init_path")
-        opt_select = st.selectbox("Optimized run (runs/)", [""] + candidates, key="opt_select")
-        opt_path_text = st.text_input("Optimized run path", value="", key="opt_path")
+        init_select = _gui_selectbox(
+            "Initial run (runs/)",
+            [""] + candidates,
+            key="init_select",
+            fallback="",
+        )
+        init_path_text = st.text_input("Initial run path", key="init_path")
+        opt_select = _gui_selectbox(
+            "Optimized run (runs/)",
+            [""] + candidates,
+            key="opt_select",
+            fallback="",
+        )
+        opt_path_text = st.text_input("Optimized run path", key="opt_path")
         if st.button("Reload cache"):
             st.cache_data.clear()
 
@@ -592,9 +736,9 @@ def main() -> None:
                 "ROI radius (m)",
                 min_value=0.001,
                 max_value=0.2,
-                value=0.14,
                 step=0.001,
                 format="%.4f",
+                key="map_roi_radius_m",
             )
         )
         step = float(
@@ -602,32 +746,36 @@ def main() -> None:
                 "Step (m)",
                 min_value=0.001,
                 max_value=0.02,
-                value=0.002,
                 step=0.001,
                 format="%.4f",
+                key="map_step_m",
             )
         )
-        auto_limit = st.checkbox("Auto ppm limit", value=False)
+        auto_limit = st.checkbox("Auto ppm limit", key="map_auto_limit")
         ppm_limit: float | None
         if auto_limit:
             ppm_limit = None
         else:
             ppm_limit = float(
                 st.number_input(
-                    "PPM limit", min_value=5.0, max_value=20000.0, value=5000.0, step=500.0
+                    "PPM limit", min_value=5.0, max_value=20000.0, step=500.0, key="map_ppm_limit"
                 )
             )
         contour_level = float(
             st.number_input(
-                "Contour level (ppm)", min_value=1.0, max_value=20000.0, value=1000.0, step=100.0
+                "Contour level (ppm)",
+                min_value=1.0,
+                max_value=20000.0,
+                step=100.0,
+                key="map_contour_level_ppm",
             )
         )
         st.header("2D Magnetization Eval")
-        mag_model_eval = st.selectbox(
+        mag_model_eval = _gui_selectbox(
             "Magnetization model (2D)",
             ["auto", "fixed", "self-consistent-easy-axis"],
-            index=0,
             key="map_mag_model_eval",
+            fallback="auto",
         )
         sc_cfg_eval: dict[str, object] | None = None
         sc_cfg_key = ""
@@ -635,7 +783,11 @@ def main() -> None:
             with st.expander("Self-consistent eval settings", expanded=True):
                 sc_chi = float(
                     st.number_input(
-                        "chi (2D eval)", min_value=0.0, max_value=10.0, value=0.0, step=0.01
+                        "chi (2D eval)",
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.01,
+                        key="map_sc_chi",
                     )
                 )
                 sc_Nd = float(
@@ -643,13 +795,17 @@ def main() -> None:
                         "Nd (2D eval)",
                         min_value=0.0,
                         max_value=1.0,
-                        value=1.0 / 3.0,
                         step=0.01,
+                        key="map_sc_Nd",
                     )
                 )
                 sc_p0 = float(
                     st.number_input(
-                        "p0 (2D eval)", min_value=0.0, max_value=10.0, value=1.0, step=0.01
+                        "p0 (2D eval)",
+                        min_value=0.0,
+                        max_value=10.0,
+                        step=0.01,
+                        key="map_sc_p0",
                     )
                 )
                 sc_volume_mm3 = float(
@@ -657,33 +813,61 @@ def main() -> None:
                         "volume_mm3 (2D eval)",
                         min_value=1.0,
                         max_value=1e6,
-                        value=1000.0,
                         step=10.0,
+                        key="map_sc_volume_mm3",
                     )
                 )
                 sc_iters = int(
-                    st.number_input("iters (2D eval)", min_value=1, max_value=500, value=30, step=1)
+                    st.number_input(
+                        "iters (2D eval)",
+                        min_value=1,
+                        max_value=500,
+                        step=1,
+                        key="map_sc_iters",
+                    )
                 )
                 sc_omega = float(
                     st.number_input(
-                        "omega (2D eval)", min_value=0.01, max_value=1.0, value=0.6, step=0.01
+                        "omega (2D eval)",
+                        min_value=0.01,
+                        max_value=1.0,
+                        step=0.01,
+                        key="map_sc_omega",
                     )
                 )
                 st.markdown("**Near window (2D eval)**")
                 sc_near_wr = int(
-                    st.number_input("wr (2D eval)", min_value=0, max_value=10, value=0, step=1)
+                    st.number_input(
+                        "wr (2D eval)",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="map_sc_near_wr",
+                    )
                 )
                 sc_near_wz = int(
-                    st.number_input("wz (2D eval)", min_value=0, max_value=10, value=1, step=1)
+                    st.number_input(
+                        "wz (2D eval)",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="map_sc_near_wz",
+                    )
                 )
                 sc_near_wphi = int(
-                    st.number_input("wphi (2D eval)", min_value=0, max_value=10, value=2, step=1)
+                    st.number_input(
+                        "wphi (2D eval)",
+                        min_value=0,
+                        max_value=10,
+                        step=1,
+                        key="map_sc_near_wphi",
+                    )
                 )
-                sc_near_kernel = st.selectbox(
+                sc_near_kernel = _gui_selectbox(
                     "near kernel (2D eval)",
                     ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
-                    index=0,
                     key="map_sc_near_kernel",
+                    fallback="dipole",
                 )
                 sc_subdip_n = 2
                 if sc_near_kernel == "multi-dipole":
@@ -692,17 +876,17 @@ def main() -> None:
                             "subdip_n (2D eval)",
                             min_value=2,
                             max_value=10,
-                            value=2,
                             step=1,
+                            key="map_sc_subdip_n",
                         )
                     )
                 sc_gl_order: int | None = None
                 if sc_near_kernel == "gl-double-mixed":
-                    gl_choice = st.selectbox(
+                    gl_choice = _gui_selectbox(
                         "gl order (2D eval)",
                         ["mixed (2/3)", "2", "3"],
-                        index=0,
                         key="map_sc_gl_order",
+                        fallback="mixed (2/3)",
                     )
                     if gl_choice in ("2", "3"):
                         sc_gl_order = int(gl_choice)
@@ -726,18 +910,41 @@ def main() -> None:
                 )
 
         st.header("3D Settings")
-        view_target = st.radio("3D run", ["initial", "optimized"], index=1)
-        mode = cast(
-            PlotlyMode, st.selectbox("Mode", ["fast", "pretty", "cubes", "cubes_arrows"], index=0)
+        view_target = _gui_radio(
+            "3D run",
+            ["initial", "optimized"],
+            key="view_target",
+            fallback="optimized",
         )
-        stride = int(st.number_input("Stride", min_value=1, max_value=64, value=2, step=1))
-        hide_x_negative = st.checkbox("Hide x < 0", value=False)
+        mode = cast(
+            PlotlyMode,
+            _gui_selectbox(
+                "Mode",
+                ["fast", "pretty", "cubes", "cubes_arrows"],
+                key="view_mode",
+                fallback="fast",
+            ),
+        )
+        stride = int(
+            st.number_input("Stride", min_value=1, max_value=64, step=1, key="view_stride")
+        )
+        hide_x_negative = st.checkbox("Hide x < 0", key="view_hide_x_negative")
         magnet_size_mm = float(
-            st.number_input("Magnet size (mm)", min_value=1.0, max_value=50.0, value=20.0, step=1.0)
+            st.number_input(
+                "Magnet size (mm)",
+                min_value=1.0,
+                max_value=50.0,
+                step=1.0,
+                key="view_magnet_size_mm",
+            )
         )
         magnet_thickness_mm = float(
             st.number_input(
-                "Magnet thickness (mm)", min_value=0.5, max_value=20.0, value=10.0, step=0.5
+                "Magnet thickness (mm)",
+                min_value=0.5,
+                max_value=20.0,
+                step=0.5,
+                key="view_magnet_thickness_mm",
             )
         )
         arrow_length_mm = float(
@@ -745,8 +952,8 @@ def main() -> None:
                 "Arrow length (mm)",
                 min_value=1.0,
                 max_value=200.0,
-                value=30.0,
                 step=1.0,
+                key="view_arrow_length_mm",
             )
         )
         arrow_head_angle_deg = float(
@@ -754,15 +961,16 @@ def main() -> None:
                 "Arrow head angle (deg)",
                 min_value=5.0,
                 max_value=90.0,
-                value=30.0,
                 step=1.0,
+                key="view_arrow_head_angle_deg",
             )
         )
         magnet_surface_palette = _magnet_surface_color_options()
-        magnet_surface_label = st.selectbox(
+        magnet_surface_label = _gui_selectbox(
             "Magnet surface color",
             list(magnet_surface_palette.keys()),
-            index=0,
+            key="view_magnet_surface_label",
+            fallback="Current gray",
         )
         magnet_surface_color = magnet_surface_palette[magnet_surface_label]
 
@@ -1005,11 +1213,11 @@ def main() -> None:
                 )
 
                 camera_presets = _camera_presets()
-                preset = st.selectbox(
+                preset = _gui_selectbox(
                     "Camera preset",
                     list(camera_presets.keys()),
-                    index=0,
                     key="compare_camera_preset",
+                    fallback="Isometric",
                 )
                 scene_camera = camera_presets[preset]
 
@@ -1062,18 +1270,17 @@ def main() -> None:
         st.caption(
             "Overlay a Wavefront OBJ body mesh on top of the current magnet layout for fit and scale checks."
         )
-        overlay_run_target = st.radio(
+        overlay_run_target = _gui_radio(
             "Overlay run",
             ["initial", "optimized"],
-            index=1,
-            horizontal=True,
             key="human_overlay_run_target",
+            fallback="optimized",
+            horizontal=True,
         )
         overlay_run = init_run if overlay_run_target == "initial" else opt_run
 
         obj_path_input = st.text_input(
             "OBJ path",
-            value=DEFAULT_HUMAN_OVERLAY_OBJ,
             key="human_overlay_obj_path",
         )
         overlay_obj_path = _resolve_human_overlay_obj_path(obj_path_input)
@@ -1081,11 +1288,11 @@ def main() -> None:
 
         overlay_cols = st.columns(3)
         with overlay_cols[0]:
-            overlay_unit = st.selectbox(
+            overlay_unit = _gui_selectbox(
                 "OBJ unit",
                 ["mm", "cm", "m"],
-                index=1,
                 key="human_overlay_unit",
+                fallback="cm",
             )
         with overlay_cols[1]:
             overlay_opacity = float(
@@ -1093,7 +1300,6 @@ def main() -> None:
                     "Body opacity",
                     min_value=0.05,
                     max_value=1.0,
-                    value=0.35,
                     step=0.05,
                     key="human_overlay_opacity",
                 )
@@ -1104,7 +1310,6 @@ def main() -> None:
                     "Uniform scale",
                     min_value=0.01,
                     max_value=100.0,
-                    value=1.0,
                     step=0.01,
                     key="human_overlay_scale",
                 )
@@ -1118,7 +1323,6 @@ def main() -> None:
                     "Translate X (m)",
                     min_value=-5.0,
                     max_value=5.0,
-                    value=0.0,
                     step=0.01,
                     format="%.3f",
                     key="human_overlay_tx_m",
@@ -1129,7 +1333,6 @@ def main() -> None:
                     "Rotate X (deg)",
                     min_value=-180.0,
                     max_value=180.0,
-                    value=0.0,
                     step=1.0,
                     key="human_overlay_rx_deg",
                 )
@@ -1140,7 +1343,6 @@ def main() -> None:
                     "Translate Y (m)",
                     min_value=-5.0,
                     max_value=5.0,
-                    value=0.0,
                     step=0.01,
                     format="%.3f",
                     key="human_overlay_ty_m",
@@ -1151,7 +1353,6 @@ def main() -> None:
                     "Rotate Y (deg)",
                     min_value=-180.0,
                     max_value=180.0,
-                    value=0.0,
                     step=1.0,
                     key="human_overlay_ry_deg",
                 )
@@ -1162,7 +1363,6 @@ def main() -> None:
                     "Translate Z (m)",
                     min_value=-5.0,
                     max_value=5.0,
-                    value=0.0,
                     step=0.01,
                     format="%.3f",
                     key="human_overlay_tz_m",
@@ -1173,52 +1373,46 @@ def main() -> None:
                     "Rotate Z (deg)",
                     min_value=-180.0,
                     max_value=180.0,
-                    value=0.0,
                     step=1.0,
                     key="human_overlay_rz_deg",
                 )
             )
 
         camera_presets = _camera_presets()
-        overlay_camera_preset = st.selectbox(
+        overlay_camera_preset = _gui_selectbox(
             "Camera preset",
             list(camera_presets.keys()),
-            index=0,
             key="human_overlay_camera_preset",
+            fallback="Isometric",
         )
-        show_coil_overlay = st.checkbox(
-            "Show coil overlay",
-            value=True,
-            key="human_overlay_show_coil",
-        )
+        show_coil_overlay = st.checkbox("Show coil overlay", key="human_overlay_show_coil")
         coil_candidates = _scan_coil_npz_files(ROOT / DEFAULT_COIL_OVERLAY_DIR)
         coil_selected = ""
         coil_line_width = 4.0
         coil_rotation_x_deg = 0
         if show_coil_overlay:
             if coil_candidates:
-                coil_selected = st.selectbox(
+                coil_selected = _gui_selectbox(
                     "Coil file",
                     coil_candidates,
-                    index=0,
                     key="human_overlay_coil_file",
+                    fallback=coil_candidates[0],
                 )
                 coil_line_width = float(
                     st.number_input(
                         "Coil line width",
                         min_value=1.0,
                         max_value=12.0,
-                        value=4.0,
                         step=0.5,
                         key="human_overlay_coil_line_width",
                     )
                 )
                 coil_rotation_x_deg = int(
-                    st.selectbox(
+                    _gui_selectbox(
                         "Coil X rotation",
                         [0, 90, 180, 270],
-                        index=0,
                         key="human_overlay_coil_rotation_x_deg",
+                        fallback=0,
                     )
                 )
             else:
@@ -1351,18 +1545,17 @@ def main() -> None:
             "One realization: per-magnet amplitude/angle perturbation + self-consistent solve, "
             "ROI vectors and XY(z=0) map export."
         )
-        variation_source = st.radio(
+        variation_source = _gui_radio(
             "Run source",
             ["initial", "optimized", "custom"],
-            index=1,
             key="variation_run_source",
+            fallback="optimized",
             horizontal=True,
         )
         variation_custom_path = ""
         if variation_source == "custom":
             variation_custom_path = st.text_input(
                 "Custom run path",
-                value="",
                 key="variation_custom_path",
             )
         if variation_source == "initial":
@@ -1396,7 +1589,6 @@ def main() -> None:
                         "sigma_rel_pct (%)",
                         min_value=0.0,
                         max_value=100.0,
-                        value=2.0,
                         step=0.1,
                         key="variation_sigma_rel_pct",
                     )
@@ -1406,7 +1598,6 @@ def main() -> None:
                         "sigma_phi_deg (deg)",
                         min_value=0.0,
                         max_value=180.0,
-                        value=1.0,
                         step=0.1,
                         key="variation_sigma_phi_deg",
                     )
@@ -1416,7 +1607,6 @@ def main() -> None:
                         "seed",
                         min_value=0,
                         max_value=2_147_483_647,
-                        value=1234,
                         step=1,
                         key="variation_seed",
                     )
@@ -1427,7 +1617,6 @@ def main() -> None:
                         "ROI radius (m)",
                         min_value=0.001,
                         max_value=0.5,
-                        value=0.14,
                         step=0.001,
                         format="%.4f",
                         key="variation_roi_radius_m",
@@ -1438,7 +1627,6 @@ def main() -> None:
                         "ROI samples (Fibonacci)",
                         min_value=1,
                         max_value=200000,
-                        value=512,
                         step=1,
                         key="variation_roi_samples",
                     )
@@ -1449,7 +1637,6 @@ def main() -> None:
                         "Map radius (m)",
                         min_value=0.001,
                         max_value=0.5,
-                        value=0.14,
                         step=0.001,
                         format="%.4f",
                         key="variation_map_radius_m",
@@ -1460,7 +1647,6 @@ def main() -> None:
                         "Map step (m)",
                         min_value=0.001,
                         max_value=0.05,
-                        value=0.002,
                         step=0.001,
                         format="%.4f",
                         key="variation_map_step_m",
@@ -1550,11 +1736,11 @@ def main() -> None:
                         key="variation_sc_near_wphi",
                     )
                 )
-                sc_kernel_var = st.selectbox(
+                sc_kernel_var = _gui_selectbox(
                     "near kernel",
                     ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
-                    index=0,
                     key="variation_sc_near_kernel",
+                    fallback="dipole",
                 )
                 sc_subdip_n_var = 2
                 if sc_kernel_var == "multi-dipole":
@@ -1571,11 +1757,11 @@ def main() -> None:
                     sc_subdip_n_var = int(st.session_state.get("variation_sc_subdip_n", 2))
                 sc_gl_order_var: int | None = None
                 if sc_kernel_var == "gl-double-mixed":
-                    gl_choice_var = st.selectbox(
+                    gl_choice_var = _gui_selectbox(
                         "gl order",
                         ["mixed (2/3)", "2", "3"],
-                        index=0,
                         key="variation_sc_gl_order",
+                        fallback="mixed (2/3)",
                     )
                     if gl_choice_var in ("2", "3"):
                         sc_gl_order_var = int(gl_choice_var)
@@ -1702,7 +1888,6 @@ def main() -> None:
                 with save_cols[0]:
                     save_tag_var = st.text_input(
                         "Save tag",
-                        value=f"seed{seed}",
                         key="variation_save_tag",
                     )
                 with save_cols[1]:
@@ -1739,11 +1924,11 @@ def main() -> None:
 
     with tabs[5]:
         st.subheader("Optimize")
-        opt_mode = st.selectbox(
+        opt_mode = _gui_selectbox(
             "Optimization mode",
             ["L-BFGS-B", "DC/CCP (self-consistent linear)"],
-            index=0,
             key="opt_mode",
+            fallback="L-BFGS-B",
         )
         if opt_mode == "L-BFGS-B":
             st.subheader("Optimize (L-BFGS-B)")
@@ -1767,10 +1952,15 @@ def main() -> None:
             exit_code = poll_opt_job(job) if job is not None else None
             job_running = job is not None and exit_code is None
 
-            input_choice = st.radio("Input run", ["initial", "optimized", "custom"], index=0)
+            input_choice = _gui_radio(
+                "Input run",
+                ["initial", "optimized", "custom"],
+                key="opt_input_choice",
+                fallback="initial",
+            )
             custom_input = ""
             if input_choice == "custom":
-                custom_input = st.text_input("Custom input path", value="")
+                custom_input = st.text_input("Custom input path", key="opt_custom_input")
             if input_choice == "initial":
                 opt_in_path = init_path
             elif input_choice == "optimized":
@@ -1781,19 +1971,21 @@ def main() -> None:
             st.caption(f"Input run: {opt_in_path or '(not set)'}")
 
             maxiter = int(
-                st.number_input("maxiter", min_value=50, max_value=2000, value=900, step=50)
+                st.number_input("maxiter", min_value=50, max_value=2000, step=50, key="opt_maxiter")
             )
             gtol = float(
-                st.number_input("gtol", min_value=1e-16, max_value=1e-6, value=1e-12, format="%.1e")
+                st.number_input(
+                    "gtol", min_value=1e-16, max_value=1e-6, format="%.1e", key="opt_gtol"
+                )
             )
             roi_r_opt = float(
                 st.number_input(
                     "ROI radius (m)",
                     min_value=0.001,
                     max_value=0.2,
-                    value=0.14,
                     step=0.001,
                     format="%.4f",
+                    key="opt_roi_radius_m",
                 )
             )
             roi_step_opt = float(
@@ -1801,9 +1993,9 @@ def main() -> None:
                     "ROI step (m)",
                     min_value=0.001,
                     max_value=0.02,
-                    value=0.02,
                     step=0.001,
                     format="%.4f",
+                    key="opt_roi_step_m",
                 )
             )
             roi_samples_opt = int(
@@ -1811,30 +2003,30 @@ def main() -> None:
                     "ROI samples",
                     min_value=1,
                     max_value=200000,
-                    value=300,
                     step=1,
                     help="Used by the default surface-fibonacci ROI sampling mode.",
+                    key="opt_roi_samples",
                 )
             )
-            angle_model = st.selectbox(
+            angle_model = _gui_selectbox(
                 "Angle model",
                 ["legacy-alpha", "delta-rep-x0", "fourier-x0"],
-                index=0,
                 key="angle_model",
+                fallback="legacy-alpha",
             )
-            angle_init = st.selectbox(
+            angle_init = _gui_selectbox(
                 "Angle init",
                 ["from-run", "zeros"],
-                index=0,
                 key="angle_init",
+                fallback="from-run",
             )
             jax_available = _jax_available()
             if angle_model == "legacy-alpha":
-                grad_backend = st.selectbox(
+                grad_backend = _gui_selectbox(
                     "Grad backend",
                     ["analytic", "jax"],
-                    index=0,
                     key="grad_backend",
+                    fallback="analytic",
                 )
                 fourier_H = 4
                 lambda0 = 0.0
@@ -1849,7 +2041,6 @@ def main() -> None:
                             "Fourier H",
                             min_value=0,
                             max_value=64,
-                            value=4,
                             step=1,
                             key="fourier_H",
                         )
@@ -1861,7 +2052,6 @@ def main() -> None:
                         "lambda0",
                         min_value=0.0,
                         max_value=1e3,
-                        value=0.0,
                         step=0.1,
                         key="lambda0",
                     )
@@ -1871,7 +2061,6 @@ def main() -> None:
                         "lambda_theta",
                         min_value=0.0,
                         max_value=1e3,
-                        value=0.0,
                         step=0.1,
                         key="lambda_theta",
                     )
@@ -1881,7 +2070,6 @@ def main() -> None:
                         "lambda_z",
                         min_value=0.0,
                         max_value=1e3,
-                        value=0.0,
                         step=0.1,
                         key="lambda_z",
                     )
@@ -1890,7 +2078,6 @@ def main() -> None:
             with beta_cols[0]:
                 enable_beta_tilt_x = st.checkbox(
                     "Enable beta_tilt_x",
-                    value=False,
                     key="enable_beta_tilt_x",
                     help="Ring-wise local X-axis tilt angle (legacy-alpha + jax only).",
                 )
@@ -1900,7 +2087,6 @@ def main() -> None:
                         "beta_tilt_x bound (deg)",
                         min_value=0.1,
                         max_value=89.0,
-                        value=20.0,
                         step=0.5,
                         key="beta_tilt_x_bound_deg",
                     )
@@ -1908,11 +2094,11 @@ def main() -> None:
             if enable_beta_tilt_x:
                 st.caption("beta_tilt_x requires angle_model=legacy-alpha and grad_backend=jax.")
             st.markdown("**Magnetization model**")
-            mag_model = st.selectbox(
+            mag_model = _gui_selectbox(
                 "Magnetization model",
                 ["fixed", "self-consistent-easy-axis"],
-                index=0,
                 key="mag_model",
+                fallback="fixed",
             )
             sc_chi = 0.0
             sc_Nd = 1.0 / 3.0
@@ -1929,59 +2115,109 @@ def main() -> None:
             if mag_model == "self-consistent-easy-axis":
                 with st.expander("Self-consistent settings", expanded=True):
                     sc_chi = float(
-                        st.number_input("chi", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
+                        st.number_input(
+                            "chi",
+                            min_value=0.0,
+                            max_value=10.0,
+                            step=0.01,
+                            key="opt_sc_chi",
+                        )
                     )
                     sc_Nd = float(
                         st.number_input(
-                            "Nd", min_value=0.0, max_value=1.0, value=1.0 / 3.0, step=0.01
+                            "Nd",
+                            min_value=0.0,
+                            max_value=1.0,
+                            step=0.01,
+                            key="opt_sc_Nd",
                         )
                     )
                     sc_p0 = float(
-                        st.number_input("p0", min_value=0.0, max_value=10.0, value=1.0, step=0.01)
+                        st.number_input(
+                            "p0",
+                            min_value=0.0,
+                            max_value=10.0,
+                            step=0.01,
+                            key="opt_sc_p0",
+                        )
                     )
                     sc_volume_mm3 = float(
                         st.number_input(
                             "volume_mm3",
                             min_value=1.0,
                             max_value=1e6,
-                            value=1000.0,
                             step=10.0,
+                            key="opt_sc_volume_mm3",
                         )
                     )
                     sc_iters = int(
-                        st.number_input("iters", min_value=1, max_value=500, value=30, step=1)
+                        st.number_input(
+                            "iters",
+                            min_value=1,
+                            max_value=500,
+                            step=1,
+                            key="opt_sc_iters",
+                        )
                     )
                     sc_omega = float(
                         st.number_input(
-                            "omega", min_value=0.01, max_value=1.0, value=0.6, step=0.01
+                            "omega",
+                            min_value=0.01,
+                            max_value=1.0,
+                            step=0.01,
+                            key="opt_sc_omega",
                         )
                     )
                     st.markdown("**Near window**")
                     sc_near_wr = int(
-                        st.number_input("wr", min_value=0, max_value=10, value=0, step=1)
+                        st.number_input(
+                            "wr",
+                            min_value=0,
+                            max_value=10,
+                            step=1,
+                            key="opt_sc_near_wr",
+                        )
                     )
                     sc_near_wz = int(
-                        st.number_input("wz", min_value=0, max_value=10, value=1, step=1)
+                        st.number_input(
+                            "wz",
+                            min_value=0,
+                            max_value=10,
+                            step=1,
+                            key="opt_sc_near_wz",
+                        )
                     )
                     sc_near_wphi = int(
-                        st.number_input("wphi", min_value=0, max_value=10, value=2, step=1)
+                        st.number_input(
+                            "wphi",
+                            min_value=0,
+                            max_value=10,
+                            step=1,
+                            key="opt_sc_near_wphi",
+                        )
                     )
-                    sc_near_kernel = st.selectbox(
+                    sc_near_kernel = _gui_selectbox(
                         "near kernel",
                         ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
-                        index=0,
                         key="sc_near_kernel",
+                        fallback="dipole",
                     )
                     if sc_near_kernel == "multi-dipole":
                         sc_subdip_n = int(
-                            st.number_input("subdip_n", min_value=2, max_value=10, value=2, step=1)
+                            st.number_input(
+                                "subdip_n",
+                                min_value=2,
+                                max_value=10,
+                                step=1,
+                                key="opt_sc_subdip_n",
+                            )
                         )
                     if sc_near_kernel == "gl-double-mixed":
-                        gl_choice = st.selectbox(
+                        gl_choice = _gui_selectbox(
                             "gl order",
                             ["mixed (2/3)", "2", "3"],
-                            index=0,
                             key="sc_gl_order",
+                            fallback="mixed (2/3)",
                         )
                         if gl_choice in ("2", "3"):
                             sc_gl_order = int(gl_choice)
@@ -2019,33 +2255,31 @@ def main() -> None:
             can_start = jax_issue is None and not sc_errors
             fix_radius_layer_mode = cast(
                 Literal["center", "ends"],
-                st.selectbox(
+                _gui_selectbox(
                     "Fixed radius layer mode",
                     ["center", "ends"],
-                    index=0,
                     key="fix_radius_layer_mode",
+                    fallback="center",
                 ),
             )
             fix_center_radius_layers = int(
-                st.selectbox(
+                _gui_selectbox(
                     "Fixed radius layers",
                     [0, 2, 4],
-                    index=1,
                     key="fix_center_radius_layers",
+                    fallback=2,
                 )
             )
 
             st.markdown("**Radius bounds**")
-            r_bounds_enabled = st.checkbox(
-                "Enable radius bounds", value=True, key="r_bounds_enabled"
-            )
+            r_bounds_enabled = st.checkbox("Enable radius bounds", key="r_bounds_enabled")
             if r_bounds_enabled:
-                r_bound_mode = st.radio(
+                r_bound_mode = _gui_radio(
                     "Radius bounds mode",
                     ["relative", "absolute"],
-                    index=0,
-                    horizontal=True,
                     key="r_bound_mode",
+                    fallback="relative",
+                    horizontal=True,
                 )
                 if r_bound_mode == "relative":
                     r_lower_delta_mm = float(
@@ -2053,7 +2287,6 @@ def main() -> None:
                             "Lower delta (mm)",
                             min_value=0.0,
                             max_value=200.0,
-                            value=30.0,
                             step=1.0,
                             key="r_lower_delta_mm",
                         )
@@ -2063,12 +2296,11 @@ def main() -> None:
                             "Upper delta (mm)",
                             min_value=0.0,
                             max_value=200.0,
-                            value=30.0,
                             step=1.0,
                             key="r_upper_delta_mm",
                         )
                     )
-                    r_no_upper = st.checkbox("No upper bound", value=False, key="r_no_upper")
+                    r_no_upper = st.checkbox("No upper bound", key="r_no_upper")
                     r_min_mm = 0.0
                     r_max_mm = 1e9
                 else:
@@ -2077,7 +2309,6 @@ def main() -> None:
                             "Min radius (mm)",
                             min_value=0.0,
                             max_value=1e9,
-                            value=0.0,
                             step=1.0,
                             key="r_min_mm",
                         )
@@ -2087,7 +2318,6 @@ def main() -> None:
                             "Max radius (mm)",
                             min_value=0.0,
                             max_value=1e9,
-                            value=1e9,
                             step=1.0,
                             key="r_max_mm",
                         )
@@ -2103,7 +2333,7 @@ def main() -> None:
                 r_min_mm = 0.0
                 r_max_mm = 1e9
 
-            tag = st.text_input("Output tag", value="opt")
+            tag = st.text_input("Output tag", key="opt_tag")
             preview_dir = _default_out_dir(tag)
             st.caption(f"Output dir: {preview_dir}")
 
@@ -2111,48 +2341,39 @@ def main() -> None:
                 gen_cols = st.columns(3)
                 with gen_cols[0]:
                     gen_N = int(
-                        st.number_input(
-                            "N", min_value=1, max_value=512, value=48, step=1, key="gen_N"
-                        )
+                        st.number_input("N", min_value=1, max_value=512, step=1, key="gen_N")
                     )
                     gen_Lz = float(
                         st.number_input(
                             "Lz (m)",
                             min_value=0.01,
                             max_value=2.0,
-                            value=0.64,
                             step=0.01,
                             key="gen_Lz",
                         )
                     )
                 with gen_cols[1]:
                     gen_R = int(
-                        st.number_input(
-                            "R", min_value=1, max_value=32, value=3, step=1, key="gen_R"
-                        )
+                        st.number_input("R", min_value=1, max_value=32, step=1, key="gen_R")
                     )
                     gen_diameter_mm = float(
                         st.number_input(
                             "Diameter (mm)",
                             min_value=10.0,
                             max_value=2000.0,
-                            value=400.0,
                             step=10.0,
                             key="gen_diameter_mm",
                         )
                     )
                 with gen_cols[2]:
                     gen_K = int(
-                        st.number_input(
-                            "K", min_value=1, max_value=256, value=24, step=1, key="gen_K"
-                        )
+                        st.number_input("K", min_value=1, max_value=256, step=1, key="gen_K")
                     )
                     gen_ring_offset_step_mm = float(
                         st.number_input(
                             "Ring offset step (mm)",
                             min_value=0.0,
                             max_value=100.0,
-                            value=12.0,
                             step=1.0,
                             key="gen_ring_offset_step_mm",
                         )
@@ -2164,7 +2385,6 @@ def main() -> None:
                             "End-layer R",
                             min_value=1,
                             max_value=32,
-                            value=gen_R,
                             step=1,
                             key="gen_end_R",
                         )
@@ -2175,19 +2395,14 @@ def main() -> None:
                             "End layers / side",
                             min_value=0,
                             max_value=max(0, gen_K // 2),
-                            value=0,
                             step=1,
                             key="gen_end_layers",
                         )
                     )
 
-                gen_tag = st.text_input("Generate output tag", value="init", key="gen_tag")
-                gen_use_as_input = st.checkbox(
-                    "Use generated run as input", value=True, key="gen_use_as_input"
-                )
-                gen_start_opt = st.checkbox(
-                    "Generate and start optimization", value=False, key="gen_start_opt"
-                )
+                gen_tag = st.text_input("Generate output tag", key="gen_tag")
+                gen_use_as_input = st.checkbox("Use generated run as input", key="gen_use_as_input")
+                gen_start_opt = st.checkbox("Generate and start optimization", key="gen_start_opt")
 
                 gen_out_dir = build_generate_out_dir(
                     ROOT / "runs",
@@ -2370,10 +2585,14 @@ def main() -> None:
             auto_refresh = False
             refresh_secs = 1.0
             if job_running:
-                auto_refresh = st.checkbox("Auto-refresh log", value=True)
+                auto_refresh = st.checkbox("Auto-refresh log", key="opt_auto_refresh")
                 refresh_secs = float(
                     st.number_input(
-                        "Log refresh (s)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
+                        "Log refresh (s)",
+                        min_value=0.5,
+                        max_value=10.0,
+                        step=0.5,
+                        key="opt_log_refresh_secs",
                     )
                 )
 
@@ -2475,19 +2694,14 @@ def main() -> None:
             dc_job_running = dc_job is not None and dc_exit is None
 
             st.markdown("**Geometry**")
-            dc_N = int(
-                st.number_input("N", min_value=1, max_value=512, value=32, step=1, key="dc_N")
-            )
-            dc_K = int(
-                st.number_input("K", min_value=1, max_value=256, value=60, step=1, key="dc_K")
-            )
-            dc_R = int(st.number_input("R", min_value=1, max_value=32, value=1, step=1, key="dc_R"))
+            dc_N = int(st.number_input("N", min_value=1, max_value=512, step=1, key="dc_N"))
+            dc_K = int(st.number_input("K", min_value=1, max_value=256, step=1, key="dc_K"))
+            dc_R = int(st.number_input("R", min_value=1, max_value=32, step=1, key="dc_R"))
             dc_radius_m = float(
                 st.number_input(
                     "Radius (m)",
                     min_value=0.01,
                     max_value=5.0,
-                    value=0.2,
                     step=0.01,
                     key="dc_radius_m",
                 )
@@ -2497,7 +2711,6 @@ def main() -> None:
                     "Length (m)",
                     min_value=0.01,
                     max_value=5.0,
-                    value=0.6,
                     step=0.01,
                     key="dc_length_m",
                 )
@@ -2509,57 +2722,46 @@ def main() -> None:
                     "ROI radius (m)",
                     min_value=0.001,
                     max_value=1.0,
-                    value=0.12,
                     step=0.001,
                     key="dc_roi_radius_m",
                 )
             )
             dc_roi_grid_n = int(
                 st.number_input(
-                    "ROI grid N", min_value=3, max_value=201, value=41, step=2, key="dc_roi_grid_n"
+                    "ROI grid N", min_value=3, max_value=201, step=2, key="dc_roi_grid_n"
                 )
             )
 
             st.markdown("**Objective weights**")
             dc_wx = float(
-                st.number_input(
-                    "wx", min_value=0.0, max_value=1e3, value=0.0, step=0.1, key="dc_wx"
-                )
+                st.number_input("wx", min_value=0.0, max_value=1e3, step=0.1, key="dc_wx")
             )
             dc_wy = float(
-                st.number_input(
-                    "wy", min_value=0.0, max_value=1e3, value=1.0, step=0.1, key="dc_wy"
-                )
+                st.number_input("wy", min_value=0.0, max_value=1e3, step=0.1, key="dc_wy")
             )
             dc_wz = float(
-                st.number_input(
-                    "wz", min_value=0.0, max_value=1e3, value=0.0, step=0.1, key="dc_wz"
-                )
+                st.number_input("wz", min_value=0.0, max_value=1e3, step=0.1, key="dc_wz")
             )
 
             st.markdown("**CCP settings**")
             dc_phi0 = float(
-                st.number_input(
-                    "phi0", min_value=-6.3, max_value=6.3, value=0.0, step=0.1, key="dc_phi0"
-                )
+                st.number_input("phi0", min_value=-6.3, max_value=6.3, step=0.1, key="dc_phi0")
             )
             dc_delta_nom = float(
                 st.number_input(
                     "delta_nom_deg",
                     min_value=0.1,
                     max_value=60.0,
-                    value=5.0,
                     step=0.5,
                     key="dc_delta_nom",
                 )
             )
-            dc_step_enable = st.checkbox("Enable step trust", value=True, key="dc_step_enable")
+            dc_step_enable = st.checkbox("Enable step trust", key="dc_step_enable")
             dc_delta_step = float(
                 st.number_input(
                     "delta_step_deg",
                     min_value=0.1,
                     max_value=60.0,
-                    value=2.0,
                     step=0.5,
                     key="dc_delta_step",
                 )
@@ -2570,13 +2772,11 @@ def main() -> None:
                 dc_delta_step_val = dc_delta_step
 
             dc_tau0 = float(
-                st.number_input(
-                    "tau0", min_value=0.0, max_value=1.0, value=1e-4, format="%.1e", key="dc_tau0"
-                )
+                st.number_input("tau0", min_value=0.0, max_value=1.0, format="%.1e", key="dc_tau0")
             )
             dc_tau_mult = float(
                 st.number_input(
-                    "tau_mult", min_value=1.0, max_value=5.0, value=1.2, step=0.1, key="dc_tau_mult"
+                    "tau_mult", min_value=1.0, max_value=5.0, step=0.1, key="dc_tau_mult"
                 )
             )
             dc_tau_max = float(
@@ -2584,99 +2784,79 @@ def main() -> None:
                     "tau_max",
                     min_value=0.0,
                     max_value=1.0,
-                    value=1e-1,
                     format="%.1e",
                     key="dc_tau_max",
                 )
             )
             dc_iters = int(
-                st.number_input(
-                    "iters", min_value=1, max_value=200, value=20, step=1, key="dc_iters"
-                )
+                st.number_input("iters", min_value=1, max_value=200, step=1, key="dc_iters")
             )
             dc_tol = float(
-                st.number_input(
-                    "tol", min_value=1e-10, max_value=1e-2, value=1e-6, format="%.1e", key="dc_tol"
-                )
+                st.number_input("tol", min_value=1e-10, max_value=1e-2, format="%.1e", key="dc_tol")
             )
             dc_tol_f = float(
                 st.number_input(
                     "tol_f",
                     min_value=1e-12,
                     max_value=1e-3,
-                    value=1e-9,
                     format="%.1e",
                     key="dc_tol_f",
                 )
             )
             st.markdown("**Initial guess (from L-BFGS run)**")
-            dc_init_select = st.selectbox(
+            dc_init_select = _gui_selectbox(
                 "Init run (optional)",
                 ["(none)"] + candidates,
-                index=0,
                 key="dc_init_select",
+                fallback="(none)",
             )
-            dc_init_manual = st.text_input(
-                "Init run path (optional)", value="", key="dc_init_manual"
-            )
+            dc_init_manual = st.text_input("Init run path (optional)", key="dc_init_manual")
             dc_init_select_val = "" if dc_init_select == "(none)" else dc_init_select
             dc_init_run = _resolve_path(dc_init_select_val, dc_init_manual)
             st.caption("Only delta-rep-x0 / fourier-x0 angle models are accepted.")
 
             st.markdown("**Regularization**")
             dc_reg_x = float(
-                st.number_input(
-                    "reg_x", min_value=0.0, max_value=1e3, value=0.0, step=0.1, key="dc_reg_x"
-                )
+                st.number_input("reg_x", min_value=0.0, max_value=1e3, step=0.1, key="dc_reg_x")
             )
             dc_reg_p = float(
-                st.number_input(
-                    "reg_p", min_value=0.0, max_value=1e3, value=0.0, step=0.1, key="dc_reg_p"
-                )
+                st.number_input("reg_p", min_value=0.0, max_value=1e3, step=0.1, key="dc_reg_p")
             )
             dc_reg_z = float(
-                st.number_input(
-                    "reg_z", min_value=0.0, max_value=1e3, value=0.0, step=0.1, key="dc_reg_z"
-                )
+                st.number_input("reg_z", min_value=0.0, max_value=1e3, step=0.1, key="dc_reg_z")
             )
 
             st.markdown("**Self-consistent equality**")
-            dc_sc_eq = st.checkbox("Enable self-consistent equalities", value=True, key="dc_sc_eq")
+            dc_sc_eq = st.checkbox("Enable self-consistent equalities", key="dc_sc_eq")
             dc_p_fix = None
             if not dc_sc_eq:
                 dc_p_fix = float(
                     st.number_input(
-                        "p_fix", min_value=0.0, max_value=10.0, value=1.0, step=0.01, key="dc_p_fix"
+                        "p_fix", min_value=0.0, max_value=10.0, step=0.01, key="dc_p_fix"
                     )
                 )
 
             st.markdown("**Self-consistent parameters**")
             dc_sc_chi = float(
-                st.number_input(
-                    "sc_chi", min_value=0.0, max_value=10.0, value=0.05, step=0.01, key="dc_sc_chi"
-                )
+                st.number_input("sc_chi", min_value=0.0, max_value=10.0, step=0.01, key="dc_sc_chi")
             )
             dc_sc_Nd = float(
                 st.number_input(
                     "sc_Nd",
                     min_value=0.0,
                     max_value=1.0,
-                    value=1.0 / 3.0,
                     step=0.01,
                     key="dc_sc_Nd",
                 )
             )
             dc_sc_p0 = float(
-                st.number_input(
-                    "sc_p0", min_value=0.0, max_value=10.0, value=1.0, step=0.01, key="dc_sc_p0"
-                )
+                st.number_input("sc_p0", min_value=0.0, max_value=10.0, step=0.01, key="dc_sc_p0")
             )
             dc_sc_volume_mm3 = float(
                 st.number_input(
                     "sc_volume_mm3",
                     min_value=1.0,
                     max_value=1e6,
-                    value=1000.0,
                     step=10.0,
                     key="dc_sc_volume_mm3",
                 )
@@ -2684,54 +2864,44 @@ def main() -> None:
 
             st.markdown("**Near window**")
             dc_sc_near_wr = int(
-                st.number_input(
-                    "wr", min_value=0, max_value=10, value=0, step=1, key="dc_sc_near_wr"
-                )
+                st.number_input("wr", min_value=0, max_value=10, step=1, key="dc_sc_near_wr")
             )
             dc_sc_near_wz = int(
-                st.number_input(
-                    "wz", min_value=0, max_value=10, value=1, step=1, key="dc_sc_near_wz"
-                )
+                st.number_input("wz", min_value=0, max_value=10, step=1, key="dc_sc_near_wz")
             )
             dc_sc_near_wphi = int(
-                st.number_input(
-                    "wphi", min_value=0, max_value=10, value=2, step=1, key="dc_sc_near_wphi"
-                )
+                st.number_input("wphi", min_value=0, max_value=10, step=1, key="dc_sc_near_wphi")
             )
-            dc_sc_near_kernel = st.selectbox(
+            dc_sc_near_kernel = _gui_selectbox(
                 "near kernel",
                 ["dipole", "multi-dipole", "cellavg", "gl-double-mixed"],
-                index=0,
                 key="dc_sc_near_kernel",
+                fallback="dipole",
             )
             dc_sc_subdip_n = 2
             dc_sc_gl_order: int | None = None
             if dc_sc_near_kernel == "multi-dipole":
                 dc_sc_subdip_n = int(
                     st.number_input(
-                        "subdip_n", min_value=2, max_value=10, value=2, step=1, key="dc_sc_subdip_n"
+                        "subdip_n", min_value=2, max_value=10, step=1, key="dc_sc_subdip_n"
                     )
                 )
             if dc_sc_near_kernel == "gl-double-mixed":
-                gl_choice = st.selectbox(
+                gl_choice = _gui_selectbox(
                     "gl order",
                     ["mixed (2/3)", "2", "3"],
-                    index=0,
                     key="dc_sc_gl_order",
+                    fallback="mixed (2/3)",
                 )
                 if gl_choice in ("2", "3"):
                     dc_sc_gl_order = int(gl_choice)
 
             st.markdown("**p bounds**")
             dc_pmin = float(
-                st.number_input(
-                    "pmin", min_value=0.0, max_value=10.0, value=0.0, step=0.01, key="dc_pmin"
-                )
+                st.number_input("pmin", min_value=0.0, max_value=10.0, step=0.01, key="dc_pmin")
             )
             dc_pmax = float(
-                st.number_input(
-                    "pmax", min_value=0.0, max_value=10.0, value=2.0, step=0.01, key="dc_pmax"
-                )
+                st.number_input("pmax", min_value=0.0, max_value=10.0, step=0.01, key="dc_pmax")
             )
 
             st.markdown("**Factor**")
@@ -2740,17 +2910,21 @@ def main() -> None:
                     "factor",
                     min_value=0.0,
                     max_value=1.0,
-                    value=1e-7,
                     format="%.1e",
                     key="dc_factor",
                 )
             )
 
             solver_options = [s for s in ["ECOS", "SCS"] if s in installed_solvers] or ["SCS"]
-            dc_solver = st.selectbox("Solver", solver_options, index=0, key="dc_solver")
-            dc_verbose = st.checkbox("Verbose log", value=True, key="dc_verbose")
+            dc_solver = _gui_selectbox(
+                "Solver",
+                solver_options,
+                key="dc_solver",
+                fallback="SCS",
+            )
+            dc_verbose = st.checkbox("Verbose log", key="dc_verbose")
 
-            dc_tag = st.text_input("Output tag", value="dc_ccp_sc", key="dc_tag")
+            dc_tag = st.text_input("Output tag", key="dc_tag")
             dc_out_dir = _default_out_dir(dc_tag)
             st.caption(f"Output dir: {dc_out_dir}")
 
@@ -2888,13 +3062,12 @@ def main() -> None:
                 st.text_area("dc_ccp_sc.log (tail)", dc_log, height=240)
 
             if dc_job_running:
-                dc_auto_refresh = st.checkbox("Auto-refresh log", value=True, key="dc_auto_refresh")
+                dc_auto_refresh = st.checkbox("Auto-refresh log", key="dc_auto_refresh")
                 dc_refresh_secs = float(
                     st.number_input(
                         "Log refresh (s)",
                         min_value=0.5,
                         max_value=10.0,
-                        value=1.0,
                         step=0.5,
                         key="dc_refresh_secs",
                     )
@@ -2902,6 +3075,22 @@ def main() -> None:
                 if dc_auto_refresh:
                     time.sleep(max(0.1, dc_refresh_secs))
                     st.rerun()
+
+    with st.sidebar:
+        st.header("GUI Config")
+        st.caption(f"Defaults file: `{GUI_DEFAULTS_PATH}`")
+        for warning in _consume_gui_config_warnings():
+            st.warning(warning)
+        export_tag = st.text_input("Export tag", value="gui", key="gui_config_export_tag")
+        export_path = default_gui_config_export_path(export_tag)
+        st.caption(f"Export path: `{export_path}`")
+        if st.button("Export current settings", key="gui_config_export_button"):
+            try:
+                export_values = merge_gui_config_values(gui_defaults, st.session_state)
+                write_gui_config(export_path, export_values)
+                st.success(f"Exported GUI settings to: {export_path}")
+            except Exception as exc:
+                st.error(f"GUI config export failed: {exc}")
 
 
 if __name__ == "__main__":

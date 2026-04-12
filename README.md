@@ -226,6 +226,8 @@ FACTOR_{eff} = FACTOR \times field_scale
 
 ## 7. 出力ファイル
 
+詳細仕様は [docs/optimization_output_format.md](docs/optimization_output_format.md) を参照してください。
+
 ```
 runs/<run_name>/
   results.npz
