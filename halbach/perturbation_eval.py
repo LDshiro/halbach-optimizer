@@ -17,6 +17,7 @@ from halbach.geom import sample_sphere_surface_fibonacci
 from halbach.magnetization_runtime import build_m_flat_from_phi_and_p
 from halbach.near import NearWindow, build_near_graph, edges_from_near
 from halbach.physics import compute_B_all_from_m_flat, compute_B_and_B0_from_m_flat
+from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
 from halbach.run_types import RunBundle
 from halbach.viz2d import ErrorMap2D
 
@@ -209,6 +210,8 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
 
     phi_rkn = phi_rkn_from_run(run)
     r0_rkn = _build_r0_rkn(run)
+    ring_active_mask = radial_profile_from_run(run).ring_active_mask
+    active_flat = flatten_ring_active_mask(ring_active_mask, int(geom.N)).astype(np.float64)
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     r0_flat = np.asarray(r0_rkn, dtype=np.float64).reshape(-1, 3)
 
@@ -218,7 +221,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
     dphi_deg = rng.normal(loc=0.0, scale=float(cfg.sigma_phi_deg), size=phi_flat.shape[0])
 
     p0_nominal = float(sc["p0"])
-    p0_flat = np.maximum(P0_FLOOR, p0_nominal * (1.0 + eps_p))
+    p0_flat = np.maximum(P0_FLOOR, p0_nominal * (1.0 + eps_p)) * active_flat
     phi_noisy = _wrap_angle_rad(phi_flat + np.deg2rad(dphi_deg))
 
     near_window = sc["near_window"]
@@ -242,6 +245,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
         p0_j = jnp.asarray(p0_flat, dtype=jnp.float64)
         nbr_idx_j = jnp.asarray(near.nbr_idx, dtype=jnp.int32)
         nbr_mask_j = jnp.asarray(near.nbr_mask, dtype=bool)
+        active_flat_j = jnp.asarray(active_flat, dtype=jnp.float64)
         volume_m3 = float(sc["volume_mm3"]) * 1e-9
 
         kernel = str(sc["near_kernel"])
@@ -258,6 +262,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
                 implicit_diff=False,
+                active_flat=active_flat_j,
             )
         elif kernel == "multi-dipole":
             p_out = solve_p_easy_axis_near_multi_dipole_with_p0_flat(
@@ -273,6 +278,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
                 implicit_diff=False,
+                active_flat=active_flat_j,
             )
         elif kernel == "gl-double-mixed":
             i_edge_np, j_edge_np = edges_from_near(near.nbr_idx, near.nbr_mask)
@@ -316,6 +322,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
                 delta_hi_offsets=delta_hi_offsets,
                 delta_hi_w=delta_hi_w,
                 implicit_diff=False,
+                active_flat=active_flat_j,
             )
         elif kernel == "cellavg":
             raise ValueError(
@@ -323,7 +330,7 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
             )
         else:
             raise ValueError(f"Unsupported near_kernel: {kernel}")
-        p_flat = np.asarray(p_out, dtype=np.float64)
+        p_flat = np.asarray(p_out, dtype=np.float64) * active_flat
 
     m_flat = build_m_flat_from_phi_and_p(phi_noisy, p_flat)
 
@@ -377,13 +384,17 @@ def run_perturbation_case(run: RunBundle, cfg: PerturbationConfig) -> Perturbati
         coord0=float(cfg.target_plane_z),
     )
 
-    p_mean = float(np.mean(p_flat))
+    p_active = p_flat[active_flat > 0.0]
+    if p_active.size == 0:
+        p_active = np.zeros(1, dtype=np.float64)
+    p_mean = float(np.mean(p_active))
+    p_std = float(np.std(p_active))
     p_stats = {
-        "sc_p_min": float(np.min(p_flat)),
-        "sc_p_max": float(np.max(p_flat)),
+        "sc_p_min": float(np.min(p_active)),
+        "sc_p_max": float(np.max(p_active)),
         "sc_p_mean": p_mean,
-        "sc_p_std": float(np.std(p_flat)),
-        "sc_p_rel_std": float(np.std(p_flat) / (abs(p_mean) + EPS)),
+        "sc_p_std": p_std,
+        "sc_p_rel_std": float(p_std / (abs(p_mean) + EPS)),
     }
 
     debug: dict[str, Any] = {

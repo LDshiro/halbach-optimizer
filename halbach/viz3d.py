@@ -11,6 +11,7 @@ from halbach.angles_runtime import beta_tilt_x_rk_from_run, phi_rkn_from_run
 from halbach.coil_overlay import CoilPolylineSet, build_plotly_polyline_groups
 from halbach.constants import phi0
 from halbach.obj_mesh import ObjMesh
+from halbach.radial_profile import radial_profile_from_run
 from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
@@ -73,6 +74,7 @@ def _enumerate_magnets_with_u(
     phi_rkn = phi_rkn_from_run(run, phi0=phi0)
     beta_rk = beta_tilt_x_rk_from_run(run)
     beta_rkn = np.broadcast_to(beta_rk[:, :, None], phi_rkn.shape)
+    ring_active_mask = radial_profile_from_run(run).ring_active_mask
 
     R, K, _N = phi_rkn.shape
     idx = np.arange(0, theta.size, stride)
@@ -92,6 +94,8 @@ def _enumerate_magnets_with_u(
     for r in range(R):
         ring_offset = ring_offsets[r]
         for k in range(K):
+            if not ring_active_mask[r, k]:
+                continue
             rho = r_bases[k] + ring_offset
             x = rho * c
             y = rho * s

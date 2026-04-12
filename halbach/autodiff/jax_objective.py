@@ -28,6 +28,7 @@ def _compute_b_all(
     factor: float,
     phi0_val: float,
     m0_val: float,
+    active_rk: Any | None,
 ) -> Any:
     R = alphas.shape[0]
     K = alphas.shape[1]
@@ -44,6 +45,8 @@ def _compute_b_all(
     my = m0_val * jnp.sin(phi)
     mz = jnp.zeros_like(mx)
     m = jnp.stack([mx, my, mz], axis=-1)
+    if active_rk is not None:
+        m = m * active_rk[:, :, None, None]
 
     r0_flat = r0.reshape(-1, 3)
     m_flat = m.reshape(-1, 3)
@@ -74,6 +77,7 @@ def _objective_and_b0(
     factor: float,
     phi0_val: float,
     m0_val: float,
+    active_rk: Any | None,
 ) -> tuple[Any, Any]:
     B_all = _compute_b_all(
         alphas,
@@ -88,6 +92,7 @@ def _objective_and_b0(
         factor,
         phi0_val,
         m0_val,
+        active_rk,
     )
     B = B_all[:-1]
     B0 = B_all[-1]
@@ -103,6 +108,7 @@ def objective_with_grads_fixed_jax(
     geom: Geometry,
     pts: NDArray[np.float64],
     factor: float = FACTOR,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
     """
     JAX objective and gradients (y-space) with |B0|.
@@ -116,6 +122,14 @@ def objective_with_grads_fixed_jax(
     z_layers = jnp.asarray(geom.z_layers, dtype=jnp.float64)
     ring_offsets = jnp.asarray(geom.ring_offsets, dtype=jnp.float64)
     pts_j = jnp.asarray(pts, dtype=jnp.float64)
+    active_rk_j = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=bool)
+        if mask.shape != alphas.shape:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match alphas shape {alphas.shape}"
+            )
+        active_rk_j = jnp.asarray(mask, dtype=jnp.float64)
     factor_val = float(factor)
 
     def _objective_only(a: Any, r: Any) -> tuple[Any, Any]:
@@ -132,6 +146,7 @@ def objective_with_grads_fixed_jax(
             factor_val,
             phi0,
             m0,
+            active_rk_j,
         )
 
     (J, B0n), grads = jax.value_and_grad(_objective_only, argnums=(0, 1), has_aux=True)(

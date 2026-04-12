@@ -41,6 +41,7 @@ def objective_with_grads_fixed_beta_tilt_jax(
     geom: Geometry,
     pts: NDArray[np.float64],
     factor: float = FACTOR,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float]:
     """JAX objective and gradients (y-space) for legacy-alpha + beta_tilt_x."""
     alphas_j = jnp.asarray(alphas, dtype=jnp.float64)
@@ -53,6 +54,14 @@ def objective_with_grads_fixed_beta_tilt_jax(
     z_layers = jnp.asarray(geom.z_layers, dtype=jnp.float64)
     ring_offsets = jnp.asarray(geom.ring_offsets, dtype=jnp.float64)
     pts_j = jnp.asarray(pts, dtype=jnp.float64)
+    active_rk_j = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=bool)
+        if mask.shape != alphas.shape:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match alphas shape {alphas.shape}"
+            )
+        active_rk_j = jnp.asarray(mask, dtype=jnp.float64)
     factor_val = float(factor)
 
     def _objective_only(a: Any, b: Any, r: Any) -> tuple[Any, Any]:
@@ -74,6 +83,8 @@ def objective_with_grads_fixed_beta_tilt_jax(
         uz = jnp.sin(beta_rkn)
         u = jnp.stack([ux, uy, uz], axis=-1)
         m_rkn = m0 * u
+        if active_rk_j is not None:
+            m_rkn = m_rkn * active_rk_j[:, :, None, None]
 
         r0_flat = r0.reshape(-1, 3)
         m_flat = m_rkn.reshape(-1, 3)

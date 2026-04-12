@@ -146,6 +146,7 @@ def test_optimize_run_saves_sc_p_flat(tmp_path: Path, monkeypatch: pytest.Monkey
         r_max_mm=1e9,
         min_radius_drop_mm=None,
         fix_center_radius_layers=2,
+        fix_radius_layer_mode="center",
         log_level="INFO",
         debug_stacks_secs=0,
         sc_debug=False,

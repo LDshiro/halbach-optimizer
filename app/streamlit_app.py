@@ -1806,6 +1806,16 @@ def main() -> None:
                     format="%.4f",
                 )
             )
+            roi_samples_opt = int(
+                st.number_input(
+                    "ROI samples",
+                    min_value=1,
+                    max_value=200000,
+                    value=300,
+                    step=1,
+                    help="Used by the default surface-fibonacci ROI sampling mode.",
+                )
+            )
             angle_model = st.selectbox(
                 "Angle model",
                 ["legacy-alpha", "delta-rep-x0", "fourier-x0"],
@@ -2007,9 +2017,18 @@ def main() -> None:
             for msg in sc_errors:
                 st.error(msg)
             can_start = jax_issue is None and not sc_errors
+            fix_radius_layer_mode = cast(
+                Literal["center", "ends"],
+                st.selectbox(
+                    "Fixed radius layer mode",
+                    ["center", "ends"],
+                    index=0,
+                    key="fix_radius_layer_mode",
+                ),
+            )
             fix_center_radius_layers = int(
                 st.selectbox(
-                    "Fixed center radius layers (z≈0)",
+                    "Fixed radius layers",
                     [0, 2, 4],
                     index=1,
                     key="fix_center_radius_layers",
@@ -2138,6 +2157,29 @@ def main() -> None:
                             key="gen_ring_offset_step_mm",
                         )
                     )
+                gen_profile_cols = st.columns(2)
+                with gen_profile_cols[0]:
+                    gen_end_R = int(
+                        st.number_input(
+                            "End-layer R",
+                            min_value=1,
+                            max_value=32,
+                            value=gen_R,
+                            step=1,
+                            key="gen_end_R",
+                        )
+                    )
+                with gen_profile_cols[1]:
+                    gen_end_layers = int(
+                        st.number_input(
+                            "End layers / side",
+                            min_value=0,
+                            max_value=max(0, gen_K // 2),
+                            value=0,
+                            step=1,
+                            key="gen_end_layers",
+                        )
+                    )
 
                 gen_tag = st.text_input("Generate output tag", value="init", key="gen_tag")
                 gen_use_as_input = st.checkbox(
@@ -2148,7 +2190,13 @@ def main() -> None:
                 )
 
                 gen_out_dir = build_generate_out_dir(
-                    ROOT / "runs", tag=gen_tag, N=gen_N, R=gen_R, K=gen_K
+                    ROOT / "runs",
+                    tag=gen_tag,
+                    N=gen_N,
+                    R=gen_R,
+                    K=gen_K,
+                    end_R=gen_end_R,
+                    end_layers_per_side=gen_end_layers,
                 )
                 st.caption(f"Output dir: {gen_out_dir}")
 
@@ -2162,6 +2210,8 @@ def main() -> None:
                         Lz=gen_Lz,
                         diameter_mm=gen_diameter_mm,
                         ring_offset_step_mm=gen_ring_offset_step_mm,
+                        end_R=gen_end_R,
+                        end_layers_per_side=gen_end_layers,
                     )
                     code, output = run_generate_command(cmd, cwd=ROOT)
                     st.session_state["gen_run_code"] = code
@@ -2192,6 +2242,7 @@ def main() -> None:
                                         gtol=gtol,
                                         roi_r=roi_r_opt,
                                         roi_step=roi_step_opt,
+                                        roi_samples=roi_samples_opt,
                                         angle_model=angle_model,
                                         grad_backend=grad_backend,
                                         fourier_H=fourier_H,
@@ -2206,6 +2257,7 @@ def main() -> None:
                                         r_min_mm=r_min_mm,
                                         r_max_mm=r_max_mm,
                                         fix_center_radius_layers=fix_center_radius_layers,
+                                        fix_radius_layer_mode=fix_radius_layer_mode,
                                         enable_beta_tilt_x=enable_beta_tilt_x,
                                         beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                                         mag_model=mag_model,
@@ -2226,6 +2278,9 @@ def main() -> None:
                                     st.session_state["opt_job"] = job
                                     st.session_state["opt_job_fix_center_radius_layers"] = (
                                         fix_center_radius_layers
+                                    )
+                                    st.session_state["opt_job_fix_radius_layer_mode"] = (
+                                        fix_radius_layer_mode
                                     )
                                     st.success(f"Started optimization: {job.out_dir}")
                                 except Exception as exc:
@@ -2265,6 +2320,7 @@ def main() -> None:
                             gtol=gtol,
                             roi_r=roi_r_opt,
                             roi_step=roi_step_opt,
+                            roi_samples=roi_samples_opt,
                             angle_model=angle_model,
                             grad_backend=grad_backend,
                             fourier_H=fourier_H,
@@ -2279,6 +2335,7 @@ def main() -> None:
                             r_min_mm=r_min_mm,
                             r_max_mm=r_max_mm,
                             fix_center_radius_layers=fix_center_radius_layers,
+                            fix_radius_layer_mode=fix_radius_layer_mode,
                             enable_beta_tilt_x=enable_beta_tilt_x,
                             beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                             mag_model=mag_model,
@@ -2300,6 +2357,7 @@ def main() -> None:
                         st.session_state["opt_job_fix_center_radius_layers"] = (
                             fix_center_radius_layers
                         )
+                        st.session_state["opt_job_fix_radius_layer_mode"] = fix_radius_layer_mode
                         st.success(f"Started optimization: {job.out_dir}")
                         st.rerun()
                     except Exception as exc:
@@ -2330,6 +2388,7 @@ def main() -> None:
                     gtol=gtol,
                     roi_r=roi_r_opt,
                     roi_step=roi_step_opt,
+                    roi_samples=roi_samples_opt,
                     angle_model=angle_model,
                     grad_backend=grad_backend,
                     fourier_H=fourier_H,
@@ -2344,6 +2403,7 @@ def main() -> None:
                     r_min_mm=r_min_mm,
                     r_max_mm=r_max_mm,
                     fix_center_radius_layers=fix_center_radius_layers,
+                    fix_radius_layer_mode=fix_radius_layer_mode,
                     enable_beta_tilt_x=enable_beta_tilt_x,
                     beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
                     mag_model=mag_model,
@@ -2363,8 +2423,9 @@ def main() -> None:
                 st.code(" ".join(cmd))
 
                 fixed_layers = st.session_state.get("opt_job_fix_center_radius_layers")
+                fixed_mode = st.session_state.get("opt_job_fix_radius_layer_mode", "center")
                 if fixed_layers is not None:
-                    st.write(f"Fixed center radius layers: {fixed_layers}")
+                    st.write(f"Fixed radius layers: {fixed_layers} (mode={fixed_mode})")
 
                 log_text = tail_log(job.log_path, n_lines=200)
                 st.text_area("opt.log (tail)", log_text, height=240)

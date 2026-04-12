@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 
+from halbach.radial_profile import build_radial_count_per_layer, build_ring_active_mask
 from halbach.run_types import RunResults
 
 
@@ -14,6 +15,8 @@ def generate_halbach_initial(
     *,
     N: int,
     R: int,
+    end_R: int | None,
+    end_layers_per_side: int,
     K: int,
     Lz: float,
     diameter_m: float,
@@ -25,6 +28,8 @@ def generate_halbach_initial(
         raise ValueError("R must be positive")
     if K <= 0:
         raise ValueError("K must be positive")
+    if end_layers_per_side < 0 or end_layers_per_side > K // 2:
+        raise ValueError("end_layers_per_side must be between 0 and K//2")
     if Lz < 0.0:
         raise ValueError("Lz must be non-negative")
     if diameter_m <= 0.0:
@@ -42,13 +47,22 @@ def generate_halbach_initial(
     else:
         z_layers = np.linspace(-Lz / 2.0, Lz / 2.0, K, dtype=np.float64)
 
-    if R == 1:
+    radial_count_per_layer = build_radial_count_per_layer(
+        K,
+        R,
+        end_R=end_R,
+        end_layers_per_side=end_layers_per_side,
+    )
+    R_max = int(np.max(radial_count_per_layer))
+
+    if R_max == 1:
         ring_offsets = np.array([0.0], dtype=np.float64)
     else:
-        ring_offsets = np.arange(R, dtype=np.float64) * ring_offset_step_m
+        ring_offsets = np.arange(R_max, dtype=np.float64) * ring_offset_step_m
 
-    alphas = np.zeros((R, K), dtype=np.float64)
+    alphas = np.zeros((R_max, K), dtype=np.float64)
     r_bases = np.full(K, diameter_m / 2.0, dtype=np.float64)
+    ring_active_mask = build_ring_active_mask(radial_count_per_layer, R_max)
 
     return RunResults(
         alphas=alphas,
@@ -59,7 +73,10 @@ def generate_halbach_initial(
         sth=sth,
         z_layers=z_layers,
         ring_offsets=ring_offsets,
-        extras={},
+        extras=dict(
+            radial_count_per_layer=np.asarray(radial_count_per_layer, dtype=np.int_),
+            ring_active_mask=np.asarray(ring_active_mask, dtype=np.bool_),
+        ),
     )
 
 
@@ -76,8 +93,7 @@ def write_run(
     out_path.mkdir(parents=True, exist_ok=True)
 
     results_path = out_path / "results.npz"
-    np.savez_compressed(
-        results_path,
+    save_payload: dict[str, Any] = dict(
         alphas_opt=results.alphas,
         r_bases_opt=results.r_bases,
         theta=results.theta,
@@ -89,6 +105,8 @@ def write_run(
         alphas=results.alphas,
         r_bases=results.r_bases,
     )
+    save_payload.update(results.extras)
+    np.savez_compressed(results_path, **save_payload)
 
     meta = dict(
         schema_version=int(schema_version),

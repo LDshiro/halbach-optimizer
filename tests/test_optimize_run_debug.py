@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -123,6 +124,7 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
         r_max_mm=1e9,
         min_radius_drop_mm=None,
         fix_center_radius_layers=2,
+        fix_radius_layer_mode="center",
         log_level="INFO",
         debug_stacks_secs=0,
         sc_debug=False,
@@ -133,6 +135,89 @@ def test_dry_run_calls_objective_once(tmp_path: Path, monkeypatch: pytest.Monkey
     code = opt.run_optimize(args)
     assert code == 0
     assert calls["count"] == 1
+    meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["fix_center_radius_layers"] == 2
+    assert meta["fix_radius_layer_mode"] == "center"
+    assert meta["fixed_k_radius"] == [2, 3]
+
+
+def test_dry_run_meta_supports_end_fixed_radius_layers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _write_min_run(tmp_path)
+    out_dir = tmp_path / "out_ends"
+
+    def fake_objective(
+        alphas: npt.NDArray[np.floating[Any]],
+        r_bases: npt.NDArray[np.floating[Any]],
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[float, npt.NDArray[np.floating[Any]], npt.NDArray[np.floating[Any]], float]:
+        return 0.0, np.zeros_like(alphas), np.zeros_like(r_bases), 1.0
+
+    monkeypatch.setattr(opt, "objective_with_grads_fixed", fake_objective)
+    monkeypatch.setattr(opt, "solve_lbfgsb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(opt, "_git_hash", lambda *_args, **_kwargs: None)
+
+    args = argparse.Namespace(
+        in_path=str(run_dir),
+        out_dir=str(out_dir),
+        maxiter=50,
+        gtol=1e-12,
+        log_every=10,
+        log_precision=3,
+        roi_r=0.05,
+        roi_step=0.05,
+        roi_mode="volume-grid",
+        roi_samples=10,
+        roi_seed=0,
+        roi_half_x=False,
+        roi_max_points=0,
+        field_scale=1e6,
+        angle_model="legacy-alpha",
+        grad_backend="analytic",
+        fourier_H=4,
+        lambda0=0.0,
+        lambda_theta=0.0,
+        lambda_z=0.0,
+        angle_init="from-run",
+        enable_beta_tilt_x=False,
+        beta_tilt_x_bound_deg=20.0,
+        mag_model="fixed",
+        sc_chi=0.0,
+        sc_Nd=1.0 / 3.0,
+        sc_p0=1.0,
+        sc_volume_mm3=1000.0,
+        sc_iters=30,
+        sc_omega=0.6,
+        sc_near_wr=0,
+        sc_near_wz=1,
+        sc_near_wphi=2,
+        sc_near_kernel="dipole",
+        sc_gl_order=None,
+        sc_subdip_n=2,
+        r_bound_mode="relative",
+        r_lower_delta_mm=30.0,
+        r_upper_delta_mm=30.0,
+        r_no_upper=False,
+        r_min_mm=0.0,
+        r_max_mm=1e9,
+        min_radius_drop_mm=None,
+        fix_center_radius_layers=4,
+        fix_radius_layer_mode="ends",
+        log_level="INFO",
+        debug_stacks_secs=0,
+        sc_debug=False,
+        sc_debug_scale_check=True,
+        dry_run=True,
+    )
+
+    code = opt.run_optimize(args)
+    assert code == 0
+    meta = json.loads((out_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["fix_center_radius_layers"] == 4
+    assert meta["fix_radius_layer_mode"] == "ends"
+    assert meta["fixed_k_radius"] == [0, 1, 4, 5]
 
 
 def test_format_iter_log() -> None:

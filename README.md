@@ -32,6 +32,18 @@ python -m halbach.cli.generate_run --out runs/demo `
   --N 48 --R 3 --K 24 --Lz 0.64 --diameter-mm 400 --ring-offset-step-mm 12
 ```
 
+端部 z 層だけ R 方向の層数を増やす場合は、`--end-R` と
+`--end-layers-per-side` を追加します。
+```powershell
+python -m halbach.cli.generate_run --out runs/demo_end `
+  --N 48 --R 2 --end-R 3 --end-layers-per-side 3 `
+  --K 24 --Lz 0.64 --diameter-mm 400 --ring-offset-step-mm 12
+```
+- `R`: 基準の radial 層数
+- `end_R`: 各端部の最終 radial 層数
+- `end_layers_per_side`: 各端で `end_R` を使う z 層数
+- `end_R == R` または `end_layers_per_side == 0` なら従来どおり一様 profile
+
 生成物:
 - `runs/demo/results.npz`
 - `runs/demo/meta.json`
@@ -43,6 +55,7 @@ python -m halbach.cli.optimize_run --in runs/demo --out runs/demo_opt `
   --roi-r 0.14 --roi-mode surface-fibonacci --roi-samples 300 `
   --field-scale 1e6 `
   --angle-model legacy-alpha --grad-backend analytic `
+  --fix-radius-layer-mode center `
   --fix-center-radius-layers 2 `
   --r-bound-mode relative --r-lower-delta-mm 30 --r-upper-delta-mm 30
 ```
@@ -62,6 +75,7 @@ GUI でできること:
 - run の可視化（2D/3D）
 - `generate_run` / `optimize_run` の実行
 - 角度モデル / 自己無撞着 / ROI 等のパラメータ設定
+- Generate initial run で `End-layer R` / `End layers / side` を指定可能
 
 ---
 
@@ -163,6 +177,15 @@ self-consistent の内部:
 - p-solver（固定点反復 / 解析的反復）で `p` を更新
 - **p は field_scale に依存しない**
 
+### 4.1 可変 radial-profile
+端部だけ radial 層数を増やす profile をサポートします。
+
+- profile は **対称 end-only** に限定
+- active 条件は `r < radial_count_per_layer[k]`
+- 実装上は `R_max = max(R, end_R)` の dense 配列を保持し、
+  inactive ring は `ring_active_mask` で無効化
+- 旧 run は `ring_active_mask = all True` の uniform profile として自動互換
+
 ---
 
 ## 5. 物理モデルと目的関数
@@ -215,6 +238,7 @@ runs/<run_name>/
 - `alphas_opt` (R,K) / `r_bases_opt` (K,)
 - `theta`, `sin2th`, `cth`, `sth`, `z_layers`, `ring_offsets`
 - `J_hist`, `Jn_hist`, `B0_hist`（履歴）
+- `radial_count_per_layer` (K,) / `ring_active_mask` (R_max,K)
 
 角度モデルに応じて追加:
 - `delta_rep_opt` (K, n_rep)
@@ -227,6 +251,25 @@ runs/<run_name>/
 - `meta.json`: 幾何・最適化条件・モデル設定（angle_model / mag_model / near_kernel など）
 - `trace.json`: 反復履歴（J, B0, gnorm, sc_extras など）
 - `opt.log`: CLI 実行ログ（GUI からの起動も同様に出力）
+
+`meta.json` には radial profile も保存されます。
+```json
+{
+  "radial_profile": {
+    "mode": "uniform | end-only",
+    "base_R": 2,
+    "end_R": 3,
+    "end_layers_per_side": 3,
+    "R_max": 3
+  }
+}
+```
+
+radius-only 固定は `center` / `ends` の 2 モードです。
+- `--fix-radius-layer-mode center --fix-center-radius-layers 2`
+  - 中央 2 層を固定
+- `--fix-radius-layer-mode ends --fix-center-radius-layers 2`
+  - 両端 1 層ずつ固定
 
 ### 7.3 debug bundle（任意）
 `debug_sc_run` 実行時は `runs/<run_name>/sc_debug/` に以下が追加されます:

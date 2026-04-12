@@ -129,6 +129,7 @@ def test_dryrun_uses_self_consistent_objective(
         r_max_mm=1e9,
         min_radius_drop_mm=None,
         fix_center_radius_layers=2,
+        fix_radius_layer_mode="center",
         log_level="INFO",
         debug_stacks_secs=0,
         sc_debug=False,

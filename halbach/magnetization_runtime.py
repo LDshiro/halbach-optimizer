@@ -12,6 +12,11 @@ from numpy.typing import NDArray
 from halbach.constants import FACTOR, m0
 from halbach.near import NearWindow, build_near_graph, edges_from_near
 from halbach.physics import compute_B_and_B0_from_m_flat
+from halbach.radial_profile import (
+    build_radial_count_per_layer,
+    build_ring_active_mask,
+    flatten_ring_active_mask,
+)
 from halbach.types import Geometry
 
 EPS = 1e-30
@@ -49,6 +54,34 @@ def _load_meta(run_dir: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"meta.json in {run_dir} must be a JSON object")
     return cast(dict[str, Any], data)
+
+
+def _load_ring_active_mask(
+    run_dir: Path,
+    *,
+    R: int,
+    K: int,
+    meta: dict[str, Any],
+) -> NDArray[np.bool_]:
+    results_path = run_dir / "results.npz"
+    if results_path.is_file():
+        try:
+            with np.load(results_path, allow_pickle=False) as data:
+                if "ring_active_mask" in data:
+                    mask = np.asarray(data["ring_active_mask"], dtype=np.bool_)
+                    if mask.shape == (R, K):
+                        return mask
+        except Exception:
+            pass
+
+    radial_meta = meta.get("radial_profile", {})
+    if isinstance(radial_meta, dict):
+        base_R = int(radial_meta.get("base_R", R))
+        end_R = int(radial_meta.get("end_R", base_R))
+        end_layers = int(radial_meta.get("end_layers_per_side", 0))
+        counts = build_radial_count_per_layer(K, base_R, end_R, end_layers)
+        return build_ring_active_mask(counts, R)
+    return np.ones((R, K), dtype=np.bool_)
 
 
 def _load_beta_tilt_x_rk(run_dir: Path, *, R: int, K: int) -> NDArray[np.float64]:
@@ -155,6 +188,7 @@ def compute_p_flat_self_consistent_jax(
     sc_cfg: dict[str, Any],
     *,
     beta_tilt_x_rk: NDArray[np.float64] | None = None,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.float64]:
     """
     Compute p_flat via self-consistent solver (JAX required).
@@ -180,6 +214,16 @@ def compute_p_flat_self_consistent_jax(
         int(geom.N),
         NearWindow(wr=int(window["wr"]), wz=int(window["wz"]), wphi=int(window["wphi"])),
     )
+
+    active_flat_np: NDArray[np.bool_] | None = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=np.bool_)
+        expected = (int(geom.R), int(geom.K))
+        if mask.shape != expected:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match expected {expected}"
+            )
+        active_flat_np = flatten_ring_active_mask(mask, int(geom.N))
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
     r0_flat = np.asarray(r0_rkn, dtype=np.float64).reshape(-1, 3)
@@ -209,9 +253,14 @@ def compute_p_flat_self_consistent_jax(
     r0_j = jnp.asarray(r0_flat, dtype=jnp.float64)
     nbr_idx_j = jnp.asarray(near.nbr_idx, dtype=jnp.int32)
     nbr_mask_j = jnp.asarray(near.nbr_mask, dtype=bool)
+    active_flat_j = (
+        None if active_flat_np is None else jnp.asarray(active_flat_np, dtype=jnp.float64)
+    )
 
     if float(sc["chi"]) == 0.0:
         p_flat = jnp.full((phi_j.shape[0],), float(sc["p0"]), dtype=jnp.float64)
+        if active_flat_j is not None:
+            p_flat = p_flat * active_flat_j
     else:
         if sc["near_kernel"] == "dipole":
             p_flat = solve_p_easy_axis_near_from_u(
@@ -225,6 +274,7 @@ def compute_p_flat_self_consistent_jax(
                 volume_m3=volume_m3,
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
+                active_flat=active_flat_j,
             )
         elif sc["near_kernel"] == "multi-dipole":
             p_flat = solve_p_easy_axis_near_multi_dipole_from_u(
@@ -239,6 +289,7 @@ def compute_p_flat_self_consistent_jax(
                 subdip_n=int(sc["subdip_n"]),
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
+                active_flat=active_flat_j,
             )
         elif sc["near_kernel"] == "cellavg":
             if has_beta:
@@ -256,6 +307,7 @@ def compute_p_flat_self_consistent_jax(
                 volume_m3=volume_m3,
                 iters=int(sc["iters"]),
                 omega=float(sc["omega"]),
+                active_flat=active_flat_j,
             )
         elif sc["near_kernel"] == "gl-double-mixed":
             if has_beta:
@@ -303,11 +355,15 @@ def compute_p_flat_self_consistent_jax(
                 delta_hi_offsets=delta_hi_offsets,
                 delta_hi_w=delta_hi_w,
                 implicit_diff=False,
+                active_flat=active_flat_j,
             )
         else:
             raise ValueError(f"Unsupported near_kernel: {sc['near_kernel']}")
 
-    return np.asarray(p_flat, dtype=np.float64)
+    p_out = np.asarray(p_flat, dtype=np.float64)
+    if active_flat_np is not None:
+        p_out = p_out * active_flat_np.astype(np.float64)
+    return p_out
 
 
 def build_m_flat_from_phi_and_p(
@@ -384,6 +440,8 @@ def compute_m_flat_from_run(
         sc_cfg = sc_cfg_meta
 
     phi_flat = np.asarray(phi_rkn, dtype=np.float64).reshape(-1)
+    ring_active_mask = _load_ring_active_mask(run_dir, R=int(geom.R), K=int(geom.K), meta=meta)
+    active_flat = flatten_ring_active_mask(ring_active_mask, int(geom.N)).astype(np.float64)
     beta_rk = _load_beta_tilt_x_rk(run_dir, R=int(geom.R), K=int(geom.K))
     beta_rkn = np.broadcast_to(beta_rk[:, :, None], np.asarray(phi_rkn).shape)
     beta_flat = np.asarray(beta_rkn, dtype=np.float64).reshape(-1)
@@ -411,7 +469,7 @@ def compute_m_flat_from_run(
                             and p_candidate.shape == (phi_flat.size,)
                             and not has_beta
                         ):
-                            p_flat = p_candidate
+                            p_flat = p_candidate * active_flat
                             sc_source = "saved"
             except Exception:
                 p_flat = None
@@ -426,11 +484,14 @@ def compute_m_flat_from_run(
                 geom,
                 sc_cfg,
                 beta_tilt_x_rk=beta_rk,
+                ring_active_mask=ring_active_mask,
             )
     else:
-        p_flat = np.full(phi_flat.shape, float(m0), dtype=np.float64)
+        p_flat = np.full(phi_flat.shape, float(m0), dtype=np.float64) * active_flat
 
     assert p_flat is not None
+    beta_flat = beta_flat * active_flat
+    p_flat = p_flat * active_flat
     m_flat = build_m_flat_from_phi_beta_and_p(phi_flat, beta_flat, p_flat)
 
     debug: dict[str, Any] = {"model_effective": model_effective}
@@ -438,10 +499,13 @@ def compute_m_flat_from_run(
         debug["model_effective_meta"] = model_effective_meta
         debug["model_effective_eval"] = model_effective
     if model_effective == "self-consistent-easy-axis":
-        p_min = float(np.min(p_flat))
-        p_max = float(np.max(p_flat))
-        p_mean = float(np.mean(p_flat))
-        p_std = float(np.std(p_flat))
+        active_vals = p_flat[active_flat > 0.0]
+        if active_vals.size == 0:
+            active_vals = np.zeros(1, dtype=np.float64)
+        p_min = float(np.min(active_vals))
+        p_max = float(np.max(active_vals))
+        p_mean = float(np.mean(active_vals))
+        p_std = float(np.std(active_vals))
         p_rel_std = p_std / (abs(p_mean) + EPS)
         sc = _parse_sc_cfg(sc_cfg)
         debug.update(

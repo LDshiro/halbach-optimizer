@@ -80,6 +80,7 @@ def _build_objective_only(
     factor_val: float,
     phi0_val: float,
     implicit_diff: bool,
+    active_rk: jnp.ndarray | None,
 ) -> Callable[[Any, Any, Any], tuple[Any, Any]]:
     denom = 1.0 + chi * Nd
 
@@ -104,9 +105,14 @@ def _build_objective_only(
 
         r0_flat = r0.reshape(-1, 3)
         u_flat = u_rkn.reshape(-1, 3)
+        active_flat = None
+        if active_rk is not None:
+            active_flat = jnp.broadcast_to(active_rk[:, :, None], (R, K, N)).reshape(-1)
 
         if chi == 0.0:
             p_flat = jnp.full((u_flat.shape[0],), p0, dtype=r0_flat.dtype)
+            if active_flat is not None:
+                p_flat = p_flat * active_flat.astype(r0_flat.dtype)
             h_ext = jnp.zeros_like(p_flat)
         else:
             if near_kernel_norm == "dipole":
@@ -124,6 +130,7 @@ def _build_objective_only(
                     implicit_diff=implicit_diff,
                     i_edge=i_edge,
                     j_edge=j_edge,
+                    active_flat=active_flat,
                 )
                 kij = _build_kij_dipole_from_u(u_flat, r0_flat, nbr_idx, nbr_mask)
                 h_ext = _h_from_kij(p_flat, nbr_idx, nbr_mask, kij)
@@ -143,6 +150,7 @@ def _build_objective_only(
                     implicit_diff=implicit_diff,
                     i_edge=i_edge,
                     j_edge=j_edge,
+                    active_flat=active_flat,
                 )
                 cube_edge = float(volume_m3) ** (1.0 / 3.0)
                 offsets = (np.arange(int(subdip_n), dtype=np.float64) + 0.5) / float(subdip_n) - 0.5
@@ -158,16 +166,22 @@ def _build_objective_only(
                     "beta_tilt_x with self-consistent supports near_kernel only in {'dipole','multi-dipole'}"
                 )
 
-        p_min = jnp.min(p_flat)
-        p_max = jnp.max(p_flat)
-        p_mean = jnp.mean(p_flat)
-        p_std = jnp.std(p_flat)
+        if active_flat is None:
+            active_vec = jnp.ones_like(p_flat)
+        else:
+            active_vec = active_flat.astype(p_flat.dtype)
+        active_count = jnp.maximum(jnp.sum(active_vec), 1.0)
+        p_eff = p_flat * active_vec
+        p_min = jnp.min(jnp.where(active_vec > 0.0, p_eff, jnp.inf))
+        p_max = jnp.max(jnp.where(active_vec > 0.0, p_eff, -jnp.inf))
+        p_mean = jnp.sum(p_eff) / active_count
+        p_std = jnp.sqrt(jnp.sum(active_vec * (p_eff - p_mean) ** 2) / active_count)
         p_rel_std = p_std / (jnp.abs(p_mean) + EPS)
 
-        res_vec = denom * p_flat - (p0 + chi * volume_m3 * h_ext)
-        res_rel = jnp.linalg.norm(res_vec) / jnp.maximum(jnp.linalg.norm(p_flat), EPS)
+        res_vec = active_vec * (denom * p_flat - (p0 + chi * volume_m3 * h_ext))
+        res_rel = jnp.linalg.norm(res_vec) / jnp.maximum(jnp.linalg.norm(p_eff), EPS)
 
-        m_flat = p_flat[:, None] * u_flat
+        m_flat = p_eff[:, None] * u_flat
         B_all = _compute_b_all_from_m(m_flat, r0_flat, pts, factor_val)
         B = B_all[:-1]
         B0 = B_all[-1]
@@ -201,6 +215,7 @@ def _get_compiled_vg(
     factor_val: float,
     phi0_val: float,
     implicit_diff: bool,
+    active_rk: NDArray[np.bool_] | None,
 ) -> Callable[..., Any]:
     key = (
         id(theta),
@@ -226,6 +241,9 @@ def _get_compiled_vg(
         float(factor_val),
         float(phi0_val),
         bool(implicit_diff),
+        id(active_rk),
+        None if active_rk is None else active_rk.shape,
+        -1 if active_rk is None else int(np.count_nonzero(active_rk)),
     )
 
     def build_fn() -> Callable[..., Any]:
@@ -238,6 +256,7 @@ def _get_compiled_vg(
         pts_j = jnp.asarray(pts, dtype=jnp.float64)
         nbr_idx_j = jnp.asarray(nbr_idx, dtype=jnp.int32)
         nbr_mask_j = jnp.asarray(nbr_mask, dtype=bool)
+        active_rk_j = None if active_rk is None else jnp.asarray(active_rk, dtype=bool)
         i_edge_np, j_edge_np = edges_from_near(
             np.asarray(nbr_idx, dtype=np.int32), np.asarray(nbr_mask, dtype=bool)
         )
@@ -266,6 +285,7 @@ def _get_compiled_vg(
             factor_val=float(factor_val),
             phi0_val=float(phi0_val),
             implicit_diff=bool(implicit_diff),
+            active_rk=active_rk_j,
         )
         return cast(
             Callable[..., Any],
@@ -296,6 +316,7 @@ def objective_with_grads_self_consistent_legacy_beta_tilt_jax(
     phi0_val: float = phi0,
     use_jit: bool = True,
     implicit_diff: bool = True,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[
     float,
     NDArray[np.float64],
@@ -306,6 +327,14 @@ def objective_with_grads_self_consistent_legacy_beta_tilt_jax(
 ]:
     """JAX objective and gradients for legacy-alpha + beta_tilt_x (self-consistent)."""
     near_kernel_norm = "cellavg" if near_kernel == "cube-average" else str(near_kernel)
+    active_rk_np: NDArray[np.bool_] | None = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=np.bool_)
+        if mask.shape != alphas.shape:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match alphas shape {alphas.shape}"
+            )
+        active_rk_np = mask
     if near_kernel_norm not in ("dipole", "multi-dipole"):
         raise ValueError(
             "beta_tilt_x with self-consistent supports near_kernel only in {'dipole','multi-dipole'}"
@@ -345,6 +374,7 @@ def objective_with_grads_self_consistent_legacy_beta_tilt_jax(
             factor_val=float(factor_val),
             phi0_val=float(phi0_val),
             implicit_diff=bool(implicit_diff),
+            active_rk=active_rk_np,
         )
         (J, aux), grads = vg(alphas_j, beta_j, r_bases_j)
     else:
@@ -357,6 +387,7 @@ def objective_with_grads_self_consistent_legacy_beta_tilt_jax(
         pts_j = jnp.asarray(pts, dtype=jnp.float64)
         nbr_idx_j = jnp.asarray(nbr_idx, dtype=jnp.int32)
         nbr_mask_j = jnp.asarray(nbr_mask, dtype=bool)
+        active_rk_j = None if active_rk_np is None else jnp.asarray(active_rk_np, dtype=bool)
         i_edge_np, j_edge_np = edges_from_near(
             np.asarray(nbr_idx, dtype=np.int32), np.asarray(nbr_mask, dtype=bool)
         )
@@ -385,6 +416,7 @@ def objective_with_grads_self_consistent_legacy_beta_tilt_jax(
             factor_val=float(factor_val),
             phi0_val=float(phi0_val),
             implicit_diff=bool(implicit_diff),
+            active_rk=active_rk_j,
         )
         (J, aux), grads = jax.value_and_grad(objective_only, argnums=(0, 1, 2), has_aux=True)(
             alphas_j, beta_j, r_bases_j

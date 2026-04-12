@@ -21,24 +21,30 @@ def test_build_command_basic(tmp_path: Path) -> None:
         gtol=1e-12,
         roi_r=0.14,
         roi_step=0.02,
+        roi_samples=456,
         r_bound_mode="relative",
         r_lower_delta_mm=25.0,
         r_upper_delta_mm=35.0,
         r_no_upper=True,
         r_min_mm=0.0,
         r_max_mm=1000.0,
+        fix_radius_layer_mode="ends",
     )
     assert cmd[0] == sys.executable
     assert cmd[1:4] == ["-u", "-m", "halbach.cli.optimize_run"]
     assert "--in" in cmd
     assert "--out" in cmd
     assert "--r-bound-mode" in cmd
+    assert "--roi-samples" in cmd
+    assert cmd[cmd.index("--roi-samples") + 1] == "456"
     assert "--r-lower-delta-mm" in cmd
     assert "--r-upper-delta-mm" in cmd
     assert "--r-no-upper" in cmd
     assert "--r-min-mm" in cmd
     assert "--r-max-mm" in cmd
     assert "--fix-center-radius-layers" in cmd
+    assert "--fix-radius-layer-mode" in cmd
+    assert cmd[cmd.index("--fix-radius-layer-mode") + 1] == "ends"
     assert "--mag-model" not in cmd
     assert "--sc-chi" not in cmd
 
@@ -112,6 +118,8 @@ def test_build_generate_command_basic(tmp_path: Path) -> None:
         Lz=0.64,
         diameter_mm=400.0,
         ring_offset_step_mm=12.0,
+        end_R=4,
+        end_layers_per_side=3,
         name="demo",
     )
     assert cmd[0] == sys.executable
@@ -119,6 +127,10 @@ def test_build_generate_command_basic(tmp_path: Path) -> None:
     assert "--out" in cmd
     assert "--N" in cmd
     assert "--diameter-mm" in cmd
+    assert "--end-R" in cmd
+    assert cmd[cmd.index("--end-R") + 1] == "4"
+    assert "--end-layers-per-side" in cmd
+    assert cmd[cmd.index("--end-layers-per-side") + 1] == "3"
     assert "--name" in cmd
 
 
@@ -126,6 +138,18 @@ def test_build_generate_out_dir_naming(tmp_path: Path) -> None:
     stamp = datetime(2025, 1, 2, 3, 4, 5)
     out_dir = build_generate_out_dir(tmp_path, tag="init", N=48, R=3, K=24, timestamp=stamp)
     assert out_dir.name == "20250102_030405_init_N48_R3_K24"
+
+    out_dir_profile = build_generate_out_dir(
+        tmp_path,
+        tag="init",
+        N=48,
+        R=2,
+        K=24,
+        end_R=3,
+        end_layers_per_side=3,
+        timestamp=stamp,
+    )
+    assert out_dir_profile.name == "20250102_030405_init_N48_R2to3_E3_K24"
 
     out_dir.mkdir()
     out_dir2 = build_generate_out_dir(

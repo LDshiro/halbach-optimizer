@@ -1,6 +1,6 @@
 import numpy as np
 
-from halbach.geom import build_param_map, pack_grad, pack_x, unpack_x
+from halbach.geom import build_param_map, fixed_radius_layer_indices, pack_grad, pack_x, unpack_x
 
 
 def test_pack_unpack_keeps_fixed_layers() -> None:
@@ -55,3 +55,29 @@ def test_pack_grad_sums_symmetric_pairs() -> None:
     grad_x = pack_grad(grad_alphas, grad_r, param_map)
     n_alpha = int(param_map.free_alpha_idx.size)
     assert grad_x[n_alpha] == 3.0
+
+
+def test_fixed_radius_layer_indices_for_center_and_ends() -> None:
+    np.testing.assert_array_equal(fixed_radius_layer_indices(10, 2, "center"), np.array([4, 5]))
+    np.testing.assert_array_equal(
+        fixed_radius_layer_indices(10, 4, "center"), np.array([3, 4, 5, 6])
+    )
+    np.testing.assert_array_equal(fixed_radius_layer_indices(10, 2, "ends"), np.array([0, 9]))
+    np.testing.assert_array_equal(fixed_radius_layer_indices(10, 4, "ends"), np.array([0, 1, 8, 9]))
+
+
+def test_build_param_map_supports_end_fixed_layers() -> None:
+    param_map = build_param_map(R=2, K=10, n_fix_radius=4, fix_radius_mode="ends")
+    np.testing.assert_array_equal(param_map.fixed_k_radius, np.array([0, 1, 8, 9]))
+    assert param_map.free_r_idx.size == 3
+
+
+def test_unpack_x_keeps_end_fixed_layers_at_initial_values() -> None:
+    param_map = build_param_map(R=1, K=10, n_fix_radius=4, fix_radius_mode="ends")
+    alphas0 = np.zeros((1, 10), dtype=float)
+    r_bases0 = np.linspace(0.1, 0.19, 10)
+    x0 = pack_x(alphas0, r_bases0, param_map)
+    _, r_bases1 = unpack_x(x0 + 1.0, alphas0, r_bases0, param_map)
+    np.testing.assert_allclose(
+        r_bases1[param_map.fixed_k_radius], r_bases0[param_map.fixed_k_radius]
+    )

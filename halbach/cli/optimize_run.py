@@ -29,6 +29,7 @@ from halbach.geom import (
 )
 from halbach.magnetization_runtime import compute_p_flat_self_consistent_jax, sc_cfg_fingerprint
 from halbach.objective import objective_with_grads_fixed
+from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
 from halbach.run_io import load_run
 from halbach.sc_debug import make_sc_debug_bundle
 from halbach.solvers.lbfgsb import solve_lbfgsb
@@ -219,7 +220,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         choices=[0, 2, 4],
         default=2,
-        help="number of center z-layers to fix radius only (0, 2, or 4)",
+        help="number of radius-only fixed z-layers in total (0, 2, or 4)",
+    )
+    ap.add_argument(
+        "--fix-radius-layer-mode",
+        type=str,
+        choices=["center", "ends"],
+        default="center",
+        help="radius-only fixed layer mode",
     )
     ap.add_argument(
         "--log-level",
@@ -348,11 +356,42 @@ def _build_beta_symmetry_indices(K: int) -> tuple[NDArray[np.int_], NDArray[np.i
     return np.asarray(reps, dtype=np.int_), np.asarray(mates, dtype=np.int_)
 
 
+def _param_map_with_ring_activity(
+    param_map: ParamMap,
+    ring_active_mask: NDArray[np.bool_],
+) -> ParamMap:
+    active_mask = np.asarray(ring_active_mask, dtype=np.bool_).reshape(-1)
+    return ParamMap(
+        free_alpha_idx=np.flatnonzero(active_mask).astype(np.int_),
+        free_r_idx=param_map.free_r_idx,
+        free_alpha_mask=active_mask,
+        free_r_mask=param_map.free_r_mask,
+        lower_var=param_map.lower_var,
+        upper_var=param_map.upper_var,
+        lower_to_upper=param_map.lower_to_upper,
+        fixed_k_radius=param_map.fixed_k_radius,
+    )
+
+
+def _build_beta_active_mask(
+    ring_active_mask: NDArray[np.bool_],
+    beta_rep_k: NDArray[np.int_],
+    beta_mate_k: NDArray[np.int_],
+) -> NDArray[np.bool_]:
+    rep_mask = np.asarray(ring_active_mask[:, beta_rep_k], dtype=np.bool_)
+    mate_mask = np.asarray(ring_active_mask[:, beta_mate_k], dtype=np.bool_)
+    if rep_mask.shape != mate_mask.shape or not np.array_equal(rep_mask, mate_mask):
+        raise ValueError("beta_tilt_x requires mirrored active ring mask across z layers")
+    return rep_mask
+
+
 def _pack_beta_vars(
     beta_tilt_x: NDArray[np.float64],
     beta_rep_k: NDArray[np.int_],
+    beta_active_mask: NDArray[np.bool_],
 ) -> NDArray[np.float64]:
-    return np.asarray(beta_tilt_x[:, beta_rep_k], dtype=np.float64).reshape(-1)
+    beta_rep = np.asarray(beta_tilt_x[:, beta_rep_k], dtype=np.float64)
+    return np.asarray(beta_rep[beta_active_mask], dtype=np.float64)
 
 
 def _apply_beta_vars(
@@ -360,14 +399,18 @@ def _apply_beta_vars(
     beta0: NDArray[np.float64],
     beta_rep_k: NDArray[np.int_],
     beta_mate_k: NDArray[np.int_],
+    beta_active_mask: NDArray[np.bool_],
 ) -> NDArray[np.float64]:
     beta = np.array(beta0, dtype=np.float64, copy=True)
     K = int(beta.shape[1])
     R = int(beta.shape[0])
-    expected = int(R * beta_rep_k.size)
+    vals = np.zeros((R, beta_rep_k.size), dtype=np.float64)
+    expected = int(np.count_nonzero(beta_active_mask))
     if beta_vars.size != expected:
         raise ValueError(f"beta_vars size {beta_vars.size} does not match expected {expected}")
-    vals = beta_vars.reshape(R, beta_rep_k.size)
+    vals[beta_active_mask] = beta_vars
+    beta[:, beta_rep_k] = 0.0
+    beta[:, beta_mate_k] = 0.0
     for idx, k in enumerate(beta_rep_k):
         km = int(beta_mate_k[idx])
         beta[:, k] = vals[:, idx]
@@ -381,12 +424,13 @@ def _pack_beta_grad(
     grad_beta: NDArray[np.float64],
     beta_rep_k: NDArray[np.int_],
     beta_mate_k: NDArray[np.int_],
+    beta_active_mask: NDArray[np.bool_],
 ) -> NDArray[np.float64]:
     g = np.zeros((grad_beta.shape[0], beta_rep_k.size), dtype=np.float64)
     for idx, k in enumerate(beta_rep_k):
         km = int(beta_mate_k[idx])
         g[:, idx] = grad_beta[:, k] - grad_beta[:, km]
-    return g.reshape(-1)
+    return np.asarray(g[beta_active_mask], dtype=np.float64)
 
 
 def _build_r0_rkn_from_r_bases(r_bases: NDArray[np.float64], geom: Geometry) -> NDArray[np.float64]:
@@ -601,9 +645,18 @@ def run_optimize(args: argparse.Namespace) -> int:
     run = load_run(in_path)
     logger.info("load_run done in %.3fs", perf_counter() - t_load)
     geom = run.geometry
-    param_map = build_param_map(geom.R, geom.K, n_fix_radius=int(args.fix_center_radius_layers))
+    radial_profile = radial_profile_from_run(run)
+    ring_active_mask = np.asarray(radial_profile.ring_active_mask, dtype=np.bool_)
+    param_map_base = build_param_map(
+        geom.R,
+        geom.K,
+        n_fix_radius=int(args.fix_center_radius_layers),
+        fix_radius_mode=cast(Literal["center", "ends"], args.fix_radius_layer_mode),
+    )
+    param_map = _param_map_with_ring_activity(param_map_base, ring_active_mask)
     legacy_alpha_dim = int(param_map.free_alpha_idx.size)
     alphas0 = np.array(run.results.alphas, dtype=np.float64, copy=True)
+    alphas0[~ring_active_mask] = 0.0
     r_bases0 = np.array(run.results.r_bases, dtype=np.float64, copy=True)
 
     angle_model = cast(str, args.angle_model)
@@ -709,6 +762,7 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     sc_final_extras: dict[str, Any] | None = None
     beta_dim = 0
+    beta_active_mask: NDArray[np.bool_] | None = None
     if angle_model == "legacy-alpha":
         if angle_init == "zeros":
             alphas0 = np.zeros_like(alphas0)
@@ -728,13 +782,14 @@ def run_optimize(args: argparse.Namespace) -> int:
             if angle_init == "zeros":
                 beta_tilt_x0 = np.zeros_like(beta_tilt_x0)
             alpha_vars0 = np.asarray(alphas0.ravel()[param_map.free_alpha_idx], dtype=np.float64)
-            beta_vars0 = _pack_beta_vars(beta_tilt_x0, beta_rep_k)
+            beta_active_mask = _build_beta_active_mask(ring_active_mask, beta_rep_k, beta_mate_k)
+            beta_vars0 = _pack_beta_vars(beta_tilt_x0, beta_rep_k, beta_active_mask)
             r_vars0 = _pack_r_vars(r_bases0, param_map)
             x0 = cast(Float1DArray, np.concatenate([alpha_vars0, beta_vars0, r_vars0]))
             beta_dim = int(beta_vars0.size)
             angle_dim = int(alpha_vars0.size + beta_dim)
         else:
-            angle_dim = int(alphas0.size)
+            angle_dim = int(legacy_alpha_dim)
             x0 = pack_x(alphas0, r_bases0, param_map)
     elif angle_model == "delta-rep-x0":
         mirror = build_mirror_x0(int(geom.N))
@@ -845,13 +900,26 @@ def run_optimize(args: argparse.Namespace) -> int:
             bounds[idx] = (-beta_bound_rad, beta_bound_rad)
 
     radius_dim_free = int(param_map.free_r_idx.size)
+    active_ring_var_count = int(np.count_nonzero(ring_active_mask))
+    active_magnet_count = int(
+        np.count_nonzero(flatten_ring_active_mask(ring_active_mask, int(geom.N)))
+    )
     logger.info(
-        "x_dim total = %d, angle_dim = %d (beta_dim=%d), radius_dim_free = %d, fixed_radius_layers = %s",
+        "x_dim total = %d, angle_dim = %d (beta_dim=%d), radius_dim_free = %d, "
+        "fixed_radius_layers = %s, fix_radius_layer_mode=%s, radial_profile=%s "
+        "base_R=%d end_R=%d end_layers=%d active_ring_vars=%d active_magnets=%d",
         x0.size,
         angle_dim,
         beta_dim,
         radius_dim_free,
         param_map.fixed_k_radius.tolist(),
+        str(args.fix_radius_layer_mode),
+        radial_profile.mode,
+        radial_profile.base_r,
+        radial_profile.end_r,
+        radial_profile.end_layers_per_side,
+        active_ring_var_count,
+        active_magnet_count,
     )
     logger.info(
         "radius bounds: mode=%s lower_delta_mm=%.3f upper_delta_mm=%.3f no_upper=%s min_mm=%.3f max_mm=%.3f",
@@ -922,7 +990,15 @@ def run_optimize(args: argparse.Namespace) -> int:
                 alphas = np.array(alphas0, dtype=np.float64, copy=True)
                 al_flat = alphas.ravel()
                 al_flat[param_map.free_alpha_idx] = alpha_vars
-                beta_tilt_x = _apply_beta_vars(beta_vars, beta_tilt_x0, beta_rep_k, beta_mate_k)
+                if beta_active_mask is None:
+                    raise ValueError("beta_tilt_x active mask is missing")
+                beta_tilt_x = _apply_beta_vars(
+                    beta_vars,
+                    beta_tilt_x0,
+                    beta_rep_k,
+                    beta_mate_k,
+                    beta_active_mask,
+                )
                 r_bases = _apply_r_vars(r_vars, r_bases0, param_map)
 
                 if mag_model_effective == "self-consistent-easy-axis":
@@ -951,6 +1027,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                             omega=float(args.sc_omega),
                             factor=factor,
                             phi0_val=phi0,
+                            ring_active_mask=ring_active_mask,
                         )
                     )
                 else:
@@ -959,11 +1036,19 @@ def run_optimize(args: argparse.Namespace) -> int:
                     )
 
                     J_data, gA_y, gB_y, gRb_y, B0n = objective_with_grads_fixed_beta_tilt_jax(
-                        alphas, beta_tilt_x, r_bases, geom, pts, factor=factor
+                        alphas,
+                        beta_tilt_x,
+                        r_bases,
+                        geom,
+                        pts,
+                        factor=factor,
+                        ring_active_mask=ring_active_mask,
                     )
 
                 g_alpha_free = np.asarray(gA_y.ravel()[param_map.free_alpha_idx], dtype=np.float64)
-                g_beta_free = _pack_beta_grad(gB_y, beta_rep_k, beta_mate_k)
+                if beta_active_mask is None:
+                    raise ValueError("beta_tilt_x active mask is missing")
+                g_beta_free = _pack_beta_grad(gB_y, beta_rep_k, beta_mate_k, beta_active_mask)
                 g_r_free = _pack_r_grad(gRb_y, param_map)
                 gx = cast(Float1DArray, np.concatenate([g_alpha_free, g_beta_free, g_r_free]))
                 J_total = float(J_data)
@@ -971,7 +1056,12 @@ def run_optimize(args: argparse.Namespace) -> int:
                 if grad_backend == "analytic":
                     alphas, r_bases = unpack_x(x, alphas0, r_bases0, param_map)
                     J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed(
-                        alphas, r_bases, geom, pts, factor=factor
+                        alphas,
+                        r_bases,
+                        geom,
+                        pts,
+                        factor=factor,
+                        ring_active_mask=ring_active_mask,
                     )
                     gx = pack_grad(gA_y, gRb_y, param_map)
                     J_total = float(J_data)
@@ -1003,13 +1093,19 @@ def run_optimize(args: argparse.Namespace) -> int:
                                 omega=float(args.sc_omega),
                                 factor=factor,
                                 phi0_val=phi0,
+                                ring_active_mask=ring_active_mask,
                             )
                         )
                     else:
                         from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
 
                         J_data, gA_y, gRb_y, B0n = objective_with_grads_fixed_jax(
-                            alphas, r_bases, geom, pts, factor=factor
+                            alphas,
+                            r_bases,
+                            geom,
+                            pts,
+                            factor=factor,
+                            ring_active_mask=ring_active_mask,
                         )
                     gx = pack_grad(gA_y, gRb_y, param_map)
                     J_total = float(J_data)
@@ -1051,6 +1147,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         lambda_z=float(args.lambda_z),
                         factor=factor,
                         phi0=phi0,
+                        ring_active_mask=ring_active_mask,
                     )
                 )
             else:
@@ -1065,6 +1162,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     factor=factor,
                     phi0=phi0,
                     m0=m0,
+                    ring_active_mask=ring_active_mask,
                 )
             gx = cast(
                 Float1DArray,
@@ -1110,6 +1208,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         lambda_z=float(args.lambda_z),
                         factor=factor,
                         phi0=phi0,
+                        ring_active_mask=ring_active_mask,
                     )
                 )
             else:
@@ -1125,6 +1224,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     factor=factor,
                     phi0=phi0,
                     m0=m0,
+                    ring_active_mask=ring_active_mask,
                 )
             gx = cast(
                 Float1DArray,
@@ -1148,7 +1248,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 deg = int(sc_extras.get("sc_near_deg_max", 0))
                 subdip_n = int(sc_extras.get("sc_subdip_n", 1))
                 S = subdip_n**3 if str(args.sc_near_kernel) == "multi-dipole" else 1
-                M = int(geom.R * geom.K * geom.N)
+                M = active_magnet_count
                 approx_pairs = M * deg
                 approx_evals = approx_pairs * S
                 logger.info(
@@ -1253,12 +1353,20 @@ def run_optimize(args: argparse.Namespace) -> int:
                     definition="ux=cos(beta)cos(phi), uy=cos(beta)sin(phi), uz=sin(beta)",
                 )
             ),
+            radial_profile=dict(
+                mode=str(radial_profile.mode),
+                base_R=int(radial_profile.base_r),
+                end_R=int(radial_profile.end_r),
+                end_layers_per_side=int(radial_profile.end_layers_per_side),
+                R_max=int(radial_profile.r_max),
+            ),
             magnetization=dict(
                 model_requested=mag_model_requested,
                 model_effective=mag_model_effective,
                 self_consistent=sc_cfg_payload,
             ),
             fix_center_radius_layers=int(args.fix_center_radius_layers),
+            fix_radius_layer_mode=str(args.fix_radius_layer_mode),
             fixed_k_radius=param_map.fixed_k_radius.tolist(),
             dry_run=True,
         )
@@ -1295,7 +1403,15 @@ def run_optimize(args: argparse.Namespace) -> int:
             al_opt = np.array(alphas0, dtype=np.float64, copy=True)
             al_flat = al_opt.ravel()
             al_flat[param_map.free_alpha_idx] = alpha_vars
-            beta_tilt_x_opt = _apply_beta_vars(beta_vars, beta_tilt_x0, beta_rep_k, beta_mate_k)
+            if beta_active_mask is None:
+                raise ValueError("beta_tilt_x active mask is missing")
+            beta_tilt_x_opt = _apply_beta_vars(
+                beta_vars,
+                beta_tilt_x0,
+                beta_rep_k,
+                beta_mate_k,
+                beta_active_mask,
+            )
             rb_opt = _apply_r_vars(r_vars, r_bases0, param_map)
             if mag_model_effective == "self-consistent-easy-axis":
                 from halbach.autodiff.jax_objective_self_consistent_legacy_beta_tilt import (
@@ -1323,6 +1439,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                         omega=float(args.sc_omega),
                         factor=factor,
                         phi0_val=phi0,
+                        ring_active_mask=ring_active_mask,
                     )
                 )
             else:
@@ -1337,6 +1454,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     geom,
                     pts,
                     factor=factor,
+                    ring_active_mask=ring_active_mask,
                 )
         else:
             al_opt, rb_opt = unpack_x(res.x, alphas0, r_bases0, param_map)
@@ -1367,17 +1485,28 @@ def run_optimize(args: argparse.Namespace) -> int:
                             omega=float(args.sc_omega),
                             factor=factor,
                             phi0_val=phi0,
+                            ring_active_mask=ring_active_mask,
                         )
                     )
                 else:
                     from halbach.autodiff.jax_objective import objective_with_grads_fixed_jax
 
                     Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed_jax(
-                        al_opt, rb_opt, geom, pts, factor=factor
+                        al_opt,
+                        rb_opt,
+                        geom,
+                        pts,
+                        factor=factor,
+                        ring_active_mask=ring_active_mask,
                     )
             else:
                 Jn_f, _gA, _gR, B0_f = objective_with_grads_fixed(
-                    al_opt, rb_opt, geom, pts, factor=factor
+                    al_opt,
+                    rb_opt,
+                    geom,
+                    pts,
+                    factor=factor,
+                    ring_active_mask=ring_active_mask,
                 )
     elif angle_model == "delta-rep-x0":
         delta_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
@@ -1414,6 +1543,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     lambda_z=float(args.lambda_z),
                     factor=factor,
                     phi0=phi0,
+                    ring_active_mask=ring_active_mask,
                 )
             )
         else:
@@ -1432,6 +1562,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 factor=factor,
                 phi0=phi0,
                 m0=m0,
+                ring_active_mask=ring_active_mask,
             )
     else:
         coeffs_flat = np.asarray(res.x[:angle_dim], dtype=np.float64)
@@ -1469,6 +1600,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                     lambda_z=float(args.lambda_z),
                     factor=factor,
                     phi0=phi0,
+                    ring_active_mask=ring_active_mask,
                 )
             )
         else:
@@ -1488,6 +1620,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 factor=factor,
                 phi0=phi0,
                 m0=m0,
+                ring_active_mask=ring_active_mask,
             )
 
     B0_f_T = B0_f / field_scale
@@ -1530,6 +1663,7 @@ def run_optimize(args: argparse.Namespace) -> int:
                 geom,
                 sc_cfg_payload,
                 beta_tilt_x_rk=beta_rk,
+                ring_active_mask=ring_active_mask,
             )
         except Exception as exc:
             logger.warning("sc_p_flat save skipped: %s", exc)
@@ -1542,6 +1676,8 @@ def run_optimize(args: argparse.Namespace) -> int:
     save_payload: dict[str, Any] = dict(
         alphas_opt=al_opt,
         r_bases_opt=rb_opt,
+        radial_count_per_layer=radial_profile.radial_count_per_layer,
+        ring_active_mask=radial_profile.ring_active_mask,
         theta=geom.theta,
         sin2th=geom.sin2,
         cth=geom.cth,
@@ -1613,12 +1749,20 @@ def run_optimize(args: argparse.Namespace) -> int:
                 definition="ux=cos(beta)cos(phi), uy=cos(beta)sin(phi), uz=sin(beta)",
             )
         ),
+        radial_profile=dict(
+            mode=str(radial_profile.mode),
+            base_R=int(radial_profile.base_r),
+            end_R=int(radial_profile.end_r),
+            end_layers_per_side=int(radial_profile.end_layers_per_side),
+            R_max=int(radial_profile.r_max),
+        ),
         magnetization=dict(
             model_requested=mag_model_requested,
             model_effective=mag_model_effective,
             self_consistent=sc_cfg_payload,
         ),
         fix_center_radius_layers=int(args.fix_center_radius_layers),
+        fix_radius_layer_mode=str(args.fix_radius_layer_mode),
         fixed_k_radius=param_map.fixed_k_radius.tolist(),
         scipy_result=dict(
             success=bool(res.success),
