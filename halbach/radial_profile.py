@@ -143,27 +143,30 @@ def radial_profile_from_results(
 
     if counts_arr is None:
         assert mask_arr is not None
-        counts_arr = np.sum(mask_arr, axis=0, dtype=np.int_)
-    if mask_arr is None:
-        mask_arr = build_ring_active_mask(counts_arr, R_max)
+        counts = np.asarray(np.sum(mask_arr, axis=0, dtype=np.int_), dtype=np.int_).reshape(-1)
+    else:
+        counts = counts_arr
 
-    if np.any(np.sum(mask_arr, axis=0, dtype=np.int_) != counts_arr):
+    if mask_arr is None:
+        mask = build_ring_active_mask(counts, R_max)
+    else:
+        mask = mask_arr
+
+    if np.any(np.sum(mask, axis=0, dtype=np.int_) != counts):
         raise ValueError("ring_active_mask does not match radial_count_per_layer")
 
-    inferred_mode: RadialProfileMode = (
-        "uniform" if np.all(counts_arr == counts_arr[0]) else "end-only"
-    )
-    base_R = int(np.min(counts_arr)) if counts_arr.size else int(R_max)
-    end_R = int(np.max(counts_arr)) if counts_arr.size else int(R_max)
+    inferred_mode: RadialProfileMode = "uniform" if np.all(counts == counts[0]) else "end-only"
+    base_R = int(np.min(counts)) if counts.size else int(R_max)
+    end_R = int(np.max(counts)) if counts.size else int(R_max)
     end_layers = 0
-    if inferred_mode == "end-only" and counts_arr.size > 0:
+    if inferred_mode == "end-only" and counts.size > 0:
         k = 0
-        while k < K // 2 and counts_arr[k] == end_R:
+        while k < K // 2 and counts[k] == end_R:
             k += 1
         end_layers = k
     return RadialProfile(
-        radial_count_per_layer=np.asarray(counts_arr, dtype=np.int_),
-        ring_active_mask=np.asarray(mask_arr, dtype=np.bool_),
+        radial_count_per_layer=np.asarray(counts, dtype=np.int_),
+        ring_active_mask=np.asarray(mask, dtype=np.bool_),
         base_r=base_R,
         end_r=end_R,
         end_layers_per_side=end_layers,

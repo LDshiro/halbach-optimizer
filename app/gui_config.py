@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TypeVar, cast
@@ -222,6 +222,26 @@ def merge_gui_config_values(
     return merged
 
 
+def apply_gui_config_values(
+    state: MutableMapping[str, object],
+    values: Mapping[str, object],
+    *,
+    selected_keys: Sequence[str] | None = None,
+) -> list[str]:
+    keys = list(GUI_CONFIG_KEYS if selected_keys is None else selected_keys)
+    invalid = sorted(key for key in keys if key not in GUI_CONFIG_KEYS)
+    if invalid:
+        raise ValueError(f"Unsupported GUI config keys: {', '.join(invalid)}")
+
+    missing = sorted(key for key in keys if key not in values)
+    if missing:
+        raise ValueError(f"GUI config is missing keys: {', '.join(missing)}")
+
+    for key in keys:
+        state[key] = _json_ready_value(values[key])
+    return keys
+
+
 def write_gui_config(path: Path, values: Mapping[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -255,6 +275,19 @@ def default_gui_config_export_path(tag: str) -> Path:
     return GUI_CONFIG_EXPORT_DIR / f"{stamp}_{sanitize_gui_config_tag(tag)}.json"
 
 
+def list_gui_config_export_paths() -> list[str]:
+    if not GUI_CONFIG_EXPORT_DIR.is_dir():
+        return []
+
+    paths: list[str] = []
+    for path in sorted(GUI_CONFIG_EXPORT_DIR.glob("*.json"), reverse=True):
+        try:
+            paths.append(str(path.relative_to(ROOT)))
+        except ValueError:
+            paths.append(str(path))
+    return paths
+
+
 def sanitize_gui_config_tag(tag: str) -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", tag.strip())
     cleaned = cleaned.strip("_")
@@ -278,8 +311,10 @@ __all__ = [
     "GUI_CONFIG_KEYS",
     "GUI_CONFIG_SCHEMA_VERSION",
     "GUI_DEFAULTS_PATH",
+    "apply_gui_config_values",
     "ROOT",
     "default_gui_config_export_path",
+    "list_gui_config_export_paths",
     "load_gui_config_values",
     "merge_gui_config_values",
     "normalize_gui_choice",

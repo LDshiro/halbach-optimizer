@@ -630,10 +630,14 @@ def _downsample_roi_points(
 def _enable_stack_dumps(interval: int, file_handler: logging.FileHandler) -> None:
     if interval <= 0:
         return
+    stream = getattr(file_handler, "stream", None)
+    if stream is None:
+        logger.warning("Stack dumps requested but log file stream is unavailable")
+        return
     faulthandler.dump_traceback_later(
         interval,
         repeat=True,
-        file=file_handler.stream,
+        file=cast(Any, stream),
     )
     logger.warning("Enabled stack dumps every %d seconds", interval)
 
@@ -1641,11 +1645,24 @@ def run_optimize(args: argparse.Namespace) -> int:
     Jn_hist = np.array([float(e.get("J", np.nan)) for e in extras], dtype=float)
     B0_hist = np.array([float(e.get("B0", np.nan)) for e in extras], dtype=float)
 
+    beta_rk_final = _beta_rk_from_final(beta_tilt_x_opt, geom)
+
+    def _build_final_magnet_state() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        phi_rkn = _phi_rkn_from_final(
+            angle_model,
+            geom,
+            al_opt,
+            delta_rep_opt,
+            coeffs_opt,
+            fourier_H=fourier_H,
+            phi0_val=phi0,
+        )
+        r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
+        return phi_rkn, r0_rkn
+
     sc_p_flat: NDArray[np.float64] | None = None
     sc_cfg_fp: str | None = None
-    phi_rkn_final: NDArray[np.float64] | None = None
-    r0_rkn_final: NDArray[np.float64] | None = None
-    beta_rk_final = _beta_rk_from_final(beta_tilt_x_opt, geom)
+    phi_rkn_final, r0_rkn_final = _build_final_magnet_state()
     magnet_dimensions_m: NDArray[np.float64] | None = None
     magnet_dimensions_mm: NDArray[np.float64] | None = None
     magnet_dimensions_source: str | None = None
@@ -1656,21 +1673,9 @@ def run_optimize(args: argparse.Namespace) -> int:
         magnet_dimensions_source = "self-consistent-volume-equivalent-cube"
         try:
             sc_cfg_fp = sc_cfg_fingerprint(sc_cfg_payload)
-            phi_rkn = _phi_rkn_from_final(
-                angle_model,
-                geom,
-                al_opt,
-                delta_rep_opt,
-                coeffs_opt,
-                fourier_H=fourier_H,
-                phi0_val=phi0,
-            )
-            r0_rkn = _build_r0_rkn_from_r_bases(rb_opt, geom)
-            phi_rkn_final = phi_rkn
-            r0_rkn_final = r0_rkn
             sc_p_flat = compute_p_flat_self_consistent_jax(
-                phi_rkn,
-                r0_rkn,
+                phi_rkn_final,
+                r0_rkn_final,
                 geom,
                 sc_cfg_payload,
                 beta_tilt_x_rk=beta_rk_final,
@@ -1680,17 +1685,6 @@ def run_optimize(args: argparse.Namespace) -> int:
             logger.warning("sc_p_flat save skipped: %s", exc)
             sc_p_flat = None
             sc_cfg_fp = None
-    if phi_rkn_final is None or r0_rkn_final is None:
-        phi_rkn_final = _phi_rkn_from_final(
-            angle_model,
-            geom,
-            al_opt,
-            delta_rep_opt,
-            coeffs_opt,
-            fourier_H=fourier_H,
-            phi0_val=phi0,
-        )
-        r0_rkn_final = _build_r0_rkn_from_r_bases(rb_opt, geom)
     magnet_export_payload = build_magnet_export_payload(
         phi_rkn_final,
         r0_rkn_final,
@@ -1836,17 +1830,6 @@ def run_optimize(args: argparse.Namespace) -> int:
 
     if bool(args.sc_debug) and mag_model_effective == "self-consistent-easy-axis":
         try:
-            if phi_rkn_final is None or r0_rkn_final is None:
-                phi_rkn_final = _phi_rkn_from_final(
-                    angle_model,
-                    geom,
-                    al_opt,
-                    delta_rep_opt,
-                    coeffs_opt,
-                    fourier_H=fourier_H,
-                    phi0_val=phi0,
-                )
-                r0_rkn_final = _build_r0_rkn_from_r_bases(rb_opt, geom)
             pts_debug = build_roi_points(roi_r=0.05, roi_step=0.05)
             if pts_debug.shape[0] > 100:
                 rng = np.random.default_rng(0)

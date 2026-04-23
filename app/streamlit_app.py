@@ -15,8 +15,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.gui_config import (
+    GUI_CONFIG_KEYS,
     GUI_DEFAULTS_PATH,
+    apply_gui_config_values,
     default_gui_config_export_path,
+    list_gui_config_export_paths,
     load_gui_config_values,
     merge_gui_config_values,
     normalize_gui_choice,
@@ -72,6 +75,21 @@ def _consume_gui_config_warnings() -> list[str]:
     if not isinstance(warnings, list):
         return []
     return [str(message) for message in warnings]
+
+
+def _resolve_gui_config_import_path(saved_config: str, custom_path: str) -> Path | None:
+    raw = custom_path.strip()
+    if raw:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        return candidate
+    if not saved_config or saved_config == "(none)":
+        return None
+    candidate = Path(saved_config)
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate
 
 
 def _ensure_gui_choice_state(
@@ -332,6 +350,21 @@ def _apply_pending_selection_updates() -> None:
     pending_opt_path = st.session_state.pop("pending_opt_path", None)
     if pending_opt_path is not None:
         st.session_state["opt_path"] = pending_opt_path
+
+    pending_gui_config_values = st.session_state.pop("pending_gui_config_values", None)
+    pending_gui_config_keys = st.session_state.pop("pending_gui_config_keys", None)
+    if pending_gui_config_values is not None:
+        try:
+            apply_gui_config_values(
+                st.session_state,
+                cast(Mapping[str, object], pending_gui_config_values),
+                selected_keys=cast(Sequence[str] | None, pending_gui_config_keys),
+            )
+        except Exception as exc:
+            _queue_gui_config_warning(
+                "gui_config_import_apply",
+                f"GUI config apply failed: {exc}",
+            )
 
 
 @st.cache_data(show_spinner=False)
@@ -3081,6 +3114,72 @@ def main() -> None:
         st.caption(f"Defaults file: `{GUI_DEFAULTS_PATH}`")
         for warning in _consume_gui_config_warnings():
             st.warning(warning)
+
+        if "gui_config_import_keys" not in st.session_state:
+            st.session_state["gui_config_import_keys"] = list(GUI_CONFIG_KEYS)
+
+        saved_config_paths = ["(none)", *list_gui_config_export_paths()]
+        _gui_selectbox(
+            "Saved config",
+            saved_config_paths,
+            key="gui_config_import_select",
+            fallback="(none)",
+        )
+        st.text_input(
+            "Import path (optional)",
+            value="",
+            key="gui_config_import_path",
+            help="Set this to override the saved-config selection.",
+        )
+        import_path = _resolve_gui_config_import_path(
+            str(st.session_state["gui_config_import_select"]),
+            str(st.session_state["gui_config_import_path"]),
+        )
+        if import_path is not None:
+            st.caption(f"Import path: `{import_path}`")
+            try:
+                import_values = load_gui_config_values(import_path)
+            except Exception as exc:
+                st.error(f"GUI config load failed: {exc}")
+            else:
+                select_cols = st.columns(2)
+                with select_cols[0]:
+                    if st.button("Select all", key="gui_config_import_select_all"):
+                        st.session_state["gui_config_import_keys"] = list(GUI_CONFIG_KEYS)
+                with select_cols[1]:
+                    if st.button("Clear selection", key="gui_config_import_clear"):
+                        st.session_state["gui_config_import_keys"] = []
+
+                selected_import_keys = cast(
+                    list[str],
+                    st.multiselect(
+                        "Settings to apply",
+                        list(GUI_CONFIG_KEYS),
+                        key="gui_config_import_keys",
+                    ),
+                )
+                st.caption(
+                    f"Selected {len(selected_import_keys)} / {len(GUI_CONFIG_KEYS)} settings."
+                )
+                if selected_import_keys:
+                    with st.expander("Preview selected values", expanded=False):
+                        st.json({key: import_values[key] for key in selected_import_keys})
+
+                if st.button(
+                    "Apply imported settings",
+                    key="gui_config_import_apply_button",
+                    disabled=not selected_import_keys,
+                ):
+                    try:
+                        st.session_state["pending_gui_config_values"] = dict(import_values)
+                        st.session_state["pending_gui_config_keys"] = list(selected_import_keys)
+                        st.session_state["flash_message"] = (
+                            f"Applied {len(selected_import_keys)} GUI setting(s) from: {import_path}"
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"GUI config apply failed: {exc}")
+
         export_tag = st.text_input("Export tag", value="gui", key="gui_config_export_tag")
         export_path = default_gui_config_export_path(export_tag)
         st.caption(f"Export path: `{export_path}`")
