@@ -90,8 +90,8 @@ def test_magnetization_runtime_calls_solver(
         calls["multi"] += 1
         return jnp.full((R * K * N,), float(m0), dtype=jnp.float64)
 
-    monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near", fake_dipole)
-    monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_multi_dipole", fake_multi)
+    monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_from_u", fake_dipole)
+    monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_multi_dipole_from_u", fake_multi)
 
     sc_meta = {
         "magnetization": {

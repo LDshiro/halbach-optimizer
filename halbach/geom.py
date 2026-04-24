@@ -12,6 +12,7 @@ from halbach.types import FloatArray
 __all__ = [
     "ParamMap",
     "build_param_map",
+    "fixed_radius_layer_indices",
     "build_symmetry_indices",
     "center_layer_indices",
     "build_roi_points",
@@ -22,6 +23,8 @@ __all__ = [
     "sample_sphere_surface_fibonacci",
     "sample_sphere_surface_random",
 ]
+
+FixedRadiusLayerMode = Literal["center", "ends"]
 
 
 def center_layer_indices(K: int, n_fix: int) -> NDArray[np.int_]:
@@ -40,20 +43,53 @@ def center_layer_indices(K: int, n_fix: int) -> NDArray[np.int_]:
     return np.arange(start, end, dtype=np.int_)
 
 
+def end_layer_indices(K: int, n_fix: int) -> NDArray[np.int_]:
+    """Return the end layer indices to fix symmetrically."""
+    if n_fix < 0 or n_fix > K:
+        raise ValueError(f"n_fix must be between 0 and K, got {n_fix}")
+    if n_fix % 2 != 0:
+        raise ValueError(f"n_fix must be even, got {n_fix}")
+    if n_fix == 0:
+        return np.array([], dtype=np.int_)
+    per_side = n_fix // 2
+    lower = np.arange(per_side, dtype=np.int_)
+    upper = np.arange(K - per_side, K, dtype=np.int_)
+    return np.concatenate([lower, upper]).astype(np.int_)
+
+
+def fixed_radius_layer_indices(
+    K: int,
+    n_fix: int,
+    mode: FixedRadiusLayerMode = "center",
+) -> NDArray[np.int_]:
+    """Return radius-fixed layer indices for the selected mode."""
+    if mode == "center":
+        return center_layer_indices(K, n_fix)
+    if mode == "ends":
+        return end_layer_indices(K, n_fix)
+    raise ValueError(f"Unsupported fix_radius_mode: {mode}")
+
+
 def build_symmetry_indices(
     K: int,
     *,
+    fixed_k: NDArray[np.int_] | None = None,
     n_fix: int = 4,
 ) -> tuple[NDArray[np.int_], NDArray[np.int_], NDArray[np.int_]]:
-    """Build z-symmetry indices with fixed center layers."""
-    fixed_center = center_layer_indices(K, n_fix)
+    """Build z-symmetry indices with selected fixed layers."""
+    fixed_layers = (
+        np.asarray(fixed_k, dtype=np.int_).reshape(-1)
+        if fixed_k is not None
+        else fixed_radius_layer_indices(K, n_fix, "center")
+    )
     half = K // 2
-    lower_end = half - n_fix // 2
-    if lower_end < 0:
-        raise ValueError(f"Invalid n_fix={n_fix} for K={K}")
-    lower_var = np.arange(0, lower_end)
+    lower_var = np.arange(0, half, dtype=np.int_)
+    if fixed_layers.size:
+        lower_mask = np.ones(lower_var.shape[0], dtype=np.bool_)
+        lower_mask[np.isin(lower_var, fixed_layers)] = False
+        lower_var = lower_var[lower_mask]
     upper_var = (K - 1) - lower_var
-    return lower_var, upper_var, fixed_center
+    return lower_var, upper_var, fixed_layers
 
 
 @dataclass(frozen=True)
@@ -68,8 +104,15 @@ class ParamMap:
     fixed_k_radius: NDArray[np.int_]
 
 
-def build_param_map(R: int, K: int, *, n_fix_radius: int) -> ParamMap:
-    lower_var, upper_var, fixed_k = build_symmetry_indices(K, n_fix=n_fix_radius)
+def build_param_map(
+    R: int,
+    K: int,
+    *,
+    n_fix_radius: int,
+    fix_radius_mode: FixedRadiusLayerMode = "center",
+) -> ParamMap:
+    fixed_k = fixed_radius_layer_indices(K, n_fix_radius, fix_radius_mode)
+    lower_var, upper_var, _ = build_symmetry_indices(K, fixed_k=fixed_k)
     free_alpha_mask = np.ones(R * K, dtype=bool)
     free_alpha_idx = np.arange(R * K, dtype=np.int_)
 

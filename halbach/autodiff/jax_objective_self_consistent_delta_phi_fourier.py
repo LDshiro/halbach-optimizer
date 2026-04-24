@@ -118,6 +118,7 @@ def _build_objective_only(
     delta_lo_w: jnp.ndarray | None,
     delta_hi_offsets: jnp.ndarray | None,
     delta_hi_w: jnp.ndarray | None,
+    active_rk: jnp.ndarray | None,
 ) -> Callable[[Any, Any], tuple[Any, Any]]:
     denom = 1.0 + chi * Nd
     offsets = None
@@ -143,9 +144,14 @@ def _build_objective_only(
 
         r0_flat = r0.reshape(-1, 3)
         phi_flat = phi.reshape(-1)
+        active_flat = None
+        if active_rk is not None:
+            active_flat = jnp.broadcast_to(active_rk[:, :, None], (R, K, N)).reshape(-1)
 
         if chi == 0.0:
             p_flat = jnp.full((phi_flat.shape[0],), p0, dtype=r0_flat.dtype)
+            if active_flat is not None:
+                p_flat = p_flat * active_flat.astype(r0_flat.dtype)
             h_ext = jnp.zeros_like(p_flat)
         else:
             if near_kernel_norm == "dipole":
@@ -163,6 +169,7 @@ def _build_objective_only(
                     implicit_diff=implicit_diff,
                     i_edge=i_edge,
                     j_edge=j_edge,
+                    active_flat=active_flat,
                 )
                 h_ext = _compute_h_ext_u_near(phi_flat, r0_flat, p_flat, nbr_idx, nbr_mask)
             elif near_kernel_norm == "multi-dipole":
@@ -181,6 +188,7 @@ def _build_objective_only(
                     implicit_diff=implicit_diff,
                     i_edge=i_edge,
                     j_edge=j_edge,
+                    active_flat=active_flat,
                 )
                 h_ext = _compute_h_ext_u_near_multi_dipole(
                     phi_flat,
@@ -205,6 +213,7 @@ def _build_objective_only(
                     implicit_diff=implicit_diff,
                     i_edge=i_edge,
                     j_edge=j_edge,
+                    active_flat=active_flat,
                 )
                 a_edge = float(volume_m3) ** (1.0 / 3.0)
                 h = jnp.array([a_edge, a_edge, a_edge], dtype=jnp.float64)
@@ -253,6 +262,7 @@ def _build_objective_only(
                     delta_hi_offsets=delta_hi_offsets,
                     delta_hi_w=delta_hi_w,
                     implicit_diff=implicit_diff,
+                    active_flat=active_flat,
                 )
                 k_edge = _k_edge_gl_double_mixed(
                     phi_flat,
@@ -270,17 +280,23 @@ def _build_objective_only(
             else:
                 raise ValueError(f"Unsupported near_kernel: {near_kernel_norm}")
 
-        p_min = jnp.min(p_flat)
-        p_max = jnp.max(p_flat)
-        p_mean = jnp.mean(p_flat)
-        p_std = jnp.std(p_flat)
+        if active_flat is None:
+            active_vec = jnp.ones_like(p_flat)
+        else:
+            active_vec = active_flat.astype(p_flat.dtype)
+        active_count = jnp.maximum(jnp.sum(active_vec), 1.0)
+        p_eff = p_flat * active_vec
+        p_min = jnp.min(jnp.where(active_vec > 0.0, p_eff, jnp.inf))
+        p_max = jnp.max(jnp.where(active_vec > 0.0, p_eff, -jnp.inf))
+        p_mean = jnp.sum(p_eff) / active_count
+        p_std = jnp.sqrt(jnp.sum(active_vec * (p_eff - p_mean) ** 2) / active_count)
         p_rel_std = p_std / (jnp.abs(p_mean) + EPS)
 
-        res_vec = denom * p_flat - (p0 + chi * volume_m3 * h_ext)
-        res_rel = jnp.linalg.norm(res_vec) / jnp.maximum(jnp.linalg.norm(p_flat), EPS)
+        res_vec = active_vec * (denom * p_flat - (p0 + chi * volume_m3 * h_ext))
+        res_rel = jnp.linalg.norm(res_vec) / jnp.maximum(jnp.linalg.norm(p_eff), EPS)
 
         u = jnp.stack([jnp.cos(phi_flat), jnp.sin(phi_flat), jnp.zeros_like(phi_flat)], axis=1)
-        m_flat = p_flat[:, None] * u
+        m_flat = p_eff[:, None] * u
 
         B_all = _compute_b_all_from_m(m_flat, r0_flat, pts, factor_val)
         B = B_all[:-1]
@@ -336,6 +352,7 @@ def _get_compiled_vg(
     phi0_val: float,
     implicit_diff: bool,
     gl_order: int,
+    active_rk: NDArray[np.bool_] | None,
 ) -> Callable[..., Any]:
     key = (
         id(theta),
@@ -369,6 +386,9 @@ def _get_compiled_vg(
         float(phi0_val),
         bool(implicit_diff),
         int(gl_order),
+        id(active_rk),
+        None if active_rk is None else active_rk.shape,
+        -1 if active_rk is None else int(np.count_nonzero(active_rk)),
     )
 
     def build_fn() -> Callable[..., Any]:
@@ -382,6 +402,7 @@ def _get_compiled_vg(
         sin_even_j = jnp.asarray(sin_even, dtype=jnp.float64)
         nbr_idx_j = jnp.asarray(nbr_idx, dtype=jnp.int32)
         nbr_mask_j = jnp.asarray(nbr_mask, dtype=bool)
+        active_rk_j = None if active_rk is None else jnp.asarray(active_rk, dtype=bool)
         i_edge_np, j_edge_np = edges_from_near(
             np.asarray(nbr_idx, dtype=np.int32), np.asarray(nbr_mask, dtype=bool)
         )
@@ -448,6 +469,7 @@ def _get_compiled_vg(
             delta_lo_w=delta_lo_w,
             delta_hi_offsets=delta_hi_offsets,
             delta_hi_w=delta_hi_w,
+            active_rk=active_rk_j,
         )
         return cast(
             Callable[..., Any],
@@ -500,6 +522,7 @@ def objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
     phi0: float = phi0,
     use_jit: bool = True,
     implicit_diff: bool = True,
+    ring_active_mask: NDArray[np.bool_] | None = None,
     gl_order: int = 0,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float, dict[str, float | int | str]]:
     """
@@ -514,6 +537,15 @@ def objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
         raise ValueError("coeffs second dimension must be 2*H")
 
     near_kernel_norm = "cellavg" if near_kernel == "cube-average" else str(near_kernel)
+    active_rk_np: NDArray[np.bool_] | None = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=np.bool_)
+        expected = (int(geom.R), int(geom.K))
+        if mask.shape != expected:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match expected {expected}"
+            )
+        active_rk_np = mask
     cos_odd, sin_even = _get_fourier_features(np.asarray(geom.theta, dtype=np.float64), int(H))
 
     coeffs_j = jnp.asarray(coeffs, dtype=jnp.float64)
@@ -559,6 +591,7 @@ def objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
             phi0_val=float(phi0_val),
             implicit_diff=bool(implicit_diff),
             gl_order=int(gl_order),
+            active_rk=active_rk_np,
         )
         (J, aux), grads = vg(coeffs_j, r_bases_j)
     else:
@@ -572,6 +605,7 @@ def objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
         sin_even_j = jnp.asarray(sin_even, dtype=jnp.float64)
         nbr_idx_j = jnp.asarray(nbr_idx, dtype=jnp.int32)
         nbr_mask_j = jnp.asarray(nbr_mask, dtype=bool)
+        active_rk_j = None if active_rk_np is None else jnp.asarray(active_rk_np, dtype=bool)
         i_edge_np, j_edge_np = edges_from_near(
             np.asarray(nbr_idx, dtype=np.int32), np.asarray(nbr_mask, dtype=bool)
         )
@@ -637,6 +671,7 @@ def objective_with_grads_self_consistent_delta_phi_fourier_x0_jax(
             delta_lo_w=delta_lo_w,
             delta_hi_offsets=delta_hi_offsets,
             delta_hi_w=delta_hi_w,
+            active_rk=active_rk_j,
         )
         (J, aux), grads = jax.value_and_grad(_objective_only, argnums=(0, 1), has_aux=True)(
             coeffs_j, r_bases_j

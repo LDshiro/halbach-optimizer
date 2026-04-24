@@ -100,8 +100,8 @@ def test_magnetization_runtime_uses_saved_p(
                 "self-consistent solver should not be called when sc_p_flat is saved"
             )
 
-        monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near", fail_solver)
-        monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_multi_dipole", fail_solver)
+        monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_from_u", fail_solver)
+        monkeypatch.setattr(sc_mod, "solve_p_easy_axis_near_multi_dipole_from_u", fail_solver)
 
     m_flat, debug = compute_m_flat_from_run(run_dir, geom, phi_rkn, r0_rkn)
     expected = build_m_flat_from_phi_and_p(phi_flat, p_flat)

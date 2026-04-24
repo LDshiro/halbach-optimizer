@@ -28,6 +28,7 @@ def _compute_b_all_from_delta(
     factor: float,
     phi0_val: float,
     m0_val: float,
+    active_rk: Any | None,
 ) -> Any:
     R = ring_offsets.shape[0]
 
@@ -37,6 +38,8 @@ def _compute_b_all_from_delta(
     mz = jnp.zeros_like(mx)
     m = jnp.stack([mx, my, mz], axis=-1)
     m = jnp.broadcast_to(m[None, :, :, :], (R, m.shape[0], m.shape[1], 3))
+    if active_rk is not None:
+        m = m * active_rk[:, :, None, None]
 
     rho = r_bases[None, :] + ring_offsets[:, None]
     px = rho[:, :, None] * cth[None, None, :]
@@ -72,6 +75,7 @@ def _objective_and_b0_delta(
     factor: float,
     phi0_val: float,
     m0_val: float,
+    active_rk: Any | None,
 ) -> tuple[Any, Any]:
     B_all = _compute_b_all_from_delta(
         delta_full,
@@ -85,6 +89,7 @@ def _objective_and_b0_delta(
         factor,
         phi0_val,
         m0_val,
+        active_rk,
     )
     B = B_all[:-1]
     B0 = B_all[-1]
@@ -106,6 +111,7 @@ def objective_with_grads_delta_phi_x0_jax(
     factor: float = FACTOR,
     phi0: float = phi0,
     m0: float = m0,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
     """
     JAX objective and gradients for x=0 mirror delta-phi model.
@@ -121,6 +127,15 @@ def objective_with_grads_delta_phi_x0_jax(
     ring_offsets = jnp.asarray(geom.ring_offsets, dtype=jnp.float64)
     pts_j = jnp.asarray(pts, dtype=jnp.float64)
     basis = jnp.asarray(mirror.basis, dtype=jnp.float64)
+    active_rk_j = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=bool)
+        expected = (int(geom.R), int(geom.K))
+        if mask.shape != expected:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match expected {expected}"
+            )
+        active_rk_j = jnp.asarray(mask, dtype=jnp.float64)
     factor_val = float(factor)
     lambda0_val = float(lambda0)
     lambda_theta_val = float(lambda_theta)
@@ -140,6 +155,7 @@ def objective_with_grads_delta_phi_x0_jax(
             factor_val,
             float(phi0),
             float(m0),
+            active_rk_j,
         )
         R0 = jnp.mean(delta_full * delta_full)
         dtheta = jnp.roll(delta_full, -1, axis=1) - delta_full

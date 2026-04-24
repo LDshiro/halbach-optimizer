@@ -27,7 +27,6 @@ def build_command(
     gtol: float,
     roi_r: float,
     roi_step: float,
-    roi_mode: str = "surface-fibonacci",
     roi_samples: int = 300,
     angle_model: str = "legacy-alpha",
     grad_backend: str | None = None,
@@ -43,6 +42,9 @@ def build_command(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    fix_radius_layer_mode: str = "center",
+    enable_beta_tilt_x: bool = False,
+    beta_tilt_x_bound_deg: float = 20.0,
     mag_model: str = "fixed",
     sc_chi: float = 0.0,
     sc_Nd: float = 1.0 / 3.0,
@@ -74,8 +76,6 @@ def build_command(
         str(roi_r),
         "--roi-step",
         str(roi_step),
-        "--roi-mode",
-        str(roi_mode),
         "--roi-samples",
         str(roi_samples),
         "--angle-model",
@@ -102,7 +102,13 @@ def build_command(
         str(r_max_mm),
         "--fix-center-radius-layers",
         str(fix_center_radius_layers),
+        "--fix-radius-layer-mode",
+        str(fix_radius_layer_mode),
+        "--beta-tilt-x-bound-deg",
+        str(beta_tilt_x_bound_deg),
     ]
+    if enable_beta_tilt_x:
+        cmd.append("--enable-beta-tilt-x")
     if r_no_upper:
         cmd.append("--r-no-upper")
     if grad_backend is not None:
@@ -278,12 +284,19 @@ def build_generate_out_dir(
     tag: str,
     N: int,
     R: int,
+    end_R: int | None = None,
+    end_layers_per_side: int = 0,
     K: int,
     timestamp: datetime | None = None,
     suffix_provider: Callable[[], str] | None = None,
 ) -> Path:
     stamp = (timestamp or datetime.now()).strftime("%Y%m%d_%H%M%S")
-    base = f"{stamp}_{_sanitize_tag(tag)}_N{N}_R{R}_K{K}"
+    effective_end_R = R if end_R is None else int(end_R)
+    if effective_end_R == int(R) or int(end_layers_per_side) == 0:
+        radial_text = f"R{R}"
+    else:
+        radial_text = f"R{R}to{effective_end_R}_E{int(end_layers_per_side)}"
+    base = f"{stamp}_{_sanitize_tag(tag)}_N{N}_{radial_text}_K{K}"
     candidate = runs_root / base
     if candidate.exists():
         provider = suffix_provider or _random_suffix
@@ -297,6 +310,8 @@ def build_generate_command(
     *,
     N: int,
     R: int,
+    end_R: int | None = None,
+    end_layers_per_side: int = 0,
     K: int,
     Lz: float,
     diameter_mm: float,
@@ -313,6 +328,10 @@ def build_generate_command(
         str(N),
         "--R",
         str(R),
+        "--end-R",
+        str(R if end_R is None else int(end_R)),
+        "--end-layers-per-side",
+        str(int(end_layers_per_side)),
         "--K",
         str(K),
         "--Lz",
@@ -350,7 +369,6 @@ def start_opt_job(
     gtol: float,
     roi_r: float,
     roi_step: float,
-    roi_mode: str = "surface-fibonacci",
     roi_samples: int = 300,
     angle_model: str = "legacy-alpha",
     grad_backend: str | None = None,
@@ -366,6 +384,9 @@ def start_opt_job(
     r_min_mm: float = 0.0,
     r_max_mm: float = 1e9,
     fix_center_radius_layers: int = 2,
+    fix_radius_layer_mode: str = "center",
+    enable_beta_tilt_x: bool = False,
+    beta_tilt_x_bound_deg: float = 20.0,
     mag_model: str = "fixed",
     sc_chi: float = 0.0,
     sc_Nd: float = 1.0 / 3.0,
@@ -391,7 +412,6 @@ def start_opt_job(
         gtol=gtol,
         roi_r=roi_r,
         roi_step=roi_step,
-        roi_mode=roi_mode,
         roi_samples=roi_samples,
         angle_model=angle_model,
         grad_backend=grad_backend,
@@ -407,6 +427,9 @@ def start_opt_job(
         r_min_mm=r_min_mm,
         r_max_mm=r_max_mm,
         fix_center_radius_layers=fix_center_radius_layers,
+        fix_radius_layer_mode=fix_radius_layer_mode,
+        enable_beta_tilt_x=enable_beta_tilt_x,
+        beta_tilt_x_bound_deg=beta_tilt_x_bound_deg,
         mag_model=mag_model,
         sc_chi=sc_chi,
         sc_Nd=sc_Nd,

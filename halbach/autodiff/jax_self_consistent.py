@@ -250,6 +250,31 @@ def _h_from_kij(
     return jnp.sum(kij * p_j, axis=1)
 
 
+def _active_vec_or_ones(
+    active_flat: jnp.ndarray | None,
+    *,
+    M: int,
+    dtype: Any,
+) -> jnp.ndarray:
+    if active_flat is None:
+        return jnp.ones((M,), dtype=dtype)
+    active = jnp.asarray(active_flat, dtype=dtype).reshape(-1)
+    if active.shape[0] != M:
+        raise ValueError("active_flat size must match magnet count")
+    return active
+
+
+def _wrap_active_h_op(
+    h_op: Callable[[jnp.ndarray], jnp.ndarray],
+    active_vec: jnp.ndarray,
+) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    def wrapped(p: jnp.ndarray) -> jnp.ndarray:
+        p_eff = active_vec * p
+        return active_vec * h_op(p_eff)
+
+    return wrapped
+
+
 def _build_kij_dipole(
     phi_flat: jnp.ndarray,
     r0_flat: jnp.ndarray,
@@ -333,6 +358,84 @@ def _build_kij_multi_dipole(
     return kij
 
 
+def _build_kij_dipole_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    r_i = r0_flat[:, None, :]
+    r_j = r0_flat[nbr_idx]
+    r = r_i - r_j
+    rx = r[..., 0]
+    ry = r[..., 1]
+    rz = r[..., 2]
+    r2 = rx * rx + ry * ry + rz * rz
+    r2_safe = jnp.where(nbr_mask, r2, 1.0)
+    rmag = jnp.sqrt(r2_safe) + EPS
+    invr3 = 1.0 / (rmag * r2_safe + EPS)
+    invr5 = invr3 / r2_safe
+
+    u_i = u_flat[:, None, :]
+    u_j = u_flat[nbr_idx]
+    ui_dot_r = jnp.sum(u_i * r, axis=-1)
+    uj_dot_r = jnp.sum(u_j * r, axis=-1)
+    ui_dot_uj = jnp.sum(u_i * u_j, axis=-1)
+
+    kij = H_FACTOR * (3.0 * ui_dot_r * uj_dot_r * invr5 - ui_dot_uj * invr3)
+    kij = jnp.where(nbr_mask, kij, 0.0)
+    return kij
+
+
+def _build_kij_multi_dipole_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    offsets: jnp.ndarray,
+) -> jnp.ndarray:
+    r_i = r0_flat[:, None, :]
+    r_j = r0_flat[nbr_idx]
+    s_ij = r_i - r_j
+    rx0 = s_ij[..., 0]
+    ry0 = s_ij[..., 1]
+    rz0 = s_ij[..., 2]
+
+    u_i = u_flat[:, None, :]
+    u_j = u_flat[nbr_idx]
+    ui_dot_uj = jnp.sum(u_i * u_j, axis=-1)
+
+    acc1 = jnp.zeros_like(rx0)
+    acc2 = jnp.zeros_like(rx0)
+
+    def body(q: int, state: tuple[jnp.ndarray, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+        acc1_q, acc2_q = state
+        rx = rx0 - offsets[q, 0]
+        ry = ry0 - offsets[q, 1]
+        rz = rz0 - offsets[q, 2]
+        r2 = rx * rx + ry * ry + rz * rz
+        r2_safe = jnp.where(nbr_mask, r2, 1.0)
+        rmag = jnp.sqrt(r2_safe) + EPS
+        invr3 = 1.0 / (rmag * r2_safe + EPS)
+        invr5 = invr3 / r2_safe
+        ui_dot_r = u_i[..., 0] * rx + u_i[..., 1] * ry + u_i[..., 2] * rz
+        uj_dot_r = u_j[..., 0] * rx + u_j[..., 1] * ry + u_j[..., 2] * rz
+        acc1_q = acc1_q + 3.0 * ui_dot_r * uj_dot_r * invr5
+        acc2_q = acc2_q + invr3
+        return acc1_q, acc2_q
+
+    acc1, acc2 = cast(
+        tuple[jnp.ndarray, jnp.ndarray],
+        jax.lax.fori_loop(0, int(offsets.shape[0]), body, (acc1, acc2)),
+    )
+    S = float(offsets.shape[0])
+    mean1 = acc1 / S
+    mean2 = acc2 / S
+    kij = H_FACTOR * (mean1 - ui_dot_uj * mean2)
+    kij = jnp.where(nbr_mask, kij, 0.0)
+    return kij
+
+
 def _build_k_edge_dipole(
     phi_flat: jnp.ndarray,
     r0_flat: jnp.ndarray,
@@ -357,6 +460,28 @@ def _build_k_edge_dipole(
     ui_dot_r = ui_c * rx + ui_s * ry
     uj_dot_r = uj_c * rx + uj_s * ry
     ui_dot_uj = ui_c * uj_c + ui_s * uj_s
+    return H_FACTOR * (3.0 * ui_dot_r * uj_dot_r * invr5 - ui_dot_uj * invr3)
+
+
+def _build_k_edge_dipole_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    i_edge: jnp.ndarray,
+    j_edge: jnp.ndarray,
+) -> jnp.ndarray:
+    u_i = u_flat[i_edge]
+    u_j = u_flat[j_edge]
+    r = r0_flat[i_edge] - r0_flat[j_edge]
+    rx = r[:, 0]
+    ry = r[:, 1]
+    rz = r[:, 2]
+    r2 = jnp.maximum(rx * rx + ry * ry + rz * rz, EPS)
+    rmag = jnp.sqrt(r2) + EPS
+    invr3 = 1.0 / (rmag * r2 + EPS)
+    invr5 = invr3 / r2
+    ui_dot_r = u_i[:, 0] * rx + u_i[:, 1] * ry + u_i[:, 2] * rz
+    uj_dot_r = u_j[:, 0] * rx + u_j[:, 1] * ry + u_j[:, 2] * rz
+    ui_dot_uj = jnp.sum(u_i * u_j, axis=1)
     return H_FACTOR * (3.0 * ui_dot_r * uj_dot_r * invr5 - ui_dot_uj * invr3)
 
 
@@ -396,6 +521,48 @@ def _build_k_edge_multi_dipole(
         invr5 = invr3 / r2
         ui_dot_r = ui_c * rx + ui_s * ry
         uj_dot_r = uj_c * rx + uj_s * ry
+        acc1_q = acc1_q + 3.0 * ui_dot_r * uj_dot_r * invr5
+        acc2_q = acc2_q + invr3
+        return acc1_q, acc2_q
+
+    acc1, acc2 = cast(
+        tuple[jnp.ndarray, jnp.ndarray],
+        jax.lax.fori_loop(0, int(offsets.shape[0]), body, (acc1, acc2)),
+    )
+    mean1 = acc1 / float(offsets.shape[0])
+    mean2 = acc2 / float(offsets.shape[0])
+    return H_FACTOR * (mean1 - ui_dot_uj * mean2)
+
+
+def _build_k_edge_multi_dipole_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    i_edge: jnp.ndarray,
+    j_edge: jnp.ndarray,
+    offsets: jnp.ndarray,
+) -> jnp.ndarray:
+    u_i = u_flat[i_edge]
+    u_j = u_flat[j_edge]
+    ui_dot_uj = jnp.sum(u_i * u_j, axis=1)
+
+    base = r0_flat[i_edge] - r0_flat[j_edge]
+    rx0 = base[:, 0]
+    ry0 = base[:, 1]
+    rz0 = base[:, 2]
+    acc1 = jnp.zeros((base.shape[0],), dtype=jnp.float64)
+    acc2 = jnp.zeros((base.shape[0],), dtype=jnp.float64)
+
+    def body(q: int, state: tuple[jnp.ndarray, jnp.ndarray]) -> tuple[jnp.ndarray, jnp.ndarray]:
+        acc1_q, acc2_q = state
+        rx = rx0 - offsets[q, 0]
+        ry = ry0 - offsets[q, 1]
+        rz = rz0 - offsets[q, 2]
+        r2 = jnp.maximum(rx * rx + ry * ry + rz * rz, EPS)
+        rmag = jnp.sqrt(r2) + EPS
+        invr3 = 1.0 / (rmag * r2 + EPS)
+        invr5 = invr3 / r2
+        ui_dot_r = u_i[:, 0] * rx + u_i[:, 1] * ry + u_i[:, 2] * rz
+        uj_dot_r = u_j[:, 0] * rx + u_j[:, 1] * ry + u_j[:, 2] * rz
         acc1_q = acc1_q + 3.0 * ui_dot_r * uj_dot_r * invr5
         acc2_q = acc2_q + invr3
         return acc1_q, acc2_q
@@ -499,14 +666,17 @@ def solve_p_easy_axis_near(
     implicit_diff: bool = False,
     i_edge: jnp.ndarray | None = None,
     j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Fixed-iteration damped solver for p (easy-axis, near-only).
     Must NOT apply field_scale.
     """
+    M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
     denom = 1.0 + chi * Nd
     if chi == 0.0:
-        return jnp.full((phi_flat.shape[0],), float(p0), dtype=r0_flat.dtype)
+        return jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
 
     h_op_t: Callable[[jnp.ndarray], jnp.ndarray] | None = None
     if i_edge is not None and j_edge is not None:
@@ -525,10 +695,13 @@ def solve_p_easy_axis_near(
         def h_op(p: jnp.ndarray) -> jnp.ndarray:
             return _h_from_kij(p, nbr_idx, nbr_mask, kij)
 
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
     if implicit_diff:
-        b = jnp.full((phi_flat.shape[0],), float(p0), dtype=r0_flat.dtype)
+        b = jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
         return _solve_linear_system_custom_linear_solve(
-            h_op,
+            h_op_wrapped,
             b,
             float(denom),
             float(chi),
@@ -536,14 +709,155 @@ def solve_p_easy_axis_near(
             int(iters),
             float(omega),
             r0_flat.dtype,
-            h_op_T=h_op_t,
+            h_op_T=h_op_t_wrapped,
         )
 
-    p_init = jnp.full((phi_flat.shape[0],), p0, dtype=r0_flat.dtype)
+    p_init = jnp.full((M,), p0, dtype=r0_flat.dtype) * active_vec
 
     def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
-        h_ext = h_op(p)
-        p_new = (p0 + chi * volume_m3 * h_ext) / denom
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0 + chi * volume_m3 * h_ext) / denom)
+        return (1.0 - omega) * p + omega * p_new
+
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
+
+
+def solve_p_easy_axis_near_with_p0_flat(
+    phi_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    *,
+    p0_flat: jnp.ndarray,
+    chi: float,
+    Nd: float,
+    volume_m3: float,
+    iters: int = 30,
+    omega: float = 0.6,
+    implicit_diff: bool = False,
+    i_edge: jnp.ndarray | None = None,
+    j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """
+    Fixed-iteration damped solver for p (easy-axis, near-only) with per-magnet p0.
+    Must NOT apply field_scale.
+    """
+    M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
+    p0_vec = jnp.asarray(p0_flat, dtype=r0_flat.dtype).reshape(-1)
+    if p0_vec.shape[0] != M:
+        raise ValueError("p0_flat size must match phi_flat size")
+
+    denom = 1.0 + chi * Nd
+    if chi == 0.0:
+        return p0_vec * active_vec
+
+    h_op_t: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+    if i_edge is not None and j_edge is not None:
+        k_edge = _build_k_edge_dipole(phi_flat, r0_flat, i_edge, j_edge)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _apply_k_edges(p, i_edge, j_edge, k_edge, M)
+
+        def h_op_t(v: jnp.ndarray) -> jnp.ndarray:
+            return _apply_kt_edges(v, i_edge, j_edge, k_edge, M)
+
+    else:
+        kij = _build_kij_dipole(phi_flat, r0_flat, nbr_idx, nbr_mask)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _h_from_kij(p, nbr_idx, nbr_mask, kij)
+
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
+    if implicit_diff:
+        return _solve_linear_system_custom_linear_solve(
+            h_op_wrapped,
+            p0_vec * active_vec,
+            float(denom),
+            float(chi),
+            float(volume_m3),
+            int(iters),
+            float(omega),
+            r0_flat.dtype,
+            h_op_T=h_op_t_wrapped,
+        )
+
+    p_init = p0_vec * active_vec
+
+    def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0_vec + chi * volume_m3 * h_ext) / denom)
+        return (1.0 - omega) * p + omega * p_new
+
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
+
+
+def solve_p_easy_axis_near_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    *,
+    p0: float,
+    chi: float,
+    Nd: float,
+    volume_m3: float,
+    iters: int = 30,
+    omega: float = 0.6,
+    implicit_diff: bool = False,
+    i_edge: jnp.ndarray | None = None,
+    j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Easy-axis near-only solver using precomputed 3D unit vectors u_flat."""
+    M = int(u_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
+    denom = 1.0 + chi * Nd
+    if chi == 0.0:
+        return jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
+
+    h_op_t: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+    if i_edge is not None and j_edge is not None:
+        M = int(u_flat.shape[0])
+        k_edge = _build_k_edge_dipole_from_u(u_flat, r0_flat, i_edge, j_edge)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _apply_k_edges(p, i_edge, j_edge, k_edge, M)
+
+        def h_op_t(v: jnp.ndarray) -> jnp.ndarray:
+            return _apply_kt_edges(v, i_edge, j_edge, k_edge, M)
+
+    else:
+        kij = _build_kij_dipole_from_u(u_flat, r0_flat, nbr_idx, nbr_mask)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _h_from_kij(p, nbr_idx, nbr_mask, kij)
+
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
+    if implicit_diff:
+        b = jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
+        return _solve_linear_system_custom_linear_solve(
+            h_op_wrapped,
+            b,
+            float(denom),
+            float(chi),
+            float(volume_m3),
+            int(iters),
+            float(omega),
+            r0_flat.dtype,
+            h_op_T=h_op_t_wrapped,
+        )
+
+    p_init = jnp.full((M,), p0, dtype=r0_flat.dtype) * active_vec
+
+    def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0 + chi * volume_m3 * h_ext) / denom)
         return (1.0 - omega) * p + omega * p_new
 
     return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
@@ -565,6 +879,7 @@ def solve_p_easy_axis_near_multi_dipole(
     implicit_diff: bool = False,
     i_edge: jnp.ndarray | None = None,
     j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Fixed-iteration damped solver for p (easy-axis, near-only) using multi-dipole source split.
@@ -573,9 +888,11 @@ def solve_p_easy_axis_near_multi_dipole(
     """
     if subdip_n < 1:
         raise ValueError("subdip_n must be >= 1")
+    M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
     denom = 1.0 + chi * Nd
     if chi == 0.0:
-        return jnp.full((phi_flat.shape[0],), float(p0), dtype=r0_flat.dtype)
+        return jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
 
     cube_edge = float(volume_m3) ** (1.0 / 3.0)
     offsets = make_subdip_offsets_grid(subdip_n, cube_edge)
@@ -596,10 +913,13 @@ def solve_p_easy_axis_near_multi_dipole(
         def h_op(p: jnp.ndarray) -> jnp.ndarray:
             return _h_from_kij(p, nbr_idx, nbr_mask, kij)
 
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
     if implicit_diff:
-        b = jnp.full((phi_flat.shape[0],), float(p0), dtype=r0_flat.dtype)
+        b = jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
         return _solve_linear_system_custom_linear_solve(
-            h_op,
+            h_op_wrapped,
             b,
             float(denom),
             float(chi),
@@ -607,14 +927,166 @@ def solve_p_easy_axis_near_multi_dipole(
             int(iters),
             float(omega),
             r0_flat.dtype,
-            h_op_T=h_op_t,
+            h_op_T=h_op_t_wrapped,
         )
 
-    p_init = jnp.full((phi_flat.shape[0],), p0, dtype=r0_flat.dtype)
+    p_init = jnp.full((M,), p0, dtype=r0_flat.dtype) * active_vec
 
     def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
-        h_ext = h_op(p)
-        p_new = (p0 + chi * volume_m3 * h_ext) / denom
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0 + chi * volume_m3 * h_ext) / denom)
+        return (1.0 - omega) * p + omega * p_new
+
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
+
+
+def solve_p_easy_axis_near_multi_dipole_with_p0_flat(
+    phi_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    *,
+    p0_flat: jnp.ndarray,
+    chi: float,
+    Nd: float,
+    volume_m3: float,
+    subdip_n: int = 2,
+    iters: int = 30,
+    omega: float = 0.6,
+    implicit_diff: bool = False,
+    i_edge: jnp.ndarray | None = None,
+    j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """
+    Fixed-iteration damped solver with per-magnet p0 using multi-dipole source split.
+
+    TODO: Replace near kernel with cube-average tensor model.
+    """
+    if subdip_n < 1:
+        raise ValueError("subdip_n must be >= 1")
+    M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
+    p0_vec = jnp.asarray(p0_flat, dtype=r0_flat.dtype).reshape(-1)
+    if p0_vec.shape[0] != M:
+        raise ValueError("p0_flat size must match phi_flat size")
+
+    denom = 1.0 + chi * Nd
+    if chi == 0.0:
+        return p0_vec * active_vec
+
+    cube_edge = float(volume_m3) ** (1.0 / 3.0)
+    offsets = make_subdip_offsets_grid(subdip_n, cube_edge)
+    h_op_t: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+    if i_edge is not None and j_edge is not None:
+        k_edge = _build_k_edge_multi_dipole(phi_flat, r0_flat, i_edge, j_edge, offsets)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _apply_k_edges(p, i_edge, j_edge, k_edge, M)
+
+        def h_op_t(v: jnp.ndarray) -> jnp.ndarray:
+            return _apply_kt_edges(v, i_edge, j_edge, k_edge, M)
+
+    else:
+        kij = _build_kij_multi_dipole(phi_flat, r0_flat, nbr_idx, nbr_mask, offsets)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _h_from_kij(p, nbr_idx, nbr_mask, kij)
+
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
+    if implicit_diff:
+        return _solve_linear_system_custom_linear_solve(
+            h_op_wrapped,
+            p0_vec * active_vec,
+            float(denom),
+            float(chi),
+            float(volume_m3),
+            int(iters),
+            float(omega),
+            r0_flat.dtype,
+            h_op_T=h_op_t_wrapped,
+        )
+
+    p_init = p0_vec * active_vec
+
+    def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0_vec + chi * volume_m3 * h_ext) / denom)
+        return (1.0 - omega) * p + omega * p_new
+
+    return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
+
+
+def solve_p_easy_axis_near_multi_dipole_from_u(
+    u_flat: jnp.ndarray,
+    r0_flat: jnp.ndarray,
+    nbr_idx: jnp.ndarray,
+    nbr_mask: jnp.ndarray,
+    *,
+    p0: float,
+    chi: float,
+    Nd: float,
+    volume_m3: float,
+    subdip_n: int = 2,
+    iters: int = 30,
+    omega: float = 0.6,
+    implicit_diff: bool = False,
+    i_edge: jnp.ndarray | None = None,
+    j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Easy-axis near-only solver (multi-dipole) using precomputed 3D unit vectors."""
+    if subdip_n < 1:
+        raise ValueError("subdip_n must be >= 1")
+    M = int(u_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=r0_flat.dtype)
+    denom = 1.0 + chi * Nd
+    if chi == 0.0:
+        return jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
+
+    cube_edge = float(volume_m3) ** (1.0 / 3.0)
+    offsets = make_subdip_offsets_grid(subdip_n, cube_edge)
+    h_op_t: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+    if i_edge is not None and j_edge is not None:
+        M = int(u_flat.shape[0])
+        k_edge = _build_k_edge_multi_dipole_from_u(u_flat, r0_flat, i_edge, j_edge, offsets)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _apply_k_edges(p, i_edge, j_edge, k_edge, M)
+
+        def h_op_t(v: jnp.ndarray) -> jnp.ndarray:
+            return _apply_kt_edges(v, i_edge, j_edge, k_edge, M)
+
+    else:
+        kij = _build_kij_multi_dipole_from_u(u_flat, r0_flat, nbr_idx, nbr_mask, offsets)
+
+        def h_op(p: jnp.ndarray) -> jnp.ndarray:
+            return _h_from_kij(p, nbr_idx, nbr_mask, kij)
+
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
+
+    if implicit_diff:
+        b = jnp.full((M,), float(p0), dtype=r0_flat.dtype) * active_vec
+        return _solve_linear_system_custom_linear_solve(
+            h_op_wrapped,
+            b,
+            float(denom),
+            float(chi),
+            float(volume_m3),
+            int(iters),
+            float(omega),
+            r0_flat.dtype,
+            h_op_T=h_op_t_wrapped,
+        )
+
+    p_init = jnp.full((M,), p0, dtype=r0_flat.dtype) * active_vec
+
+    def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((p0 + chi * volume_m3 * h_ext) / denom)
         return (1.0 - omega) * p + omega * p_new
 
     return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
@@ -635,6 +1107,7 @@ def solve_p_easy_axis_near_cellavg(
     implicit_diff: bool = False,
     i_edge: jnp.ndarray | None = None,
     j_edge: jnp.ndarray | None = None,
+    active_flat: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """
     Fixed-iteration damped solver for p (easy-axis, near-only) using cell-averaged demag tensor.
@@ -642,6 +1115,7 @@ def solve_p_easy_axis_near_cellavg(
     """
     denom = 1.0 + chi * Nd
     M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=jnp.float64)
     a = float(volume_m3) ** (1.0 / 3.0)
     h = jnp.array([a, a, a], dtype=jnp.float64)
 
@@ -677,13 +1151,16 @@ def solve_p_easy_axis_near_cellavg(
             return _h_from_kij(p, nbr_idx, nbr_mask, kij)
 
     if chi == 0.0:
-        return jnp.full((M,), float(p0), dtype=jnp.float64)
+        return jnp.full((M,), float(p0), dtype=jnp.float64) * active_vec
+
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec) if h_op_t is not None else None
 
     if implicit_diff:
-        b = jnp.full((M,), float(p0), dtype=jnp.float64)
+        b = jnp.full((M,), float(p0), dtype=jnp.float64) * active_vec
 
         return _solve_linear_system_custom_linear_solve(
-            h_op,
+            h_op_wrapped,
             b,
             float(denom),
             float(chi),
@@ -691,14 +1168,14 @@ def solve_p_easy_axis_near_cellavg(
             int(iters),
             float(omega),
             jnp.float64,
-            h_op_T=h_op_t,
+            h_op_T=h_op_t_wrapped,
         )
 
-    p_init = jnp.full((M,), float(p0), dtype=jnp.float64)
+    p_init = jnp.full((M,), float(p0), dtype=jnp.float64) * active_vec
 
     def _body(i: int, p: jnp.ndarray) -> jnp.ndarray:
-        h_ext = h_op(p)
-        p_new = (float(p0) + float(chi) * float(volume_m3) * h_ext) / denom
+        h_ext = h_op_wrapped(p)
+        p_new = active_vec * ((float(p0) + float(chi) * float(volume_m3) * h_ext) / denom)
         return (1.0 - float(omega)) * p + float(omega) * p_new
 
     return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), _body, p_init))
@@ -723,18 +1200,21 @@ def solve_p_easy_axis_near_gl_double_mixed(
     delta_hi_offsets: jnp.ndarray,
     delta_hi_w: jnp.ndarray,
     implicit_diff: bool = True,
+    active_flat: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     M = int(phi_flat.shape[0])
+    active_vec = _active_vec_or_ones(active_flat, M=M, dtype=jnp.float64)
     if chi == 0.0:
         if jnp.ndim(p0) == 0:
-            return jnp.full((M,), float(p0), dtype=jnp.float64)
-        return cast(jnp.ndarray, jnp.asarray(p0, dtype=jnp.float64))
+            return jnp.full((M,), float(p0), dtype=jnp.float64) * active_vec
+        return jnp.asarray(p0, dtype=jnp.float64) * active_vec
 
     denom = 1.0 + chi * Nd
     if jnp.ndim(p0) == 0:
         p0_vec = jnp.full((M,), float(p0), dtype=jnp.float64)
     else:
         p0_vec = jnp.asarray(p0, dtype=jnp.float64)
+    p0_vec = p0_vec * active_vec
 
     k_edge = _k_edge_gl_double_mixed(
         phi_flat.astype(jnp.float64),
@@ -755,9 +1235,12 @@ def solve_p_easy_axis_near_gl_double_mixed(
     def h_op_t(v: jnp.ndarray) -> jnp.ndarray:
         return _apply_kt_edges(v, i_edge, j_edge, k_edge, M)
 
+    h_op_wrapped = _wrap_active_h_op(h_op, active_vec)
+    h_op_t_wrapped = _wrap_active_h_op(h_op_t, active_vec)
+
     if implicit_diff:
         return _solve_linear_system_custom_linear_solve(
-            h_op,
+            h_op_wrapped,
             p0_vec,
             float(denom),
             float(chi),
@@ -765,14 +1248,14 @@ def solve_p_easy_axis_near_gl_double_mixed(
             int(iters),
             float(omega),
             jnp.float64,
-            h_op_T=h_op_t,
+            h_op_T=h_op_t_wrapped,
         )
 
     p = p0_vec
 
     def body(_t: int, p_now: jnp.ndarray) -> jnp.ndarray:
-        h = h_op(p_now)
-        p_fp = (p0_vec + chi * volume_m3 * h) / denom
+        h = h_op_wrapped(p_now)
+        p_fp = active_vec * ((p0_vec + chi * volume_m3 * h) / denom)
         return (1.0 - omega) * p_now + omega * p_fp
 
     return cast(jnp.ndarray, jax.lax.fori_loop(0, int(iters), body, p))
@@ -787,8 +1270,12 @@ __all__ = [
     "_h_from_kij",
     "_build_kij_dipole",
     "_build_kij_multi_dipole",
+    "_build_kij_dipole_from_u",
+    "_build_kij_multi_dipole_from_u",
     "_build_k_edge_dipole",
     "_build_k_edge_multi_dipole",
+    "_build_k_edge_dipole_from_u",
+    "_build_k_edge_multi_dipole_from_u",
     "_build_k_edge_cellavg",
     "_gl_double_delta_table_n2",
     "_gl_double_delta_table_n3",
@@ -796,7 +1283,11 @@ __all__ = [
     "_k_edge_gl_double_mixed",
     "make_subdip_offsets_grid",
     "solve_p_easy_axis_near",
+    "solve_p_easy_axis_near_from_u",
+    "solve_p_easy_axis_near_with_p0_flat",
     "solve_p_easy_axis_near_multi_dipole",
+    "solve_p_easy_axis_near_multi_dipole_from_u",
+    "solve_p_easy_axis_near_multi_dipole_with_p0_flat",
     "solve_p_easy_axis_near_cellavg",
     "solve_p_easy_axis_near_gl_double_mixed",
 ]

@@ -2,16 +2,21 @@
 name = "halbach-optimizer"
 version = "0.0.0"
 description = "Halbach array optimization (dipole model) tools"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 readme = "README.md"
 license = { file = "LICENSE" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
 
 [project.optional-dependencies]
 dc = ["cvxpy>=1.4", "osqp>=0.6"]
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py314"]
 
 [tool.isort]
 profile = "black"
@@ -19,7 +24,7 @@ line_length = 100
 known_first_party = ["halbach"]
 [tool.ruff]
 line-length = 200
-target-version = "py311"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -31,7 +36,9 @@ select = [
   "W",           # pycodestyle warnings
 ]
 ignore = [
+  "I001",  # import order is normalized by isort in pre-commit
   "N803", "N806",  # 数学系の大文字変数などを許容
+  "UP040", "UP047",  # PEP 695 への一括移行は今回のスコープ外
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -51,7 +58,7 @@ addopts = "-q"
 testpaths = ["tests"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 strict = true
 warn_unused_configs = true
 warn_return_any = true
@@ -66,42 +73,10 @@ exclude = '(?x)(^\\.venv/|^\\.mypy_cache/|^\\.pytest_cache/|^runs/|^bench/|^docs
 # 例：numbaの型推論に依存する関数は後で "type: ignore[misc]" を付けるなど。
 
 [[tool.mypy.overrides]]
-module = ["streamlit_app"]
-disallow_untyped_decorators = false
-
-[[tool.mypy.overrides]]
-module = ["streamlit", "plotly", "plotly.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = ["jax", "jax.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["cvxpy", "cvxpy.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["optype", "optype.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["test_mirror_x0_delta_phi", "tests.test_mirror_x0_delta_phi"]
-disable_error_code = ["misc"]
-
-[[tool.mypy.overrides]]
-module = [
-  "test_jax_self_consistent_field_scale_invariance",
-  "tests.test_jax_self_consistent_field_scale_invariance",
-  "test_jax_self_consistent_field_scale_invariance_delta",
-  "tests.test_jax_self_consistent_field_scale_invariance_delta",
-]
-disallow_untyped_decorators = false
-
-[[tool.mypy.overrides]]
-module = [
-  "test_sc_linear_system_matches_jax_solver",
-  "tests.test_sc_linear_system_matches_jax_solver",
-]
-disallow_untyped_decorators = false
 

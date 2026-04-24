@@ -10,7 +10,7 @@
 
 ## 鍓嶆彁
 - Windows + PowerShell
-- Python 3.11 + venv
+- Python 3.14 + venv
 - GitHub銇ф柊瑕忋儶銉濅綔鎴愶紙绗�1绔犮仹瀹熸柦锛�
 - CI銇皫鍏ャ仐銇亜锛堛儹銉笺偒銉仹pytest/format/typecheck銈掑洖銇欙級
 - 鍨嬨儊銈с儍銈伅寮枫倎锛坢ypy strict锛�
@@ -26,7 +26,7 @@
 - [ ] 鈥滀笉澶夋潯浠讹紙鐩殑闁㈡暟/淇濆瓨浜掓彌锛夆�� 銈掓槑鏂囧寲
 
 ### 1) Repo bootstrap锛堛儹銉笺偒銉啋GitHub锛�
-- [ ] venv锛�3.11锛夋墜闋嗐倰README銇浉銇�
+- [ ] venv锛�3.14锛夋墜闋嗐倰README銇浉銇�
 - [ ] MIT LICENSE 銈掕拷鍔�
 - [ ] .gitignore 銈掓暣鍌�
 - [ ] 銉欍兗銈广偝銉笺儔銈� `src/` or 銉兗銉堛伀閰嶇疆銇椼�佸垵鍥炪偪銈� `v0-baseline`

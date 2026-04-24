@@ -7,13 +7,14 @@ from numpy.typing import NDArray
 
 from halbach.constants import FACTOR, m0, phi0
 from halbach.numba_compat import njit
-from halbach.physics import compute_B_and_B0
+from halbach.physics import compute_B_and_B0, compute_B_and_B0_masked
 from halbach.types import Geometry
 
 
 @njit(cache=True)
 def grad_alpha_and_radius_fixed(
     alphas: NDArray[np.float64],
+    ring_active_mask: NDArray[np.bool_],
     r_bases: NDArray[np.float64],
     theta: NDArray[np.float64],
     sin2: NDArray[np.float64],
@@ -54,6 +55,8 @@ def grad_alpha_and_radius_fixed(
         z0 = z_layers[k]
         rb = r_bases[k]
         for r in range(Rloc):
+            if not ring_active_mask[r, k]:
+                continue
             ak = alphas[r, k]
             rho = rb + ring_offsets[r]
             for i in range(Nloc):
@@ -118,6 +121,8 @@ def grad_alpha_and_radius_fixed(
         z0 = z_layers[k]
         rb = r_bases[k]
         for r in range(Rloc):
+            if not ring_active_mask[r, k]:
+                continue
             ak = alphas[r, k]
             rho = rb + ring_offsets[r]
             sum_dot_alpha = 0.0
@@ -200,24 +205,48 @@ def objective_with_grads_fixed(
     geom: Geometry,
     pts: NDArray[np.float64],
     factor: float = FACTOR,
+    ring_active_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64], float]:
     """
     Objective J and y-space gradients, plus |B0|.
     """
-    Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
-        alphas,
-        r_bases,
-        geom.theta,
-        geom.sin2,
-        geom.cth,
-        geom.sth,
-        geom.z_layers,
-        geom.ring_offsets,
-        pts,
-        factor,
-        phi0,
-        m0,
-    )
+    if ring_active_mask is None:
+        active_mask = np.ones(alphas.shape, dtype=np.bool_)
+        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0(
+            alphas,
+            r_bases,
+            geom.theta,
+            geom.sin2,
+            geom.cth,
+            geom.sth,
+            geom.z_layers,
+            geom.ring_offsets,
+            pts,
+            factor,
+            phi0,
+            m0,
+        )
+    else:
+        active_mask = np.asarray(ring_active_mask, dtype=np.bool_)
+        if active_mask.shape != alphas.shape:
+            raise ValueError(
+                f"ring_active_mask shape {active_mask.shape} does not match alphas shape {alphas.shape}"
+            )
+        Bx, By, Bz, B0x, B0y, B0z = compute_B_and_B0_masked(
+            alphas,
+            active_mask,
+            r_bases,
+            geom.theta,
+            geom.sin2,
+            geom.cth,
+            geom.sth,
+            geom.z_layers,
+            geom.ring_offsets,
+            pts,
+            factor,
+            phi0,
+            m0,
+        )
     DBx = Bx - B0x
     DBy = By - B0y
     DBz = Bz - B0z
@@ -228,6 +257,7 @@ def objective_with_grads_fixed(
 
     g_alpha, g_rbase = grad_alpha_and_radius_fixed(
         alphas,
+        active_mask,
         r_bases,
         geom.theta,
         geom.sin2,

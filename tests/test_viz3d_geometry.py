@@ -39,6 +39,58 @@ def _write_min_run(tmp_path: Path) -> Path:
     return run_dir
 
 
+def _write_nonuniform_run(tmp_path: Path) -> Path:
+    run_dir = tmp_path / "run_nonuniform"
+    run_dir.mkdir()
+
+    R = 3
+    K = 6
+    N = 8
+    theta = np.linspace(0.0, 2.0 * np.pi, N, endpoint=False)
+    sin2th = np.sin(2.0 * theta)
+    cth = np.cos(theta)
+    sth = np.sin(theta)
+    z_layers = np.linspace(-0.05, 0.05, K)
+    ring_offsets = np.array([0.0, 0.01, 0.02], dtype=float)
+    alphas = 1e-3 * np.arange(R * K, dtype=float).reshape(R, K)
+    r_bases = 0.2 + 1e-3 * np.arange(K, dtype=float)
+    radial_count_per_layer = np.array([3, 3, 2, 2, 3, 3], dtype=int)
+    ring_active_mask = np.zeros((R, K), dtype=bool)
+    for k, count in enumerate(radial_count_per_layer):
+        ring_active_mask[:count, k] = True
+    alphas = np.where(ring_active_mask, alphas, 0.0)
+
+    np.savez(
+        run_dir / "results.npz",
+        alphas_opt=alphas,
+        r_bases_opt=r_bases,
+        radial_count_per_layer=radial_count_per_layer,
+        ring_active_mask=ring_active_mask,
+        theta=theta,
+        sin2th=sin2th,
+        cth=cth,
+        sth=sth,
+        z_layers=z_layers,
+        ring_offsets=ring_offsets,
+    )
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "label": "viz3d-nonuniform",
+                "radial_profile": {
+                    "mode": "end-only",
+                    "base_R": 2,
+                    "end_R": 3,
+                    "end_layers_per_side": 2,
+                    "R_max": 3,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
 def test_enumerate_magnets_shapes_and_filtering(tmp_path: Path) -> None:
     run = load_run(_write_min_run(tmp_path))
 
@@ -54,6 +106,18 @@ def test_enumerate_magnets_shapes_and_filtering(tmp_path: Path) -> None:
     assert phi_f.shape[0] == centers_f.shape[0]
     assert ring_f.shape[0] == centers_f.shape[0]
     assert layer_f.shape[0] == centers_f.shape[0]
+
+
+def test_enumerate_magnets_skips_inactive_outer_rings(tmp_path: Path) -> None:
+    run = load_run(_write_nonuniform_run(tmp_path))
+    centers, phi, ring_id, layer_id = enumerate_magnets(run, stride=2, hide_x_negative=False)
+    expected = int(4 * np.sum([3, 3, 2, 2, 3, 3]))
+    assert centers.shape == (expected, 3)
+    assert phi.shape == (expected,)
+    assert ring_id.shape == (expected,)
+    assert layer_id.shape == (expected,)
+    assert int(np.max(ring_id)) == 2
+    assert int(np.sum(ring_id == 2)) == 16
 
 
 def test_build_magnet_figure_runs(tmp_path: Path) -> None:

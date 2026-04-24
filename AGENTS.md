@@ -54,10 +54,10 @@ Codex（VS Code上のAIアシスタント）にリファクタリングを依頼
   - `alphas_opt`, `r_bases_opt`, `theta`, `sin2th`, `z_layers`, `ring_offsets`
 
 ## 4. Coding standards
-- Python: 3.11
+- Python: 3.14
 - Formatter: black
 - Linter: ruff
-- Type check: mypy **strict**（ただし numba 境界は現実的に緩和が必要な場合あり）
+- Type check: mypy **strict**（既定では `halbach/` を対象。numba 境界は現実的に緩和が必要な場合あり）
 - Docstring: 「shape」「単位」「入出力」を明記
 - 依存追加は最小限（配布予定なし、CIなし）
 

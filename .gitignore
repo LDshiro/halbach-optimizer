@@ -11,12 +11,18 @@ build/
 # Virtual env
 .venv/
 venv/
+.venv_py312_broken_20260412_131420
+
 
 # Jupyter
 .ipynb_checkpoints/
 
 # VS Code
 .vscode/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
 
 # OS
 .DS_Store

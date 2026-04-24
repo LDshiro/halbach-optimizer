@@ -12,6 +12,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--name", default=None, help="run name (default: out dir name)")
     ap.add_argument("--N", type=int, required=True, help="magnets per ring")
     ap.add_argument("--R", type=int, required=True, help="number of radial rings")
+    ap.add_argument(
+        "--end-R",
+        type=int,
+        default=None,
+        help="radial ring count for the end z-layers (default: same as R)",
+    )
+    ap.add_argument(
+        "--end-layers-per-side",
+        type=int,
+        default=0,
+        help="number of z-layers at each end using end-R",
+    )
     ap.add_argument("--K", type=int, required=True, help="number of z layers")
     ap.add_argument("--Lz", type=float, required=True, help="total z-span [m]")
     ap.add_argument("--diameter-mm", type=float, default=400.0, help="diameter [mm]")
@@ -36,6 +48,8 @@ def main(argv: list[str] | None = None) -> None:
     results = generate_halbach_initial(
         N=int(args.N),
         R=int(args.R),
+        end_R=None if args.end_R is None else int(args.end_R),
+        end_layers_per_side=int(args.end_layers_per_side),
         K=int(args.K),
         Lz=float(args.Lz),
         diameter_m=diameter_m,
@@ -49,10 +63,25 @@ def main(argv: list[str] | None = None) -> None:
         generator_params=dict(
             N=int(args.N),
             R=int(args.R),
+            end_R=int(args.R) if args.end_R is None else int(args.end_R),
+            end_layers_per_side=int(args.end_layers_per_side),
             K=int(args.K),
             Lz=float(args.Lz),
             diameter_mm=float(args.diameter_mm),
             ring_offset_step_mm=float(args.ring_offset_step_mm),
+            radial_profile=dict(
+                mode=(
+                    "uniform"
+                    if args.end_R is None
+                    or int(args.end_R) == int(args.R)
+                    or int(args.end_layers_per_side) == 0
+                    else "end-only"
+                ),
+                base_R=int(args.R),
+                end_R=int(args.R) if args.end_R is None else int(args.end_R),
+                end_layers_per_side=int(args.end_layers_per_side),
+                R_max=max(int(args.R), int(args.R) if args.end_R is None else int(args.end_R)),
+            ),
         ),
         description="generated initial pure Halbach",
     )
