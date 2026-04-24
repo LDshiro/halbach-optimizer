@@ -2046,7 +2046,28 @@ def main() -> None:
                     key="opt_roi_samples",
                 )
             )
-            angle_model = _gui_selectbox(
+            roi_mode_opt = st.selectbox(
+                "ROI sampling mode",
+                ["surface-fibonacci", "volume-grid"],
+                index=0,
+                key="roi_mode_opt",
+            )
+            roi_samples_opt = int(
+                st.number_input(
+                    "ROI samples",
+                    min_value=1,
+                    max_value=2_000_000,
+                    value=300,
+                    step=10,
+                    key="roi_samples_opt",
+                    disabled=(roi_mode_opt != "surface-fibonacci"),
+                )
+            )
+            if roi_mode_opt == "surface-fibonacci":
+                st.caption("ROI step is ignored when ROI sampling mode is surface-fibonacci.")
+            else:
+                st.caption("ROI samples is not used in volume-grid mode.")
+            angle_model = st.selectbox(
                 "Angle model",
                 ["legacy-alpha", "delta-rep-x0", "fourier-x0"],
                 key="angle_model",
@@ -2495,6 +2516,7 @@ def main() -> None:
                                         gtol=gtol,
                                         roi_r=roi_r_opt,
                                         roi_step=roi_step_opt,
+                                        roi_mode=roi_mode_opt,
                                         roi_samples=roi_samples_opt,
                                         angle_model=angle_model,
                                         grad_backend=grad_backend,
@@ -2573,6 +2595,7 @@ def main() -> None:
                             gtol=gtol,
                             roi_r=roi_r_opt,
                             roi_step=roi_step_opt,
+                            roi_mode=roi_mode_opt,
                             roi_samples=roi_samples_opt,
                             angle_model=angle_model,
                             grad_backend=grad_backend,
@@ -2645,6 +2668,7 @@ def main() -> None:
                     gtol=gtol,
                     roi_r=roi_r_opt,
                     roi_step=roi_step_opt,
+                    roi_mode=roi_mode_opt,
                     roi_samples=roi_samples_opt,
                     angle_model=angle_model,
                     grad_backend=grad_backend,
