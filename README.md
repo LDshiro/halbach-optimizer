@@ -79,6 +79,30 @@ GUI でできること:
 - 角度モデル / 自己無撞着 / ROI 等のパラメータ設定
 - Generate initial run で `End-layer R` / `End layers / side` を指定可能
 
+### 2.4 Read-only Backend
+React 移植用の read-only backend を FastAPI で同梱しています。
+
+```powershell
+python -m uvicorn backend.app:app --reload
+```
+
+利用できる初期 endpoint:
+- `GET /api/runs`
+- `POST /api/run/overview`
+- `POST /api/run/map2d`
+- `POST /api/run/scene3d`
+
+### 2.5 React Frontend Prototype
+最初の縦切りとして、`Run Selection + Overview + 2D + 3D` を扱う React frontend を `frontend/` に追加しています。
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+この frontend は上の FastAPI backend を前提にしています。`Optimize / Variation / Human Overlay / DC/CCP / GUI Config` は引き続き Streamlit 側で扱います。
+
 ---
 
 ## 3. 計算モデル

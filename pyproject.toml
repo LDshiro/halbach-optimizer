@@ -36,6 +36,7 @@ select = [
   "W",           # pycodestyle warnings
 ]
 ignore = [
+  "I001",  # import order is normalized by isort in pre-commit
   "N803", "N806",  # 数学系の大文字変数などを許容
   "UP040", "UP047",  # PEP 695 への一括移行は今回のスコープ外
 ]

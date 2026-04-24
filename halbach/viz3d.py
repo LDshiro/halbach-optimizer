@@ -46,6 +46,18 @@ def enumerate_magnets(
     return centers, phi, ring_id, layer_id
 
 
+def enumerate_magnets_with_directions(
+    run: RunBundle,
+    *,
+    stride: int = 1,
+    hide_x_negative: bool = False,
+) -> tuple[FloatArray, FloatArray, FloatArray, NDArray[np.int_], NDArray[np.int_]]:
+    """
+    Enumerate magnet centers and full magnetization direction vectors for the run.
+    """
+    return _enumerate_magnets_with_u(run, stride=stride, hide_x_negative=hide_x_negative)
+
+
 def _enumerate_magnets_with_u(
     run: RunBundle,
     *,
@@ -673,6 +685,7 @@ def build_magnet_figure(
 __all__ = [
     "MagnetGeometry",
     "enumerate_magnets",
+    "enumerate_magnets_with_directions",
     "compute_scene_ranges",
     "build_cubes_mesh",
     "build_magnetization_arrows",

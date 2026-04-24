@@ -3,6 +3,9 @@ scipy
 numba
 matplotlib
 jax
+fastapi
+httpx
+uvicorn
 
 pytest
 black

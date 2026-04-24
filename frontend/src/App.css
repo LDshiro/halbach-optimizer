@@ -1,0 +1,133 @@
+:root {
+  color: #10253c;
+  background:
+    radial-gradient(circle at top left, rgba(124, 169, 212, 0.3), transparent 32%),
+    linear-gradient(180deg, #f7fbff 0%, #edf4fa 100%);
+  font-family: "Segoe UI", "Yu Gothic UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  display: grid;
+  gap: 1.5rem;
+  padding: 1.5rem;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: end;
+}
+
+.eyebrow {
+  margin: 0 0 0.25rem;
+  color: #496d94;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+}
+
+.muted {
+  color: #5c7289;
+}
+
+.panel,
+.summary-card {
+  border: 1px solid rgba(28, 61, 98, 0.12);
+  border-radius: 1.25rem;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 16px 40px rgba(18, 52, 86, 0.08);
+  padding: 1.2rem;
+}
+
+.controls h2,
+.panel h3,
+.summary-card h3 {
+  margin-top: 0;
+}
+
+.control-grid,
+.summary-grid,
+.plot-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.control-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.control-grid label {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.control-grid input,
+.control-grid select {
+  border: 1px solid rgba(28, 61, 98, 0.22);
+  border-radius: 0.8rem;
+  padding: 0.7rem 0.8rem;
+  background: #fff;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.primary-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.9rem 1.25rem;
+  background: linear-gradient(135deg, #114e88 0%, #0f7a7a 100%);
+  color: #fff;
+  cursor: pointer;
+}
+
+.summary-grid,
+.plot-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.tall-panel {
+  min-height: 420px;
+}
+
+.error-banner {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border-radius: 1rem;
+  background: #ffe6e1;
+  color: #8d2e1d;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 1rem;
+  }
+
+  .hero {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

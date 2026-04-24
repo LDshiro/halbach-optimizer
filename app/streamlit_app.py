@@ -25,11 +25,36 @@ from app.gui_config import (
     normalize_gui_choice,
     write_gui_config,
 )
+from app.plotly_views import (
+    build_scene_figure,
+    combine_scene_ranges,
+    common_ppm_limits,
+    plot_cross_section,
+    plot_error_map,
+)
+from halbach.app_services import (
+    Map2DPayload,
+    Map2DRequest,
+    RunSummary,
+    Scene3DPayload,
+    Scene3DRequest,
+    build_run_delta_summary,
+    build_run_summary,
+    list_run_candidates,
+    load_map2d_payload,
+    load_run_bundle,
+    load_scene3d_payload,
+)
+from halbach.app_services import magnetization_cache_key as service_magnetization_cache_key
+from halbach.app_services import meta_mtime as service_meta_mtime
+from halbach.app_services import resolve_results_path as service_resolve_results_path
+from halbach.app_services import resolve_selected_path
+from halbach.app_services import results_mtime as service_results_mtime
+from halbach.app_services import try_load_run_bundle
 
 if TYPE_CHECKING:
     from halbach.perturbation_eval import PerturbationResult
     from halbach.run_types import RunBundle
-    from halbach.viz2d import ErrorMap2D
 
 PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
 
@@ -263,10 +288,7 @@ def _coil_x_rotation_quarter_turns(rotation_deg: int) -> int:
 
 
 def _resolve_path(selected: str, manual: str) -> str:
-    manual_clean = manual.strip()
-    if manual_clean:
-        return manual_clean
-    return selected.strip()
+    return resolve_selected_path(selected, manual)
 
 
 def _sanitize_tag(tag: str) -> str:
@@ -281,52 +303,19 @@ def _default_out_dir(tag: str) -> Path:
 
 
 def _resolve_results_path(path: Path) -> Path:
-    if path.is_dir():
-        primary = path / "results.npz"
-        if primary.is_file():
-            return primary
-        matches = sorted(path.glob("*results*.npz"))
-        if not matches:
-            raise FileNotFoundError(f"No results .npz found in {path}")
-        if len(matches) > 1:
-            items = ", ".join(str(p) for p in matches)
-            raise ValueError(f"Multiple results files found in {path}: {items}")
-        return matches[0]
-    if path.is_file() and path.suffix == ".npz":
-        return path
-    raise FileNotFoundError(f"Run path not found: {path}")
+    return service_resolve_results_path(path)
 
 
 def _results_mtime(path: Path) -> float:
-    results_path = _resolve_results_path(path)
-    return float(results_path.stat().st_mtime)
+    return service_results_mtime(path)
 
 
 def _meta_mtime(path: Path) -> float:
-    if path.is_dir():
-        primary = path / "meta.json"
-        if primary.is_file():
-            return float(primary.stat().st_mtime)
-        matches = sorted(path.glob("*meta*.json"))
-        if len(matches) == 1:
-            return float(matches[0].stat().st_mtime)
-        return 0.0
-    if path.is_file() and path.suffix == ".npz":
-        candidate = path.with_name("meta.json")
-        if candidate.is_file():
-            return float(candidate.stat().st_mtime)
-        matches = sorted(path.parent.glob("*meta*.json"))
-        if len(matches) == 1:
-            return float(matches[0].stat().st_mtime)
-    return 0.0
+    return service_meta_mtime(path)
 
 
 def _magnetization_cache_key(meta: dict[str, object]) -> str:
-    magnetization = meta.get("magnetization", {})
-    try:
-        return json.dumps(magnetization, sort_keys=True, default=str)
-    except Exception:
-        return ""
+    return service_magnetization_cache_key(meta)
 
 
 def _jax_available() -> bool:
@@ -369,9 +358,13 @@ def _apply_pending_selection_updates() -> None:
 
 @st.cache_data(show_spinner=False)
 def _cached_load_run(path_text: str, mtime: float, _meta_mtime: float) -> RunBundle:
-    from halbach.run_io import load_run
+    return load_run_bundle(path_text)
 
-    return load_run(Path(path_text))
+
+@st.cache_data(show_spinner=False)
+def _cached_run_summary(path_text: str, mtime: float, _meta_mtime: float) -> RunSummary:
+    run = load_run_bundle(path_text)
+    return build_run_summary(run)
 
 
 @st.cache_data(show_spinner=False)
@@ -383,81 +376,41 @@ def _cached_error_map(
     step: float,
     mag_model_eval: str,
     sc_cfg_key: str,
-) -> tuple[ErrorMap2D, dict[str, object]]:
-    from halbach.run_io import load_run
-    from halbach.viz2d import compute_error_map_ppm_plane_with_debug
-
-    run = load_run(Path(path_text))
-    sc_cfg_override = json.loads(sc_cfg_key) if sc_cfg_key else None
-    return compute_error_map_ppm_plane_with_debug(
-        run,
-        plane="xy",
-        coord0=0.0,
-        roi_r=roi_r,
-        step=step,
-        mag_model_eval=cast(Literal["auto", "fixed", "self-consistent-easy-axis"], mag_model_eval),
-        sc_cfg_override=sc_cfg_override,
+) -> Map2DPayload:
+    sc_cfg_override = cast(dict[str, object] | None, json.loads(sc_cfg_key) if sc_cfg_key else None)
+    return load_map2d_payload(
+        Map2DRequest(
+            run_path=path_text,
+            roi_r=roi_r,
+            step=step,
+            mag_model_eval=cast(
+                Literal["auto", "fixed", "self-consistent-easy-axis"], mag_model_eval
+            ),
+            sc_cfg_override=sc_cfg_override,
+        )
     )
 
 
 @st.cache_data(show_spinner=False)
-def _cached_b0(path_text: str, mtime: float, _meta_key: str) -> float:
-    from halbach.angles_runtime import phi_rkn_from_run
-    from halbach.constants import FACTOR, m0, phi0
-    from halbach.magnetization_runtime import (
-        compute_b_and_b0_from_m_flat,
-        compute_m_flat_from_run,
-        get_magnetization_config_from_meta,
-    )
-    from halbach.physics import compute_B_and_B0, compute_B_and_B0_phi_rkn
-    from halbach.run_io import load_run
-
-    run = load_run(Path(path_text))
-    pts = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
-    model_effective, _sc_cfg = get_magnetization_config_from_meta(run.meta)
-    if model_effective == "self-consistent-easy-axis":
-        phi_rkn = phi_rkn_from_run(run, phi0=phi0)
-        r_bases = np.asarray(run.results.r_bases, dtype=np.float64)
-        rho = r_bases[None, :] + np.asarray(run.geometry.ring_offsets, dtype=np.float64)[:, None]
-        px = rho[:, :, None] * np.asarray(run.geometry.cth, dtype=np.float64)[None, None, :]
-        py = rho[:, :, None] * np.asarray(run.geometry.sth, dtype=np.float64)[None, None, :]
-        pz = np.broadcast_to(
-            np.asarray(run.geometry.z_layers, dtype=np.float64)[None, :, None], px.shape
+def _cached_scene_payload(
+    primary_path: str,
+    primary_mtime: float,
+    primary_meta_mtime: float,
+    secondary_path: str,
+    secondary_mtime: float,
+    secondary_meta_mtime: float,
+    stride: int,
+    hide_x_negative: bool,
+) -> Scene3DPayload:
+    _ = (primary_mtime, primary_meta_mtime, secondary_mtime, secondary_meta_mtime)
+    return load_scene3d_payload(
+        Scene3DRequest(
+            primary_path=primary_path,
+            secondary_path=secondary_path or None,
+            stride=stride,
+            hide_x_negative=hide_x_negative,
         )
-        r0_rkn = np.stack([px, py, pz], axis=-1)
-        m_flat, _debug = compute_m_flat_from_run(run.run_dir, run.geometry, phi_rkn, r0_rkn)
-        r0_flat = r0_rkn.reshape(-1, 3)
-        _, _, _, B0x, B0y, B0z = compute_b_and_b0_from_m_flat(m_flat, r0_flat, pts, factor=FACTOR)
-    else:
-        if run.meta.get("angle_model", "legacy-alpha") == "legacy-alpha":
-            _, _, _, B0x, B0y, B0z = compute_B_and_B0(
-                run.results.alphas,
-                run.results.r_bases,
-                run.geometry.theta,
-                run.geometry.sin2,
-                run.geometry.cth,
-                run.geometry.sth,
-                run.geometry.z_layers,
-                run.geometry.ring_offsets,
-                pts,
-                FACTOR,
-                phi0,
-                m0,
-            )
-        else:
-            phi_rkn = phi_rkn_from_run(run, phi0=phi0)
-            _, _, _, B0x, B0y, B0z = compute_B_and_B0_phi_rkn(
-                phi_rkn,
-                run.results.r_bases,
-                run.geometry.cth,
-                run.geometry.sth,
-                run.geometry.z_layers,
-                run.geometry.ring_offsets,
-                pts,
-                FACTOR,
-                m0,
-            )
-    return float(np.sqrt(B0x * B0x + B0y * B0y + B0z * B0z))
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -468,9 +421,8 @@ def _cached_variation_eval(
     cfg_key: str,
 ) -> tuple[PerturbationResult, dict[str, object]]:
     from halbach.perturbation_eval import PerturbationConfig, run_perturbation_case
-    from halbach.run_io import load_run
 
-    run = load_run(Path(path_text))
+    run = load_run_bundle(path_text)
     cfg_raw = json.loads(cfg_key)
     cfg = PerturbationConfig(
         sigma_rel_pct=float(cfg_raw["sigma_rel_pct"]),
@@ -618,19 +570,11 @@ def _seed_variation_sc_state(run_key: str, defaults: dict[str, Any]) -> None:
 def _try_load(
     path_text: str,
 ) -> tuple[RunBundle | None, float | None, float | None, str | None]:
-    if not path_text:
-        return None, None, None, None
-    try:
-        mtime = _results_mtime(Path(path_text))
-        meta_mtime = _meta_mtime(Path(path_text))
-        run = _cached_load_run(path_text, mtime, meta_mtime)
-        return run, mtime, meta_mtime, None
-    except Exception as exc:
-        return None, None, None, str(exc)
+    return try_load_run_bundle(path_text)
 
 
-def _ppm_stats(m: ErrorMap2D) -> tuple[float, float]:
-    return float(np.nanmean(m.ppm)), float(np.nanmax(np.abs(m.ppm)))
+def _ppm_stats(m: Map2DPayload) -> tuple[float, float]:
+    return float(m.summary_stats["ppm_mean"]), float(m.summary_stats["ppm_max_abs"])
 
 
 def _fmt_num(value: object, fmt: str = ".4f") -> str:
@@ -655,93 +599,19 @@ def _sample_colorscale(name: str, levels: int) -> list[tuple[float, str]]:
 
 
 def _plot_error_map(
-    m: ErrorMap2D, vmin: float, vmax: float, contour_level: float, title: str
+    m: Map2DPayload, vmin: float, vmax: float, contour_level: float, title: str
 ) -> go.Figure:
-    from halbach.viz2d import contour_levels_ppm
-
-    xs_mm = m.xs * 1000.0
-    ys_mm = m.ys * 1000.0
-    fig = go.Figure()
-    fig.add_trace(
-        go.Heatmap(
-            x=xs_mm,
-            y=ys_mm,
-            z=m.ppm,
-            zmin=vmin,
-            zmax=vmax,
-            zmid=0.0,
-            colorscale=_sample_colorscale("RdBu", 50),
-            colorbar={"title": "ppm"},
-        )
-    )
-    level_neg, level_pos = contour_levels_ppm(contour_level)
-    contour_steps = 50
-    contour_size = (level_pos - level_neg) / contour_steps
-    fig.add_trace(
-        go.Contour(
-            x=xs_mm,
-            y=ys_mm,
-            z=m.ppm,
-            contours={"start": level_neg, "end": level_pos, "size": contour_size},
-            line={"color": "black", "width": 1},
-            showscale=False,
-            hoverinfo="skip",
-        )
-    )
-    fig.update_layout(
-        title=title,
-        xaxis_title="x (mm)",
-        yaxis_title="y (mm)",
-        height=420,
-        margin={"l": 40, "r": 10, "b": 40, "t": 40},
-    )
-    return fig
+    return plot_error_map(m, vmin=vmin, vmax=vmax, contour_level=contour_level, title=title)
 
 
-def _plot_cross_section(m: ErrorMap2D, vmin: float, vmax: float, title: str) -> go.Figure:
-    from halbach.viz2d import extract_cross_section_y0
-
-    line = extract_cross_section_y0(m)
-    x_mm = line.x * 1000.0
-    fig = go.Figure(go.Scatter(x=x_mm, y=line.ppm, mode="lines", line={"color": "#1f77b4"}))
-    fig.update_layout(
-        title=f"{title} (y0={line.y0 * 1000.0:.2f} mm)",
-        xaxis_title="x (mm)",
-        yaxis_title="ppm",
-        yaxis={"range": [vmin, vmax]},
-        height=240,
-        margin={"l": 40, "r": 10, "b": 40, "t": 40},
-    )
-    return fig
+def _plot_cross_section(m: Map2DPayload, vmin: float, vmax: float, title: str) -> go.Figure:
+    return plot_cross_section(m, vmin=vmin, vmax=vmax, title=title)
 
 
-def main() -> None:
-    st.set_page_config(page_title="Halbach Run Viewer", layout="wide")
-    st.title("Halbach Run Viewer")
-
-    try:
-        gui_defaults = _get_gui_defaults()
-    except Exception as exc:
-        st.error(f"GUI config load error: {exc}")
-        return
-    _seed_gui_state(gui_defaults)
-
-    runs_dir = ROOT / "runs"
-    candidates = _scan_runs(runs_dir)
-
-    if "opt_job" not in st.session_state:
-        st.session_state["opt_job"] = None
-    if "gen_run_code" not in st.session_state:
-        st.session_state["gen_run_code"] = None
-        st.session_state["gen_run_output"] = ""
-        st.session_state["gen_run_dir"] = ""
-    if "flash_message" not in st.session_state:
-        st.session_state["flash_message"] = ""
-
-    _apply_pending_selection_updates()
-
+def _render_readonly_sidebar(candidates: list[str]) -> dict[str, object]:
     with st.sidebar:
         st.header("Run Selection")
+        runs_dir = ROOT / "runs"
         if candidates:
             st.caption(f"Found {len(candidates)} run(s) under {runs_dir}")
         else:
@@ -791,7 +661,11 @@ def main() -> None:
         else:
             ppm_limit = float(
                 st.number_input(
-                    "PPM limit", min_value=5.0, max_value=20000.0, step=500.0, key="map_ppm_limit"
+                    "PPM limit",
+                    min_value=5.0,
+                    max_value=20000.0,
+                    step=500.0,
+                    key="map_ppm_limit",
                 )
             )
         contour_level = float(
@@ -1005,135 +879,87 @@ def main() -> None:
             key="view_magnet_surface_label",
             fallback="Current gray",
         )
-        magnet_surface_color = magnet_surface_palette[magnet_surface_label]
 
-    init_path = _resolve_path(init_select, init_path_text)
-    opt_path = _resolve_path(opt_select, opt_path_text)
+    return {
+        "init_select": init_select,
+        "init_path_text": init_path_text,
+        "opt_select": opt_select,
+        "opt_path_text": opt_path_text,
+        "roi_r": roi_r,
+        "step": step,
+        "ppm_limit": ppm_limit,
+        "contour_level": contour_level,
+        "mag_model_eval": mag_model_eval,
+        "sc_cfg_key": sc_cfg_key,
+        "view_target": view_target,
+        "mode": mode,
+        "stride": stride,
+        "hide_x_negative": hide_x_negative,
+        "magnet_size_mm": magnet_size_mm,
+        "magnet_thickness_mm": magnet_thickness_mm,
+        "arrow_length_mm": arrow_length_mm,
+        "arrow_head_angle_deg": arrow_head_angle_deg,
+        "magnet_surface_color": magnet_surface_palette[magnet_surface_label],
+    }
 
-    init_run, init_mtime, _init_meta_mtime, init_err = _try_load(init_path)
-    opt_run, opt_mtime, _opt_meta_mtime, opt_err = _try_load(opt_path)
 
-    if init_err:
-        st.error(f"Initial run load error: {init_err}")
-    if opt_err:
-        st.error(f"Optimized run load error: {opt_err}")
+def _render_overview_tab(
+    init_summary: RunSummary | None,
+    opt_summary: RunSummary | None,
+    init_map: Map2DPayload | None,
+    opt_map: Map2DPayload | None,
+    delta_summary: dict[str, object] | None,
+) -> None:
+    st.subheader("Runs")
+    cols = st.columns(2)
 
-    init_map: ErrorMap2D | None = None
-    opt_map: ErrorMap2D | None = None
-    init_debug: dict[str, object] | None = None
-    opt_debug: dict[str, object] | None = None
-    if init_run is not None and init_mtime is not None:
-        try:
-            init_key = _magnetization_cache_key(init_run.meta)
-            init_map, init_debug = _cached_error_map(
-                init_path,
-                init_mtime,
-                init_key,
-                roi_r,
-                step,
-                mag_model_eval,
-                sc_cfg_key,
-            )
-        except Exception as exc:
-            st.error(f"Initial 2D map error: {exc}")
-    if opt_run is not None and opt_mtime is not None:
-        try:
-            opt_key = _magnetization_cache_key(opt_run.meta)
-            opt_map, opt_debug = _cached_error_map(
-                opt_path,
-                opt_mtime,
-                opt_key,
-                roi_r,
-                step,
-                mag_model_eval,
-                sc_cfg_key,
-            )
-        except Exception as exc:
-            st.error(f"Optimized 2D map error: {exc}")
+    def render_summary(
+        summary: RunSummary | None,
+        m: Map2DPayload | None,
+        label: str,
+    ) -> None:
+        if summary is None:
+            st.info(f"{label} run is not loaded.")
+            return
 
-    vmin = vmax = 0.0
-    available_maps = [m for m in (init_map, opt_map) if m is not None]
-    if available_maps:
-        from halbach.viz2d import common_ppm_limits
+        st.markdown(f"**{label} name**: {summary.name}")
+        st.markdown(f"**Results**: `{summary.results_path}`")
+        st.markdown(f"**Meta**: `{summary.meta_path}`")
 
-        vmin, vmax = common_ppm_limits(available_maps, limit_ppm=ppm_limit, symmetric=True)
+        if summary.framework == "dc":
+            st.markdown("**Framework**: DC/CCP")
+            for key in (
+                "p_opt_min",
+                "p_opt_mean",
+                "p_opt_max",
+                "p_sc_post_min",
+                "p_sc_post_mean",
+                "p_sc_post_max",
+                "z_norm_min",
+                "z_norm_mean",
+                "z_norm_max",
+            ):
+                if key in summary.key_stats:
+                    st.write(f"{key}: {_fmt_num(summary.key_stats[key], '.6f')}")
+            return
 
-    tabs = st.tabs(["Overview", "2D", "3D", "Human Overlay", "Variation", "Optimize"])
-
-    with tabs[0]:
-        st.subheader("Runs")
-        cols = st.columns(2)
-
-        def render_summary(
-            run: RunBundle | None,
-            m: ErrorMap2D | None,
-            label: str,
-            debug: dict[str, object] | None,
-        ) -> None:
-            if run is None:
-                st.info(f"{label} run is not loaded.")
-                return
-            is_dc = _is_dc_run(run)
-            b0 = None
-            st.markdown(f"**{label} name**: {run.name}")
-            st.markdown(f"**Results**: `{run.results_path}`")
-            st.markdown(f"**Meta**: `{run.meta_path}`")
-            if is_dc:
-                st.markdown("**Framework**: DC/CCP")
-                if run.meta.get("dc_model") is not None:
-                    st.write(f"dc_model: {run.meta.get('dc_model')}")
-
-                extras = run.results.extras
-
-                def _stats(name: str, key: str) -> None:
-                    if key not in extras:
-                        return
-                    arr = np.asarray(extras[key], dtype=np.float64).reshape(-1)
-                    if arr.size == 0:
-                        return
-                    st.write(
-                        f"{name} min/mean/max: {float(np.min(arr)):.6f}, "
-                        f"{float(np.mean(arr)):.6f}, {float(np.max(arr)):.6f}"
-                    )
-
-                _stats("p_opt", "p_opt")
-                _stats("p_sc_post", "p_sc_post")
-                _stats("z_norm", "z_norm")
-                if "By_diff" in extras:
-                    by_diff = np.asarray(extras["By_diff"], dtype=np.float64).reshape(-1)
-                    if by_diff.size:
-                        st.write(f"By_diff std: {float(np.std(by_diff)):.6e}")
-                if "x_opt" in extras:
-                    x_opt = np.asarray(extras["x_opt"], dtype=np.float64).reshape(-1)
-                    if x_opt.size:
-                        st.write(f"x_opt max|.|: {float(np.max(np.abs(x_opt))):.6f}")
-                if "r0_flat" in extras:
-                    r0_flat = np.asarray(extras["r0_flat"])
-                    st.write(f"r0_flat shape: {r0_flat.shape}")
-                if "pts" in extras:
-                    pts = np.asarray(extras["pts"])
-                    st.write(f"pts shape: {pts.shape}")
-                return
-
-            try:
-                mtime = _results_mtime(run.results_path)
-                meta_key = _magnetization_cache_key(run.meta)
-                b0 = _cached_b0(str(run.results_path), mtime, meta_key)
-            except Exception:
-                b0 = None
-            if b0 is not None:
-                st.metric("B0_T (mT)", f"{b0 * 1e3:.3f}")
-            rb_min = float(np.min(run.results.r_bases))
-            rb_max = float(np.max(run.results.r_bases))
-            al_min = float(np.min(run.results.alphas))
-            al_max = float(np.max(run.results.alphas))
-            st.write(f"r_bases min/max: {rb_min:.6f}, {rb_max:.6f}")
-            st.write(f"alphas min/max: {al_min:.6f}, {al_max:.6f}")
-            if m is not None:
-                ppm_mean, ppm_maxabs = _ppm_stats(m)
-                st.write(f"ppm mean: {ppm_mean:.2f}")
-                st.write(f"ppm max|.|: {ppm_maxabs:.2f}")
-            if debug is not None and debug.get("model_effective") == "self-consistent-easy-axis":
+        b0 = summary.key_stats.get("B0_T")
+        if isinstance(b0, int | float):
+            st.metric("B0_T (mT)", f"{float(b0) * 1e3:.3f}")
+        st.write(
+            f"r_bases min/max: {_fmt_num(summary.key_stats.get('r_bases_min'), '.6f')}, "
+            f"{_fmt_num(summary.key_stats.get('r_bases_max'), '.6f')}"
+        )
+        st.write(
+            f"alphas min/max: {_fmt_num(summary.key_stats.get('alphas_min'), '.6f')}, "
+            f"{_fmt_num(summary.key_stats.get('alphas_max'), '.6f')}"
+        )
+        if m is not None:
+            ppm_mean, ppm_maxabs = _ppm_stats(m)
+            st.write(f"ppm mean: {ppm_mean:.2f}")
+            st.write(f"ppm max|.|: {ppm_maxabs:.2f}")
+            debug = m.magnetization_debug
+            if debug.get("model_effective") == "self-consistent-easy-axis":
                 st.markdown("**Self-consistent diagnostics**")
                 if debug.get("sc_p_source") is not None:
                     st.write(f"p source: {debug.get('sc_p_source')}")
@@ -1155,148 +981,313 @@ def main() -> None:
                     f"{_fmt_num(debug.get('sc_p_rel_std'))}"
                 )
 
-        with cols[0]:
-            render_summary(init_run, init_map, "Initial", init_debug)
-        with cols[1]:
-            render_summary(opt_run, opt_map, "Optimized", opt_debug)
+    with cols[0]:
+        render_summary(init_summary, init_map, "Initial")
+    with cols[1]:
+        render_summary(opt_summary, opt_map, "Optimized")
 
-        if init_run is not None and opt_run is not None:
-            st.subheader("Delta (optimized - initial)")
-            if _is_dc_run(init_run) or _is_dc_run(opt_run):
+    if init_summary is not None and opt_summary is not None:
+        st.subheader("Delta (optimized - initial)")
+        if delta_summary is None or not bool(delta_summary.get("available", False)):
+            if delta_summary is None:
+                st.write("Delta summary is not available.")
+            elif delta_summary.get("reason") == "dc-framework":
                 st.write("Delta summary is not available for DC/CCP runs.")
-            elif init_run.results.alphas.shape == opt_run.results.alphas.shape:
-                dalphas = opt_run.results.alphas - init_run.results.alphas
-                dr_bases = opt_run.results.r_bases - init_run.results.r_bases
-                st.write(
-                    f"alphas delta min/max: {float(np.min(dalphas)):.6f}, "
-                    f"{float(np.max(dalphas)):.6f}"
-                )
-                st.write(
-                    f"r_bases delta min/max: {float(np.min(dr_bases)):.6f}, "
-                    f"{float(np.max(dr_bases)):.6f}"
-                )
             else:
                 st.write("Run shapes differ; delta summary skipped.")
+        else:
+            st.write(
+                f"alphas delta min/max: {_fmt_num(delta_summary.get('alphas_delta_min'), '.6f')}, "
+                f"{_fmt_num(delta_summary.get('alphas_delta_max'), '.6f')}"
+            )
+            st.write(
+                f"r_bases delta min/max: {_fmt_num(delta_summary.get('r_bases_delta_min'), '.6f')}, "
+                f"{_fmt_num(delta_summary.get('r_bases_delta_max'), '.6f')}"
+            )
+
+
+def _render_2d_tab(
+    init_map: Map2DPayload | None,
+    opt_map: Map2DPayload | None,
+    *,
+    vmin: float,
+    vmax: float,
+    contour_level: float,
+) -> None:
+    st.subheader("2D Error Maps (ppm)")
+    if init_map is None and opt_map is None:
+        st.info("Select a run to render 2D maps.")
+        return
+
+    maps_to_show: list[tuple[str, Map2DPayload, str]] = []
+    if init_map is not None:
+        maps_to_show.append(("Initial", init_map, "init"))
+    if opt_map is not None:
+        maps_to_show.append(("Optimized", opt_map, "opt"))
+
+    if len(maps_to_show) == 1:
+        label, map_data, key_suffix = maps_to_show[0]
+        fig_map = _plot_error_map(map_data, vmin, vmax, contour_level, label)
+        st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
+        fig_line = _plot_cross_section(map_data, vmin, vmax, f"{label} y=0")
+        st.plotly_chart(fig_line, use_container_width=True, key=f"line_{key_suffix}")
+        return
+
+    map_cols = st.columns(2)
+    for col, (label, map_data, key_suffix) in zip(map_cols, maps_to_show, strict=False):
+        with col:
+            fig_map = _plot_error_map(map_data, vmin, vmax, contour_level, label)
+            st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
+
+    line_cols = st.columns(2)
+    for col, (label, map_data, key_suffix) in zip(line_cols, maps_to_show, strict=False):
+        with col:
+            fig_line = _plot_cross_section(map_data, vmin, vmax, f"{label} y=0")
+            st.plotly_chart(fig_line, use_container_width=True, key=f"line_{key_suffix}")
+
+
+def _render_3d_tab(
+    init_scene: Scene3DPayload | None,
+    opt_scene: Scene3DPayload | None,
+    compare_scene: Scene3DPayload | None,
+    *,
+    view_target: str,
+    mode: PlotlyMode,
+    magnet_size_mm: float,
+    magnet_thickness_mm: float,
+    arrow_length_mm: float,
+    arrow_head_angle_deg: float,
+    magnet_surface_color: str,
+) -> None:
+    st.subheader("3D Magnet View")
+    view_tabs = st.tabs(["Single", "Compare"])
+    with view_tabs[0]:
+        target_scene = init_scene if view_target == "initial" else opt_scene
+        if target_scene is None:
+            st.info("Select a run for 3D rendering.")
+        else:
+            fig = build_scene_figure(
+                target_scene,
+                mode=mode,
+                magnet_size_m=magnet_size_mm / 1000.0,
+                magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                arrow_length_m=arrow_length_mm / 1000.0,
+                arrow_head_angle_deg=arrow_head_angle_deg,
+                height=700,
+                magnet_surface_color=magnet_surface_color,
+            )
+            st.plotly_chart(fig, use_container_width=True, key="magnet_single")
+    with view_tabs[1]:
+        if compare_scene is None or init_scene is None or opt_scene is None:
+            st.info("Both initial and optimized runs are required for 3D comparison.")
+        else:
+            camera_presets = _camera_presets()
+            preset = _gui_selectbox(
+                "Camera preset",
+                list(camera_presets.keys()),
+                key="compare_camera_preset",
+                fallback="Isometric",
+            )
+            scene_camera = camera_presets[preset]
+            fig_compare = build_scene_figure(
+                compare_scene,
+                mode=mode,
+                magnet_size_m=magnet_size_mm / 1000.0,
+                magnet_thickness_m=magnet_thickness_mm / 1000.0,
+                arrow_length_m=arrow_length_mm / 1000.0,
+                arrow_head_angle_deg=arrow_head_angle_deg,
+                scene_camera=scene_camera,
+                height=700,
+                magnet_surface_color=magnet_surface_color,
+            )
+            st.caption("Initial and optimized runs are overlaid in a shared 3D scene.")
+            st.plotly_chart(fig_compare, use_container_width=True, key="magnet_compare")
+
+
+def main() -> None:
+    st.set_page_config(page_title="Halbach Run Viewer", layout="wide")
+    st.title("Halbach Run Viewer")
+
+    try:
+        gui_defaults = _get_gui_defaults()
+    except Exception as exc:
+        st.error(f"GUI config load error: {exc}")
+        return
+    _seed_gui_state(gui_defaults)
+
+    candidates = [candidate.path for candidate in list_run_candidates(ROOT / "runs")]
+
+    if "opt_job" not in st.session_state:
+        st.session_state["opt_job"] = None
+    if "gen_run_code" not in st.session_state:
+        st.session_state["gen_run_code"] = None
+        st.session_state["gen_run_output"] = ""
+        st.session_state["gen_run_dir"] = ""
+    if "flash_message" not in st.session_state:
+        st.session_state["flash_message"] = ""
+
+    _apply_pending_selection_updates()
+
+    sidebar_state = _render_readonly_sidebar(candidates)
+
+    init_path = _resolve_path(
+        cast(str, sidebar_state["init_select"]),
+        cast(str, sidebar_state["init_path_text"]),
+    )
+    opt_path = _resolve_path(
+        cast(str, sidebar_state["opt_select"]),
+        cast(str, sidebar_state["opt_path_text"]),
+    )
+
+    init_run, init_mtime, init_meta_mtime, init_err = _try_load(init_path)
+    opt_run, opt_mtime, opt_meta_mtime, opt_err = _try_load(opt_path)
+
+    if init_err:
+        st.error(f"Initial run load error: {init_err}")
+    if opt_err:
+        st.error(f"Optimized run load error: {opt_err}")
+
+    init_summary: RunSummary | None = None
+    opt_summary: RunSummary | None = None
+    init_map: Map2DPayload | None = None
+    opt_map: Map2DPayload | None = None
+    init_scene: Scene3DPayload | None = None
+    opt_scene: Scene3DPayload | None = None
+    compare_scene: Scene3DPayload | None = None
+
+    roi_r = float(sidebar_state["roi_r"])
+    step = float(sidebar_state["step"])
+    mag_model_eval = cast(str, sidebar_state["mag_model_eval"])
+    sc_cfg_key = cast(str, sidebar_state["sc_cfg_key"])
+    stride = int(sidebar_state["stride"])
+    hide_x_negative = bool(sidebar_state["hide_x_negative"])
+
+    if init_run is not None and init_mtime is not None and init_meta_mtime is not None:
+        try:
+            init_summary = _cached_run_summary(init_path, init_mtime, init_meta_mtime)
+        except Exception as exc:
+            st.error(f"Initial summary error: {exc}")
+        try:
+            init_key = _magnetization_cache_key(init_run.meta)
+            init_map = _cached_error_map(
+                init_path,
+                init_mtime,
+                init_key,
+                roi_r,
+                step,
+                mag_model_eval,
+                sc_cfg_key,
+            )
+        except Exception as exc:
+            st.error(f"Initial 2D map error: {exc}")
+        try:
+            init_scene = _cached_scene_payload(
+                init_path,
+                init_mtime,
+                init_meta_mtime,
+                "",
+                0.0,
+                0.0,
+                stride,
+                hide_x_negative,
+            )
+        except Exception as exc:
+            st.error(f"Initial 3D scene error: {exc}")
+
+    if opt_run is not None and opt_mtime is not None and opt_meta_mtime is not None:
+        try:
+            opt_summary = _cached_run_summary(opt_path, opt_mtime, opt_meta_mtime)
+        except Exception as exc:
+            st.error(f"Optimized summary error: {exc}")
+        try:
+            opt_key = _magnetization_cache_key(opt_run.meta)
+            opt_map = _cached_error_map(
+                opt_path,
+                opt_mtime,
+                opt_key,
+                roi_r,
+                step,
+                mag_model_eval,
+                sc_cfg_key,
+            )
+        except Exception as exc:
+            st.error(f"Optimized 2D map error: {exc}")
+        try:
+            opt_scene = _cached_scene_payload(
+                opt_path,
+                opt_mtime,
+                opt_meta_mtime,
+                "",
+                0.0,
+                0.0,
+                stride,
+                hide_x_negative,
+            )
+        except Exception as exc:
+            st.error(f"Optimized 3D scene error: {exc}")
+
+    delta_summary = (
+        None if init_run is None or opt_run is None else build_run_delta_summary(init_run, opt_run)
+    )
+
+    if (
+        init_run is not None
+        and opt_run is not None
+        and init_mtime is not None
+        and init_meta_mtime is not None
+        and opt_mtime is not None
+        and opt_meta_mtime is not None
+    ):
+        try:
+            compare_scene = _cached_scene_payload(
+                init_path,
+                init_mtime,
+                init_meta_mtime,
+                opt_path,
+                opt_mtime,
+                opt_meta_mtime,
+                stride,
+                hide_x_negative,
+            )
+        except Exception as exc:
+            st.error(f"3D compare scene error: {exc}")
+
+    vmin = vmax = 0.0
+    available_maps = [payload for payload in (init_map, opt_map) if payload is not None]
+    if available_maps:
+        vmin, vmax = common_ppm_limits(
+            available_maps,
+            limit_ppm=cast(float | None, sidebar_state["ppm_limit"]),
+            symmetric=True,
+        )
+
+    tabs = st.tabs(["Overview", "2D", "3D", "Human Overlay", "Variation", "Optimize"])
+
+    with tabs[0]:
+        _render_overview_tab(init_summary, opt_summary, init_map, opt_map, delta_summary)
 
     with tabs[1]:
-        st.subheader("2D Error Maps (ppm)")
-        if init_map is None and opt_map is None:
-            st.info("Select a run to render 2D maps.")
-        else:
-            maps_to_show: list[tuple[str, ErrorMap2D, str]] = []
-            if init_map is not None:
-                maps_to_show.append(("Initial", init_map, "init"))
-            if opt_map is not None:
-                maps_to_show.append(("Optimized", opt_map, "opt"))
-
-            if len(maps_to_show) == 1:
-                label, map_data, key_suffix = maps_to_show[0]
-                fig_map = _plot_error_map(map_data, vmin, vmax, contour_level, label)
-                st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
-                fig_line = _plot_cross_section(map_data, vmin, vmax, f"{label} y=0")
-                st.plotly_chart(fig_line, use_container_width=True, key=f"line_{key_suffix}")
-            else:
-                map_cols = st.columns(2)
-                for col, (label, map_data, key_suffix) in zip(map_cols, maps_to_show, strict=False):
-                    with col:
-                        fig_map = _plot_error_map(map_data, vmin, vmax, contour_level, label)
-                        st.plotly_chart(fig_map, use_container_width=True, key=f"map_{key_suffix}")
-
-                line_cols = st.columns(2)
-                for col, (label, map_data, key_suffix) in zip(
-                    line_cols, maps_to_show, strict=False
-                ):
-                    with col:
-                        fig_line = _plot_cross_section(map_data, vmin, vmax, f"{label} y=0")
-                        st.plotly_chart(
-                            fig_line, use_container_width=True, key=f"line_{key_suffix}"
-                        )
+        _render_2d_tab(
+            init_map,
+            opt_map,
+            vmin=vmin,
+            vmax=vmax,
+            contour_level=float(sidebar_state["contour_level"]),
+        )
 
     with tabs[2]:
-        st.subheader("3D Magnet View")
-        view_tabs = st.tabs(["Single", "Compare"])
-        with view_tabs[0]:
-            target_run = init_run if view_target == "initial" else opt_run
-            if target_run is None:
-                st.info("Select a run for 3D rendering.")
-            else:
-                from halbach.viz3d import build_magnet_figure
-
-                fig = build_magnet_figure(
-                    target_run,
-                    stride=stride,
-                    hide_x_negative=hide_x_negative,
-                    mode=mode,
-                    magnet_size_m=magnet_size_mm / 1000.0,
-                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
-                    arrow_length_m=arrow_length_mm / 1000.0,
-                    arrow_head_angle_deg=arrow_head_angle_deg,
-                    height=700,
-                    magnet_surface_color=magnet_surface_color,
-                )
-                st.plotly_chart(fig, use_container_width=True, key="magnet_single")
-        with view_tabs[1]:
-            if init_run is None or opt_run is None:
-                st.info("Both initial and optimized runs are required for 3D comparison.")
-            else:
-                from halbach.viz3d import (
-                    build_magnet_figure,
-                    compute_scene_ranges,
-                    enumerate_magnets,
-                )
-
-                camera_presets = _camera_presets()
-                preset = _gui_selectbox(
-                    "Camera preset",
-                    list(camera_presets.keys()),
-                    key="compare_camera_preset",
-                    fallback="Isometric",
-                )
-                scene_camera = camera_presets[preset]
-
-                centers_init, _phi_init, _ring_init, _layer_init = enumerate_magnets(
-                    init_run, stride=stride, hide_x_negative=hide_x_negative
-                )
-                centers_opt, _phi_opt, _ring_opt, _layer_opt = enumerate_magnets(
-                    opt_run, stride=stride, hide_x_negative=hide_x_negative
-                )
-                scene_ranges = compute_scene_ranges([centers_init, centers_opt])
-
-                fig_init = build_magnet_figure(
-                    init_run,
-                    stride=stride,
-                    hide_x_negative=hide_x_negative,
-                    mode=mode,
-                    magnet_size_m=magnet_size_mm / 1000.0,
-                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
-                    arrow_length_m=arrow_length_mm / 1000.0,
-                    arrow_head_angle_deg=arrow_head_angle_deg,
-                    scene_camera=scene_camera,
-                    scene_ranges=scene_ranges,
-                    height=700,
-                    magnet_surface_color=magnet_surface_color,
-                )
-                fig_opt = build_magnet_figure(
-                    opt_run,
-                    stride=stride,
-                    hide_x_negative=hide_x_negative,
-                    mode=mode,
-                    magnet_size_m=magnet_size_mm / 1000.0,
-                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
-                    arrow_length_m=arrow_length_mm / 1000.0,
-                    arrow_head_angle_deg=arrow_head_angle_deg,
-                    scene_camera=scene_camera,
-                    scene_ranges=scene_ranges,
-                    height=700,
-                    magnet_surface_color=magnet_surface_color,
-                )
-                compare_cols = st.columns(2)
-                with compare_cols[0]:
-                    st.caption("Initial")
-                    st.plotly_chart(fig_init, use_container_width=True, key="magnet_compare_init")
-                with compare_cols[1]:
-                    st.caption("Optimized")
-                    st.plotly_chart(fig_opt, use_container_width=True, key="magnet_compare_opt")
+        _render_3d_tab(
+            init_scene,
+            opt_scene,
+            compare_scene,
+            view_target=cast(str, sidebar_state["view_target"]),
+            mode=cast(PlotlyMode, sidebar_state["mode"]),
+            magnet_size_mm=float(sidebar_state["magnet_size_mm"]),
+            magnet_thickness_mm=float(sidebar_state["magnet_thickness_mm"]),
+            arrow_length_mm=float(sidebar_state["arrow_length_mm"]),
+            arrow_head_angle_deg=float(sidebar_state["arrow_head_angle_deg"]),
+            magnet_surface_color=cast(str, sidebar_state["magnet_surface_color"]),
+        )
 
     with tabs[3]:
         st.subheader("Human Overlay")
@@ -1311,6 +1302,9 @@ def main() -> None:
             horizontal=True,
         )
         overlay_run = init_run if overlay_run_target == "initial" else opt_run
+        overlay_path = init_path if overlay_run_target == "initial" else opt_path
+        overlay_mtime = init_mtime if overlay_run_target == "initial" else opt_mtime
+        overlay_meta = init_meta_mtime if overlay_run_target == "initial" else opt_meta_mtime
 
         obj_path_input = st.text_input(
             "OBJ path",
@@ -1533,44 +1527,55 @@ def main() -> None:
             if overlay_run is None:
                 st.info("Select a run to overlay the body mesh on the magnet figure.")
             else:
-                from halbach.viz3d import (
-                    build_magnet_figure,
-                    compute_scene_ranges,
-                    enumerate_magnets,
-                )
-
-                centers_overlay, _phi_overlay, _ring_overlay, _layer_overlay = enumerate_magnets(
-                    overlay_run,
-                    stride=stride,
-                    hide_x_negative=hide_x_negative,
-                )
-                overlay_range_sources = [centers_overlay, transformed_overlay_mesh.vertices]
-                if coil_overlay is not None:
-                    overlay_range_sources.append(coil_overlay.points_xyz)
-                overlay_scene_ranges = compute_scene_ranges(overlay_range_sources)
-                overlay_fig = build_magnet_figure(
-                    overlay_run,
-                    stride=stride,
-                    hide_x_negative=hide_x_negative,
-                    mode=mode,
-                    magnet_size_m=magnet_size_mm / 1000.0,
-                    magnet_thickness_m=magnet_thickness_mm / 1000.0,
-                    arrow_length_m=arrow_length_mm / 1000.0,
-                    arrow_head_angle_deg=arrow_head_angle_deg,
-                    scene_camera=camera_presets[overlay_camera_preset],
-                    scene_ranges=overlay_scene_ranges,
-                    height=1520,
-                    overlay_mesh=transformed_overlay_mesh,
-                    overlay_opacity=overlay_opacity,
-                    coil_overlay=coil_overlay,
-                    coil_line_width=coil_line_width,
-                    magnet_surface_color=magnet_surface_color,
-                )
-                st.plotly_chart(
-                    overlay_fig,
-                    use_container_width=True,
-                    key="human_overlay_figure",
-                )
+                overlay_scene = None
+                if overlay_mtime is not None and overlay_meta is not None:
+                    overlay_scene = _cached_scene_payload(
+                        overlay_path,
+                        overlay_mtime,
+                        overlay_meta,
+                        "",
+                        0.0,
+                        0.0,
+                        stride,
+                        hide_x_negative,
+                    )
+                if overlay_scene is None:
+                    st.info("Could not build a 3D scene for the selected overlay run.")
+                else:
+                    overlay_range_sources = [
+                        np.asarray(overlay_scene.primary.centers, dtype=np.float64),
+                        np.asarray(transformed_overlay_mesh.vertices, dtype=np.float64),
+                    ]
+                    if coil_overlay is not None:
+                        overlay_range_sources.append(
+                            np.asarray(coil_overlay.points_xyz, dtype=np.float64)
+                        )
+                    overlay_scene_payload = Scene3DPayload(
+                        primary=overlay_scene.primary,
+                        secondary=overlay_scene.secondary,
+                        scene_ranges=combine_scene_ranges(overlay_range_sources),
+                        view_metadata=dict(overlay_scene.view_metadata),
+                    )
+                    overlay_fig = build_scene_figure(
+                        overlay_scene_payload,
+                        mode=cast(PlotlyMode, sidebar_state["mode"]),
+                        magnet_size_m=float(sidebar_state["magnet_size_mm"]) / 1000.0,
+                        magnet_thickness_m=float(sidebar_state["magnet_thickness_mm"]) / 1000.0,
+                        arrow_length_m=float(sidebar_state["arrow_length_mm"]) / 1000.0,
+                        arrow_head_angle_deg=float(sidebar_state["arrow_head_angle_deg"]),
+                        scene_camera=camera_presets[overlay_camera_preset],
+                        height=1520,
+                        overlay_mesh=transformed_overlay_mesh,
+                        overlay_opacity=overlay_opacity,
+                        coil_overlay=coil_overlay,
+                        coil_line_width=coil_line_width,
+                        magnet_surface_color=cast(str, sidebar_state["magnet_surface_color"]),
+                    )
+                    st.plotly_chart(
+                        overlay_fig,
+                        use_container_width=True,
+                        key="human_overlay_figure",
+                    )
 
     with tabs[4]:
         st.subheader("Magnetization Variation Eval (prototype)")
@@ -1912,7 +1917,7 @@ def main() -> None:
                     map_obj,
                     -map_abs,
                     map_abs,
-                    contour_level,
+                    float(st.session_state.get("map_contour_level_ppm", 1000.0)),
                     "Variation XY(z=0) ppm map",
                 )
                 st.plotly_chart(fig_var_map, use_container_width=True, key="variation_map_plot")
