@@ -21,6 +21,7 @@ def test_build_command_basic(tmp_path: Path) -> None:
         gtol=1e-12,
         roi_r=0.14,
         roi_step=0.02,
+        roi_mode="volume-grid",
         roi_samples=456,
         r_bound_mode="relative",
         r_lower_delta_mm=25.0,
@@ -35,6 +36,8 @@ def test_build_command_basic(tmp_path: Path) -> None:
     assert "--in" in cmd
     assert "--out" in cmd
     assert "--r-bound-mode" in cmd
+    assert "--roi-mode" in cmd
+    assert cmd[cmd.index("--roi-mode") + 1] == "volume-grid"
     assert "--roi-samples" in cmd
     assert cmd[cmd.index("--roi-samples") + 1] == "456"
     assert "--r-lower-delta-mm" in cmd

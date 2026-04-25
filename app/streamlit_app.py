@@ -2067,7 +2067,7 @@ def main() -> None:
                 st.caption("ROI step is ignored when ROI sampling mode is surface-fibonacci.")
             else:
                 st.caption("ROI samples is not used in volume-grid mode.")
-            angle_model = st.selectbox(
+            angle_model = _gui_selectbox(
                 "Angle model",
                 ["legacy-alpha", "delta-rep-x0", "fourier-x0"],
                 key="angle_model",
