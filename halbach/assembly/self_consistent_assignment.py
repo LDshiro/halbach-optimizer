@@ -28,8 +28,11 @@ from halbach.assembly.types import (
     Placement,
     SensitivityTable,
     VirtualMagnet,
+    WorkUnit,
 )
-from halbach.constants import FACTOR, m0 as nominal_moment_m0, mu0
+from halbach.constants import FACTOR
+from halbach.constants import m0 as nominal_moment_m0
+from halbach.constants import mu0
 from halbach.magnetization_runtime import compute_p_flat_self_consistent_from_u_jax
 from halbach.physics import compute_B_and_B0_from_m_flat
 from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
@@ -94,6 +97,17 @@ class SelfConsistentAssignmentResult:
     evaluated_count: int
     final_evaluation: FieldEvaluation
     inventory: ClusterInventory | None = None
+    work_unit_evaluations: tuple[SelfConsistentWorkUnitEvaluation, ...] = ()
+
+
+@dataclass(frozen=True)
+class SelfConsistentWorkUnitEvaluation:
+    """Optional self-consistent field evaluation at a completed work-unit boundary."""
+
+    work_unit_id: str
+    work_unit_index: int
+    completed_placement_count: int
+    evaluation: FieldEvaluation
 
 
 def _validate_config(config: SelfConsistentConfig) -> None:
@@ -609,6 +623,36 @@ def evaluate_self_consistent_placement(
     )
 
 
+def evaluate_self_consistent_partial_placement(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    use_measured_errors: bool = False,
+    p0_flat_override: FloatArray | None = None,
+) -> FieldEvaluation:
+    """Evaluate a partial placement with all unfilled slots kept at nominal error."""
+    magnet_by_id = _magnet_map(magnets)
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
+        slots,
+        placements,
+        magnet_by_id,
+        None,
+        None,
+        use_measured_errors=use_measured_errors,
+    )
+    return evaluate_self_consistent_arrays(
+        r0_flat,
+        m_flat,
+        pts,
+        config,
+        p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
+    )
+
+
 def evaluate_self_consistent_candidate(
     slots: Sequence[AssemblySlot],
     placed_placements: Sequence[Placement],
@@ -758,6 +802,53 @@ def _cluster_by_magnet(
     return cluster_by_magnet
 
 
+def _ordered_work_unit_slot_ids(
+    table: SensitivityTable,
+    work_units: Sequence[WorkUnit] | None,
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    table_slot_ids = tuple(int(slot_id) for slot_id in table.slot_flat_id.tolist())
+    if work_units is None:
+        return (("W_ALL", table_slot_ids),)
+    if not work_units:
+        raise ValueError("work_units must be non-empty")
+    table_slot_set = set(table_slot_ids)
+    seen: set[int] = set()
+    ordered: list[tuple[str, tuple[int, ...]]] = []
+    for unit in work_units:
+        if not unit.slot_flat_ids:
+            raise ValueError(f"work unit {unit.work_unit_id} has no slots")
+        unit_slots = tuple(int(slot_id) for slot_id in unit.slot_flat_ids)
+        for slot_id in unit_slots:
+            if slot_id in seen:
+                raise ValueError(f"slot_flat_id {slot_id} appears in multiple work units")
+            if slot_id not in table_slot_set:
+                raise ValueError(f"work unit references unknown slot_flat_id: {slot_id}")
+            seen.add(slot_id)
+        ordered.append((unit.work_unit_id, unit_slots))
+    if seen != table_slot_set:
+        missing = sorted(table_slot_set - seen)
+        extra = sorted(seen - table_slot_set)
+        raise ValueError(f"work unit slot coverage mismatch; missing={missing}, extra={extra}")
+    return tuple(ordered)
+
+
+def _ordered_magnets(
+    magnets: Sequence[VirtualMagnet],
+    magnet_by_id: Mapping[int, VirtualMagnet],
+    magnet_order: Sequence[int] | None,
+) -> list[VirtualMagnet]:
+    if magnet_order is None:
+        return list(magnets)
+    if len(magnet_order) != len(magnets):
+        raise ValueError("magnet_order length must match magnets length")
+    if len(set(int(item) for item in magnet_order)) != len(magnet_order):
+        raise ValueError("magnet_order contains duplicate magnet ids")
+    unknown = sorted(set(int(item) for item in magnet_order) - set(magnet_by_id))
+    if unknown:
+        raise ValueError(f"magnet_order references unknown magnet ids: {unknown}")
+    return [magnet_by_id[int(magnet_id)] for magnet_id in magnet_order]
+
+
 def run_self_consistent_assignment(
     table: SensitivityTable,
     slots: Sequence[AssemblySlot],
@@ -769,6 +860,9 @@ def run_self_consistent_assignment(
     inventory: ClusterInventory | None = None,
     allowed_orientation_ids: Sequence[str] | None = None,
     magnet_order: Sequence[int] | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
+    evaluate_completed_work_units: bool = False,
+    work_unit_evaluation_stride: int = 1,
     p0_flat_override: FloatArray | None = None,
 ) -> SelfConsistentAssignmentResult:
     """Sequential Plan C assignment using self-consistent candidate re-evaluation."""
@@ -776,61 +870,83 @@ def run_self_consistent_assignment(
     _validate_slot_table_coverage(slots, table)
     if len(magnets) != len(slots):
         raise ValueError("magnets count must match slot count")
+    if work_unit_evaluation_stride <= 0:
+        raise ValueError("work_unit_evaluation_stride must be positive")
     magnet_by_id = _magnet_map(magnets)
-    if magnet_order is None:
-        ordered_magnets = list(magnets)
-    else:
-        if len(magnet_order) != len(magnets):
-            raise ValueError("magnet_order length must match magnets length")
-        if len(set(int(item) for item in magnet_order)) != len(magnet_order):
-            raise ValueError("magnet_order contains duplicate magnet ids")
-        unknown = sorted(set(int(item) for item in magnet_order) - set(magnet_by_id))
-        if unknown:
-            raise ValueError(f"magnet_order references unknown magnet ids: {unknown}")
-        ordered_magnets = [magnet_by_id[int(magnet_id)] for magnet_id in magnet_order]
-
-    remaining_slot_ids = [int(slot_id) for slot_id in table.slot_flat_id.tolist()]
+    ordered_magnets = _ordered_magnets(magnets, magnet_by_id, magnet_order)
+    ordered_work_units = _ordered_work_unit_slot_ids(table, work_units)
     placed_magnets: dict[int, VirtualMagnet] = {}
     placements: list[Placement] = []
     decisions: list[SelfConsistentDecision] = []
+    work_unit_evaluations: list[SelfConsistentWorkUnitEvaluation] = []
     current_inventory = inventory
     clusters = _cluster_by_magnet(assignments, magnets)
     residual = np.zeros(table.C.shape[2], dtype=np.float64)
+    magnet_index = 0
 
-    for insert_order, magnet in enumerate(ordered_magnets):
-        decision = choose_self_consistent_candidate(
-            table,
-            slots,
-            placements,
-            placed_magnets,
-            magnet,
-            pts,
-            remaining_slot_ids,
-            config,
-            residual=residual,
-            allowed_orientation_ids=allowed_orientation_ids,
-            p0_flat_override=p0_flat_override,
+    for work_unit_index, (work_unit_id, unit_slot_ids) in enumerate(ordered_work_units):
+        remaining_unit_slot_ids = list(unit_slot_ids)
+        while remaining_unit_slot_ids:
+            magnet = ordered_magnets[magnet_index]
+            decision = choose_self_consistent_candidate(
+                table,
+                slots,
+                placements,
+                placed_magnets,
+                magnet,
+                pts,
+                remaining_unit_slot_ids,
+                config,
+                residual=residual,
+                allowed_orientation_ids=allowed_orientation_ids,
+                p0_flat_override=p0_flat_override,
+            )
+            cluster_id = clusters.get(magnet.magnet_id)
+            if current_inventory is not None and cluster_id is not None:
+                current_inventory = decrement_cluster(current_inventory, cluster_id)
+            candidate = decision.selected.candidate
+            placement = Placement(
+                slot_flat_id=candidate.slot_flat_id,
+                magnet_id=magnet.magnet_id,
+                orientation_id=candidate.orientation_id,
+                cluster_requested=cluster_id,
+                insert_order=len(placements),
+                decision_engine="sequential_self_consistent",
+            )
+            placements.append(placement)
+            placed_magnets[magnet.magnet_id] = magnet
+            residual = np.ascontiguousarray(
+                residual + candidate.contribution,
+                dtype=np.float64,
+            )
+            remaining_unit_slot_ids.remove(candidate.slot_flat_id)
+            decisions.append(decision)
+            magnet_index += 1
+        if evaluate_completed_work_units and (
+            (work_unit_index + 1) % work_unit_evaluation_stride == 0
+            or work_unit_index == len(ordered_work_units) - 1
+        ):
+            work_unit_evaluations.append(
+                SelfConsistentWorkUnitEvaluation(
+                    work_unit_id=work_unit_id,
+                    work_unit_index=work_unit_index,
+                    completed_placement_count=len(placements),
+                    evaluation=evaluate_self_consistent_partial_placement(
+                        slots,
+                        magnets,
+                        placements,
+                        pts,
+                        config,
+                        p0_flat_override=p0_flat_override,
+                    ),
+                )
+            )
+
+    if magnet_index != len(ordered_magnets):
+        raise ValueError(
+            "self-consistent assignment consumed an unexpected number of magnets; "
+            f"used={magnet_index}, total={len(ordered_magnets)}"
         )
-        cluster_id = clusters.get(magnet.magnet_id)
-        if current_inventory is not None and cluster_id is not None:
-            current_inventory = decrement_cluster(current_inventory, cluster_id)
-        candidate = decision.selected.candidate
-        placement = Placement(
-            slot_flat_id=candidate.slot_flat_id,
-            magnet_id=magnet.magnet_id,
-            orientation_id=candidate.orientation_id,
-            cluster_requested=cluster_id,
-            insert_order=insert_order,
-            decision_engine="sequential_self_consistent",
-        )
-        placements.append(placement)
-        placed_magnets[magnet.magnet_id] = magnet
-        residual = np.ascontiguousarray(
-            residual + candidate.contribution,
-            dtype=np.float64,
-        )
-        remaining_slot_ids.remove(candidate.slot_flat_id)
-        decisions.append(decision)
 
     final_evaluation = evaluate_self_consistent_placement(
         slots,
@@ -846,6 +962,41 @@ def run_self_consistent_assignment(
         evaluated_count=sum(decision.evaluated_count for decision in decisions),
         final_evaluation=final_evaluation,
         inventory=current_inventory,
+        work_unit_evaluations=tuple(work_unit_evaluations),
+    )
+
+
+def run_ring_constrained_self_consistent_assignment(
+    table: SensitivityTable,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    work_units: Sequence[WorkUnit],
+    *,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+    evaluate_completed_work_units: bool = False,
+    work_unit_evaluation_stride: int = 1,
+    p0_flat_override: FloatArray | None = None,
+) -> SelfConsistentAssignmentResult:
+    """Sequential self-consistent assignment constrained to one work unit at a time."""
+    return run_self_consistent_assignment(
+        table,
+        slots,
+        magnets,
+        pts,
+        config,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        magnet_order=magnet_order,
+        work_units=work_units,
+        evaluate_completed_work_units=evaluate_completed_work_units,
+        work_unit_evaluation_stride=work_unit_evaluation_stride,
+        p0_flat_override=p0_flat_override,
     )
 
 
@@ -854,10 +1005,13 @@ __all__ = [
     "SelfConsistentCandidateEvaluation",
     "SelfConsistentConfig",
     "SelfConsistentDecision",
+    "SelfConsistentWorkUnitEvaluation",
     "choose_self_consistent_candidate",
     "evaluate_self_consistent_arrays",
     "evaluate_self_consistent_candidate",
+    "evaluate_self_consistent_partial_placement",
     "evaluate_self_consistent_placement",
+    "run_ring_constrained_self_consistent_assignment",
     "run_self_consistent_assignment",
     "self_consistent_config_from_run",
 ]

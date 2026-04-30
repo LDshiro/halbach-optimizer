@@ -326,6 +326,9 @@ def run_self_consistent_baseline(
     inventory: ClusterInventory | None = None,
     allowed_orientation_ids: Sequence[str] | None = None,
     magnet_order: Sequence[int] | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
+    evaluate_completed_work_units: bool = False,
+    work_unit_evaluation_stride: int = 1,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> SelfConsistentSimulationResult:
@@ -346,6 +349,9 @@ def run_self_consistent_baseline(
         inventory=inventory,
         allowed_orientation_ids=allowed_orientation_ids,
         magnet_order=magnet_order,
+        work_units=work_units,
+        evaluate_completed_work_units=evaluate_completed_work_units,
+        work_unit_evaluation_stride=work_unit_evaluation_stride,
     )
     return SelfConsistentSimulationResult(
         placements=assignment.placements,
@@ -372,6 +378,8 @@ def run_simulation_trial(
     quota_plans: Sequence[RingQuotaPlan] | None = None,
     include_self_consistent: bool = False,
     self_consistent_config: SelfConsistentConfig | None = None,
+    self_consistent_evaluate_completed_work_units: bool = False,
+    self_consistent_work_unit_evaluation_stride: int = 1,
     evaluation_model: EvaluationModel = "fixed",
     self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
@@ -428,6 +436,9 @@ def run_simulation_trial(
             assignments=assignments,
             inventory=inventory,
             allowed_orientation_ids=allowed_orientation_ids,
+            work_units=work_units,
+            evaluate_completed_work_units=self_consistent_evaluate_completed_work_units,
+            work_unit_evaluation_stride=self_consistent_work_unit_evaluation_stride,
             factor=float(factor),
             min_B0_norm=min_B0_norm,
         )
