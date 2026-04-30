@@ -5,6 +5,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from app.plan_c_run_selector import (
+    MANUAL_RUN_CHOICE,
+    default_plan_c_child_output_dir,
+    list_plan_c_run_result_choices,
+    resolve_selected_run_path,
+)
 from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.measurement import ManualMeasurementProvider, SyntheticMeasurementProvider
@@ -79,8 +85,23 @@ st.set_page_config(page_title="Plan C Assembly", layout="wide")
 st.title("Plan C Assembly")
 
 with st.sidebar:
-    run_path = st.text_input("Run directory", value="runs/demo_opt")
-    log_path = st.text_input("Session log", value="runs/demo_opt/plan_c_session/session_log.jsonl")
+    run_choices = list_plan_c_run_result_choices()
+    if run_choices:
+        selected_run = st.selectbox(
+            "Run result under runs/",
+            [MANUAL_RUN_CHOICE, *run_choices],
+            index=1,
+        )
+        st.caption(f"Found {len(run_choices)} result file(s) under runs/.")
+    else:
+        selected_run = MANUAL_RUN_CHOICE
+        st.caption("No result files found under runs/. Use a manual path.")
+    manual_run_path = st.text_input("Manual run path", value="runs/demo_opt")
+    run_path = resolve_selected_run_path(str(selected_run), manual_run_path)
+    log_path = st.text_input(
+        "Session log",
+        value=str(Path(default_plan_c_child_output_dir(run_path, "plan_c_session")) / "session_log.jsonl"),
+    )
     mode = st.selectbox(
         "Mode",
         ["simulation_step_by_step", "assembly_real"],

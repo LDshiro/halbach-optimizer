@@ -6,6 +6,12 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from app.plan_c_run_selector import (
+    MANUAL_RUN_CHOICE,
+    default_plan_c_child_output_dir,
+    list_plan_c_run_result_choices,
+    resolve_selected_run_path,
+)
 from halbach.assembly.ui_payload import build_summary_ui_payload
 from halbach.cli.plan_c_simulate import main as simulate_main
 
@@ -48,8 +54,23 @@ st.set_page_config(page_title="Plan C Simulation", layout="wide")
 st.title("Plan C Simulation")
 
 with st.sidebar:
-    run_path = st.text_input("Run directory", value="runs/demo_opt")
-    out_dir = st.text_input("Output directory", value="runs/demo_opt/plan_c_sim")
+    run_choices = list_plan_c_run_result_choices()
+    if run_choices:
+        selected_run = st.selectbox(
+            "Run result under runs/",
+            [MANUAL_RUN_CHOICE, *run_choices],
+            index=1,
+        )
+        st.caption(f"Found {len(run_choices)} result file(s) under runs/.")
+    else:
+        selected_run = MANUAL_RUN_CHOICE
+        st.caption("No result files found under runs/. Use a manual path.")
+    manual_run_path = st.text_input("Manual run path", value="runs/demo_opt")
+    run_path = resolve_selected_run_path(str(selected_run), manual_run_path)
+    out_dir = st.text_input(
+        "Output directory",
+        value=default_plan_c_child_output_dir(run_path, "plan_c_sim"),
+    )
     trials = st.number_input("Trials", min_value=1, max_value=100, value=3, step=1)
     seed = st.number_input("Seed", min_value=0, value=1234, step=1)
     roi_r = st.number_input("ROI radius [m]", min_value=0.001, value=0.05, step=0.01)
