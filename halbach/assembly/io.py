@@ -321,6 +321,17 @@ def write_field_metrics_json(path: str | Path, artifact: SimulationTrialArtifact
         "j_ratio_linear_over_random": result.j_ratio_linear_over_random,
         "linear_score_measured": result.linear.assignment.linear_score,
     }
+    if result.self_consistent is not None:
+        payload["sequential_self_consistent"] = field_metrics_to_dict(
+            result.self_consistent.evaluation.metrics
+        )
+        payload["rms_ratio_self_consistent_over_linear"] = (
+            result.rms_ratio_self_consistent_over_linear
+        )
+        payload["j_ratio_self_consistent_over_linear"] = (
+            result.j_ratio_self_consistent_over_linear
+        )
+        payload["self_consistent_evaluated_count"] = result.self_consistent.evaluated_count
     _write_json(Path(path), payload)
 
 
@@ -369,7 +380,7 @@ def simulation_trial_row(artifact: SimulationTrialArtifacts) -> dict[str, object
     result = artifact.result
     random_metrics = result.random_baseline.evaluation.metrics
     linear_metrics = result.linear.evaluation.metrics
-    return {
+    row: dict[str, object] = {
         "trial_id": artifact.trial_id,
         "seed": artifact.seed,
         "random_rms_homogeneity_ppm": random_metrics.rms_homogeneity_ppm,
@@ -388,6 +399,26 @@ def simulation_trial_row(artifact: SimulationTrialArtifacts) -> dict[str, object
         "j_ratio_linear_over_random": result.j_ratio_linear_over_random,
         "linear_score_measured": result.linear.assignment.linear_score,
     }
+    if result.self_consistent is not None:
+        sc_metrics = result.self_consistent.evaluation.metrics
+        row.update(
+            {
+                "self_consistent_rms_homogeneity_ppm": sc_metrics.rms_homogeneity_ppm,
+                "self_consistent_max_homogeneity_ppm": sc_metrics.max_homogeneity_ppm,
+                "self_consistent_p95_homogeneity_ppm": sc_metrics.p95_homogeneity_ppm,
+                "self_consistent_p99_homogeneity_ppm": sc_metrics.p99_homogeneity_ppm,
+                "self_consistent_B0_norm": sc_metrics.B0_norm,
+                "self_consistent_J_vector": sc_metrics.J_vector,
+                "rms_ratio_self_consistent_over_linear": (
+                    result.rms_ratio_self_consistent_over_linear
+                ),
+                "j_ratio_self_consistent_over_linear": (
+                    result.j_ratio_self_consistent_over_linear
+                ),
+                "self_consistent_evaluated_count": result.self_consistent.evaluated_count,
+            }
+        )
+    return row
 
 
 def build_simulation_summary_payload(

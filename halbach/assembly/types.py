@@ -223,6 +223,15 @@ class LinearSimulationResult:
 
 
 @dataclass(frozen=True)
+class SelfConsistentSimulationResult:
+    """Self-consistent placement and its self-consistent field evaluation."""
+
+    placements: tuple[Placement, ...]
+    evaluation: FieldEvaluation
+    evaluated_count: int
+
+
+@dataclass(frozen=True)
 class SimulationComparisonResult:
     """Random baseline versus Plan C linear sensitivity for one trial."""
 
@@ -231,6 +240,9 @@ class SimulationComparisonResult:
     linear: LinearSimulationResult
     rms_ratio_linear_over_random: float
     j_ratio_linear_over_random: float
+    self_consistent: SelfConsistentSimulationResult | None = None
+    rms_ratio_self_consistent_over_linear: float | None = None
+    j_ratio_self_consistent_over_linear: float | None = None
 
 
 @dataclass(frozen=True)
@@ -278,6 +290,7 @@ __all__ = [
     "QuarantineReason",
     "RandomBaselineResult",
     "SensitivityTable",
+    "SelfConsistentSimulationResult",
     "SimulationComparisonResult",
     "VirtualMagnet",
     "WorkUnit",

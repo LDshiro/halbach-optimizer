@@ -7,6 +7,10 @@ import numpy as np
 from halbach.assembly.field_eval import evaluate_fixed_placement
 from halbach.assembly.online_assignment import run_linear_sensitivity_assignment
 from halbach.assembly.orientations import default_orientations
+from halbach.assembly.self_consistent_assignment import (
+    SelfConsistentConfig,
+    run_self_consistent_assignment,
+)
 from halbach.assembly.types import (
     AssemblySlot,
     ClusterAssignment,
@@ -16,6 +20,7 @@ from halbach.assembly.types import (
     PlacementOrientationMode,
     RandomBaselineResult,
     SensitivityTable,
+    SelfConsistentSimulationResult,
     SimulationComparisonResult,
     VirtualMagnet,
 )
@@ -165,6 +170,45 @@ def run_linear_sensitivity_baseline(
     return LinearSimulationResult(assignment=assignment, evaluation=evaluation)
 
 
+def run_self_consistent_baseline(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    sensitivity_table: SensitivityTable,
+    pts: FloatArray,
+    *,
+    config: SelfConsistentConfig | None = None,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+    factor: float = FACTOR,
+    min_B0_norm: float = 1e-18,
+) -> SelfConsistentSimulationResult:
+    """Run the Step 9 sequential self-consistent placement and evaluate it."""
+    _validate_slot_table_coverage(slots, sensitivity_table)
+    sc_config = (
+        SelfConsistentConfig(factor=float(factor), min_b0_norm=min_B0_norm)
+        if config is None
+        else config
+    )
+    assignment = run_self_consistent_assignment(
+        sensitivity_table,
+        slots,
+        magnets,
+        pts,
+        sc_config,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        magnet_order=magnet_order,
+    )
+    return SelfConsistentSimulationResult(
+        placements=assignment.placements,
+        evaluation=assignment.final_evaluation,
+        evaluated_count=assignment.evaluated_count,
+    )
+
+
 def run_simulation_trial(
     slots: Sequence[AssemblySlot],
     magnets: Sequence[VirtualMagnet],
@@ -177,10 +221,12 @@ def run_simulation_trial(
     inventory: ClusterInventory | None = None,
     random_orientation_mode: PlacementOrientationMode = "random_discrete4",
     allowed_orientation_ids: Sequence[str] | None = None,
+    include_self_consistent: bool = False,
+    self_consistent_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> SimulationComparisonResult:
-    """Compare random placement with greedy Plan C linear sensitivity for one trial."""
+    """Compare random, linear sensitivity, and optional self-consistent Plan C placements."""
     random_result = run_random_baseline(
         slots,
         magnets,
@@ -208,12 +254,35 @@ def run_simulation_trial(
     linear_j = linear_result.evaluation.metrics.J_vector
     rms_ratio = float("inf") if random_rms <= 0.0 else float(linear_rms / random_rms)
     j_ratio = float("inf") if random_j <= 0.0 else float(linear_j / random_j)
+    self_consistent_result = None
+    sc_rms_ratio = None
+    sc_j_ratio = None
+    if include_self_consistent:
+        self_consistent_result = run_self_consistent_baseline(
+            slots,
+            magnets,
+            sensitivity_table,
+            pts,
+            config=self_consistent_config,
+            assignments=assignments,
+            inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            factor=float(factor),
+            min_B0_norm=min_B0_norm,
+        )
+        sc_rms = self_consistent_result.evaluation.metrics.rms_homogeneity_ppm
+        sc_j = self_consistent_result.evaluation.metrics.J_vector
+        sc_rms_ratio = float("inf") if linear_rms <= 0.0 else float(sc_rms / linear_rms)
+        sc_j_ratio = float("inf") if linear_j <= 0.0 else float(sc_j / linear_j)
     return SimulationComparisonResult(
         trial_id=int(trial_id),
         random_baseline=random_result,
         linear=linear_result,
         rms_ratio_linear_over_random=rms_ratio,
         j_ratio_linear_over_random=j_ratio,
+        self_consistent=self_consistent_result,
+        rms_ratio_self_consistent_over_linear=sc_rms_ratio,
+        j_ratio_self_consistent_over_linear=sc_j_ratio,
     )
 
 
@@ -238,7 +307,7 @@ def summarize_comparison_results(
         [result.rms_ratio_linear_over_random for result in results],
         dtype=np.float64,
     )
-    return {
+    summary: dict[str, object] = {
         "trials": len(results),
         "random_rms_ppm_mean": float(np.mean(random_rms)),
         "linear_rms_ppm_mean": float(np.mean(linear_rms)),
@@ -246,12 +315,45 @@ def summarize_comparison_results(
         "rms_ratio_median": float(np.median(ratios)),
         "linear_improved_count": int(np.sum(linear_rms < random_rms)),
     }
+    sc_results = [result for result in results if result.self_consistent is not None]
+    if sc_results:
+        sc_rms = np.array(
+            [
+                result.self_consistent.evaluation.metrics.rms_homogeneity_ppm
+                for result in sc_results
+                if result.self_consistent is not None
+            ],
+            dtype=np.float64,
+        )
+        sc_ratios = np.array(
+            [
+                result.rms_ratio_self_consistent_over_linear
+                for result in sc_results
+                if result.rms_ratio_self_consistent_over_linear is not None
+            ],
+            dtype=np.float64,
+        )
+        linear_subset = np.array(
+            [result.linear.evaluation.metrics.rms_homogeneity_ppm for result in sc_results],
+            dtype=np.float64,
+        )
+        summary.update(
+            {
+                "self_consistent_trials": len(sc_results),
+                "self_consistent_rms_ppm_mean": float(np.mean(sc_rms)),
+                "rms_ratio_self_consistent_over_linear_mean": float(np.mean(sc_ratios)),
+                "rms_ratio_self_consistent_over_linear_median": float(np.median(sc_ratios)),
+                "self_consistent_improved_over_linear_count": int(np.sum(sc_rms < linear_subset)),
+            }
+        )
+    return summary
 
 
 __all__ = [
     "build_random_placements",
     "run_linear_sensitivity_baseline",
     "run_random_baseline",
+    "run_self_consistent_baseline",
     "run_simulation_trial",
     "summarize_comparison_results",
 ]
