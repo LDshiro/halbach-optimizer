@@ -7,6 +7,7 @@ import numpy as np
 from halbach.assembly.field_eval import evaluate_fixed_placement
 from halbach.assembly.online_assignment import (
     run_linear_sensitivity_assignment,
+    run_quota_ordered_ring_constrained_linear_assignment,
     run_ring_constrained_linear_assignment,
 )
 from halbach.assembly.orientations import default_orientations
@@ -19,12 +20,14 @@ from halbach.assembly.types import (
     AssemblySlot,
     ClusterAssignment,
     ClusterInventory,
+    ClusterPickupPolicy,
     EvaluationModel,
     FieldEvaluation,
     LinearSimulationResult,
     Placement,
     PlacementOrientationMode,
     RandomBaselineResult,
+    RingQuotaPlan,
     SelfConsistentSimulationResult,
     SensitivityTable,
     SimulationComparisonResult,
@@ -228,6 +231,9 @@ def run_linear_sensitivity_baseline(
     allowed_orientation_ids: Sequence[str] | None = None,
     magnet_order: Sequence[int] | None = None,
     work_units: Sequence[WorkUnit] | None = None,
+    cluster_pickup_policy: ClusterPickupPolicy | None = None,
+    quota_plans: Sequence[RingQuotaPlan] | None = None,
+    pickup_seed: int = 0,
     evaluation_model: EvaluationModel = "fixed",
     self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
@@ -235,7 +241,26 @@ def run_linear_sensitivity_baseline(
 ) -> LinearSimulationResult:
     """Run the Step 5 greedy Plan C linear sensitivity placement and evaluate it."""
     _validate_slot_table_coverage(slots, sensitivity_table)
-    if work_units is None:
+    if cluster_pickup_policy is not None and cluster_pickup_policy != "quota_ordered":
+        raise ValueError(f"unsupported cluster_pickup_policy: {cluster_pickup_policy}")
+    if cluster_pickup_policy == "quota_ordered":
+        if work_units is None:
+            raise ValueError("quota_ordered pickup requires work_units")
+        if quota_plans is None:
+            raise ValueError("quota_ordered pickup requires quota_plans")
+        if assignments is None:
+            raise ValueError("quota_ordered pickup requires cluster assignments")
+        assignment = run_quota_ordered_ring_constrained_linear_assignment(
+            sensitivity_table,
+            magnets,
+            work_units,
+            quota_plans,
+            assignments=assignments,
+            inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            seed=pickup_seed,
+        )
+    elif work_units is None:
         assignment = run_linear_sensitivity_assignment(
             sensitivity_table,
             magnets,
@@ -319,6 +344,8 @@ def run_simulation_trial(
     random_orientation_mode: PlacementOrientationMode = "random_discrete4",
     allowed_orientation_ids: Sequence[str] | None = None,
     work_units: Sequence[WorkUnit] | None = None,
+    cluster_pickup_policy: ClusterPickupPolicy | None = None,
+    quota_plans: Sequence[RingQuotaPlan] | None = None,
     include_self_consistent: bool = False,
     self_consistent_config: SelfConsistentConfig | None = None,
     evaluation_model: EvaluationModel = "fixed",
@@ -348,6 +375,9 @@ def run_simulation_trial(
         inventory=inventory,
         allowed_orientation_ids=allowed_orientation_ids,
         work_units=work_units,
+        cluster_pickup_policy=cluster_pickup_policy,
+        quota_plans=quota_plans,
+        pickup_seed=seed,
         evaluation_model=evaluation_model,
         self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),

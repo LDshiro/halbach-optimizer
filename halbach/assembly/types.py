@@ -25,6 +25,7 @@ BuildWorkUnitMode = Literal[
 ]
 PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
 EvaluationModel = Literal["fixed", "self_consistent"]
+ClusterPickupPolicy = Literal["quota_ordered"]
 QuarantineReason = Literal[
     "Q_MEASUREMENT_UNSTABLE",
     "Q_DIRECTION_OUTLIER",
@@ -406,6 +407,7 @@ __all__ = [
     "BuildWorkUnitMode",
     "ClusterAssignment",
     "ClusterInventory",
+    "ClusterPickupPolicy",
     "ClusterStats",
     "FieldEvaluation",
     "FieldMetrics",

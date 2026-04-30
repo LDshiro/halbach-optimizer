@@ -13,6 +13,7 @@ from halbach.assembly.types import (
     LinearCandidate,
     MagnetError,
     Placement,
+    RingQuotaPlan,
     SensitivityTable,
     VirtualMagnet,
     WorkUnit,
@@ -276,6 +277,96 @@ def _ordered_unit_slot_ids(
     return tuple(ordered_units)
 
 
+def _assignment_cluster_pools(
+    assignments: Sequence[ClusterAssignment],
+    magnets: Sequence[VirtualMagnet],
+    *,
+    seed: int,
+) -> dict[str, list[int]]:
+    cluster_by_magnet = _assignment_cluster_map(assignments, magnets)
+    pools: dict[str, list[int]] = {}
+    for magnet in magnets:
+        cluster_id = cluster_by_magnet[magnet.magnet_id]
+        if cluster_id is None:
+            raise ValueError("quota pickup requires normal cluster assignments")
+        pools.setdefault(cluster_id, []).append(magnet.magnet_id)
+    rng = np.random.default_rng(int(seed))
+    for cluster_id, magnet_ids in pools.items():
+        shuffled = rng.permutation(np.asarray(magnet_ids, dtype=np.int64))
+        pools[cluster_id] = [int(magnet_id) for magnet_id in shuffled.tolist()]
+    return pools
+
+
+def _expanded_quota_clusters(plan: RingQuotaPlan) -> list[str]:
+    if plan.target_count <= 0:
+        raise ValueError(f"quota plan {plan.work_unit_id} target_count must be positive")
+    if not plan.quota_by_cluster:
+        raise ValueError(f"quota plan {plan.work_unit_id} has no cluster quota")
+    sequence: list[str] = []
+    for cluster_id, count in sorted(plan.quota_by_cluster.items()):
+        if count < 0:
+            raise ValueError(f"quota count for {cluster_id} must be non-negative")
+        sequence.extend([cluster_id] * int(count))
+    if len(sequence) != plan.target_count:
+        raise ValueError(
+            f"quota plan {plan.work_unit_id} count mismatch; "
+            f"target={plan.target_count}, quota_sum={len(sequence)}"
+        )
+    return sequence
+
+
+def _validate_quota_work_units(
+    work_units: Sequence[WorkUnit],
+    quota_plans: Sequence[RingQuotaPlan],
+) -> None:
+    if len(work_units) != len(quota_plans):
+        raise ValueError("quota_plans length must match work_units length")
+    for unit, plan in zip(work_units, quota_plans, strict=True):
+        if unit.work_unit_id != plan.work_unit_id:
+            raise ValueError(
+                "quota plan order must match work unit order; "
+                f"unit={unit.work_unit_id}, plan={plan.work_unit_id}"
+            )
+        if len(unit.slot_flat_ids) != plan.target_count:
+            raise ValueError(
+                f"quota plan {plan.work_unit_id} target_count mismatch; "
+                f"unit_slots={len(unit.slot_flat_ids)}, target={plan.target_count}"
+            )
+
+
+def build_quota_ordered_magnet_order(
+    magnets: Sequence[VirtualMagnet],
+    assignments: Sequence[ClusterAssignment],
+    quota_plans: Sequence[RingQuotaPlan],
+    *,
+    seed: int = 0,
+) -> tuple[int, ...]:
+    """
+    Build a magnet pickup order by expanding each ring quota into cluster requests.
+
+    Each requested cluster consumes one magnet id from that cluster's measured-assignment
+    pool. Pools are shuffled with seed to simulate arbitrary pickup within a cluster.
+    """
+    if not quota_plans:
+        raise ValueError("quota_plans must be non-empty")
+    pools = _assignment_cluster_pools(assignments, magnets, seed=seed)
+    order: list[int] = []
+    for plan in quota_plans:
+        for cluster_id in _expanded_quota_clusters(plan):
+            pool = pools.get(cluster_id)
+            if not pool:
+                raise ValueError(
+                    f"quota requests cluster {cluster_id} but no assigned magnets remain"
+                )
+            order.append(pool.pop(0))
+    if len(order) != len(magnets):
+        raise ValueError(
+            "quota pickup must consume exactly one magnet per slot; "
+            f"picked={len(order)}, magnets={len(magnets)}"
+        )
+    return tuple(order)
+
+
 def run_ring_constrained_linear_assignment(
     table: SensitivityTable,
     magnets: Sequence[VirtualMagnet],
@@ -367,6 +458,42 @@ def run_ring_constrained_linear_assignment(
     )
 
 
+def run_quota_ordered_ring_constrained_linear_assignment(
+    table: SensitivityTable,
+    magnets: Sequence[VirtualMagnet],
+    work_units: Sequence[WorkUnit],
+    quota_plans: Sequence[RingQuotaPlan],
+    *,
+    assignments: Sequence[ClusterAssignment],
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    seed: int = 0,
+) -> LinearAssignmentResult:
+    """
+    Run ring-constrained assignment after simulating quota-ordered cluster pickup.
+
+    The quota controls only which magnet cluster is picked next. The picked magnet's
+    measured_error still decides the slot/orientation inside the current work unit.
+    """
+    _ordered_unit_slot_ids(table, work_units)
+    _validate_quota_work_units(work_units, quota_plans)
+    magnet_order = build_quota_ordered_magnet_order(
+        magnets,
+        assignments,
+        quota_plans,
+        seed=seed,
+    )
+    return run_ring_constrained_linear_assignment(
+        table,
+        magnets,
+        work_units,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        magnet_order=magnet_order,
+    )
+
+
 def cluster_usage_from_placements(placements: Sequence[Placement]) -> dict[str, int]:
     """Count cluster_requested values in a completed placement sequence."""
     usage: dict[str, int] = {}
@@ -388,9 +515,11 @@ def planned_cluster_counts(assignments: Sequence[ClusterAssignment]) -> dict[str
 
 
 __all__ = [
+    "build_quota_ordered_magnet_order",
     "choose_best_linear_candidate",
     "cluster_usage_from_placements",
     "planned_cluster_counts",
+    "run_quota_ordered_ring_constrained_linear_assignment",
     "run_ring_constrained_linear_assignment",
     "run_linear_sensitivity_assignment",
     "score_linear_candidates",
