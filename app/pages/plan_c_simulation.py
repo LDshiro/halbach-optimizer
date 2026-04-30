@@ -26,6 +26,7 @@ def _run_simulation(
     roi_samples: int,
     strength_sigma: float,
     direction_sigma: float,
+    sc_source: str,
     sc_chi: float,
     sc_iters: int,
     sc_max_linear_candidates: int,
@@ -55,14 +56,21 @@ def _run_simulation(
     if engine == "sequential_self_consistent":
         args.extend(
             [
-                "--sc-chi",
-                str(sc_chi),
-                "--sc-iters",
-                str(sc_iters),
+                "--sc-source",
+                sc_source,
                 "--sc-max-linear-candidates",
                 str(sc_max_linear_candidates),
             ]
         )
+        if sc_source == "manual":
+            args.extend(
+                [
+                    "--sc-chi",
+                    str(sc_chi),
+                    "--sc-iters",
+                    str(sc_iters),
+                ]
+            )
     simulate_main(args)
 
 
@@ -97,10 +105,29 @@ with st.sidebar:
     roi_r = st.number_input("ROI radius [m]", min_value=0.001, value=0.05, step=0.01)
     roi_samples = st.number_input("ROI samples", min_value=1, value=100, step=10)
     strength_sigma = st.number_input("Strength sigma", min_value=0.0, value=0.01, step=0.001)
-    direction_sigma = st.number_input("Direction sigma", min_value=0.0, value=0.001, step=0.0001, format="%.5f")
-    sc_chi = st.number_input("SC chi", min_value=0.0, value=0.0, step=0.001, format="%.6f")
-    sc_iters = st.number_input("SC iterations", min_value=0, max_value=200, value=30, step=1)
-    sc_max_linear_candidates = st.number_input("SC top-k", min_value=1, max_value=64, value=8, step=1)
+    direction_sigma = st.number_input(
+        "Direction sigma", min_value=0.0, value=0.001, step=0.0001, format="%.5f"
+    )
+    sc_source = "run"
+    sc_chi = 0.0
+    sc_iters = 30
+    sc_max_linear_candidates = 8
+    if engine == "sequential_self_consistent":
+        sc_source_label = st.selectbox(
+            "SC parameter source",
+            ["run metadata", "manual"],
+            index=0,
+        )
+        sc_source = "run" if sc_source_label == "run metadata" else "manual"
+        st.caption("Run metadata uses magnetization.self_consistent from the optimization run.")
+        sc_max_linear_candidates = st.number_input(
+            "SC top-k", min_value=1, max_value=64, value=8, step=1
+        )
+        if sc_source == "manual":
+            sc_chi = st.number_input("SC chi", min_value=0.0, value=0.0, step=0.001, format="%.6f")
+            sc_iters = st.number_input(
+                "SC iterations", min_value=0, max_value=200, value=30, step=1
+            )
     run_clicked = st.button("Run Simulation", type="primary")
 
 if run_clicked:
@@ -116,6 +143,7 @@ if run_clicked:
                 int(roi_samples),
                 float(strength_sigma),
                 float(direction_sigma),
+                str(sc_source),
                 float(sc_chi),
                 int(sc_iters),
                 int(sc_max_linear_candidates),
@@ -133,7 +161,10 @@ payload = build_summary_ui_payload(json.loads(summary_path.read_text(encoding="u
 
 cols = st.columns(4)
 cols[0].metric("Trials", payload["trials"] or 0)
-cols[1].metric("RMS Ratio Mean", "n/a" if payload["rms_ratio_mean"] is None else f"{float(payload['rms_ratio_mean']):.4g}")
+cols[1].metric(
+    "RMS Ratio Mean",
+    "n/a" if payload["rms_ratio_mean"] is None else f"{float(payload['rms_ratio_mean']):.4g}",
+)
 cols[2].metric("Linear Improved", payload["linear_improved_count"] or 0)
 cols[3].metric("Engine", payload["engine"] or "unknown")
 
@@ -142,9 +173,11 @@ if payload["self_consistent_trials"]:
     sc_cols[0].metric("SC Trials", payload["self_consistent_trials"])
     sc_cols[1].metric(
         "SC / Linear RMS",
-        "n/a"
-        if payload["rms_ratio_self_consistent_over_linear_mean"] is None
-        else f"{float(payload['rms_ratio_self_consistent_over_linear_mean']):.4g}",
+        (
+            "n/a"
+            if payload["rms_ratio_self_consistent_over_linear_mean"] is None
+            else f"{float(payload['rms_ratio_self_consistent_over_linear_mean']):.4g}"
+        ),
     )
     sc_cols[2].metric(
         "SC Improved",

@@ -98,6 +98,7 @@ from halbach.assembly.self_consistent_assignment import (
     evaluate_self_consistent_candidate,
     evaluate_self_consistent_placement,
     run_self_consistent_assignment,
+    self_consistent_config_from_run,
 )
 from halbach.assembly.simulation import (
     build_random_placements,
@@ -247,6 +248,7 @@ __all__ = [
     "save_plan_c_config_json",
     "save_sensitivity_table",
     "sensitivity_contribution",
+    "self_consistent_config_from_run",
     "simulation_trial_row",
     "score_linear_candidates",
     "summarize_comparison_results",

@@ -8,7 +8,10 @@ from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import SimulationTrialArtifacts, write_simulation_outputs
 from halbach.assembly.sensitivity import compute_sensitivity_table, load_sensitivity_table
-from halbach.assembly.self_consistent_assignment import SelfConsistentConfig
+from halbach.assembly.self_consistent_assignment import (
+    SelfConsistentConfig,
+    self_consistent_config_from_run,
+)
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
 from halbach.assembly.slots import build_assembly_slots
 from halbach.assembly.variation import generate_virtual_magnets
@@ -31,16 +34,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Plan C assignment engine",
     )
     ap.add_argument(
+        "--sc-source",
+        choices=["run", "manual"],
+        default="run",
+        help="source for sequential_self_consistent parameters",
+    )
+    ap.add_argument(
         "--sc-chi",
         type=float,
         default=0.0,
         help="sequential_self_consistent susceptibility-like chi",
     )
     ap.add_argument(
+        "--sc-Nd",
+        type=float,
+        default=1.0 / 3.0,
+        help="sequential_self_consistent demagnetization factor for manual source",
+    )
+    ap.add_argument(
+        "--sc-p0",
+        type=float,
+        default=1.0,
+        help="sequential_self_consistent nominal moment for manual source",
+    )
+    ap.add_argument(
+        "--sc-volume-mm3",
+        type=float,
+        default=1000.0,
+        help="sequential_self_consistent magnet volume for manual source [mm^3]",
+    )
+    ap.add_argument(
         "--sc-iters",
         type=int,
         default=30,
         help="sequential_self_consistent fixed-point iterations",
+    )
+    ap.add_argument(
+        "--sc-omega",
+        type=float,
+        default=0.6,
+        help="sequential_self_consistent relaxation factor for manual source",
     )
     ap.add_argument(
         "--sc-max-linear-candidates",
@@ -104,22 +137,33 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("--trials must be positive")
     engine = str(args.engine)
     include_self_consistent = engine == "sequential_self_consistent"
-    self_consistent_config = (
-        SelfConsistentConfig(
-            chi=float(args.sc_chi),
-            iters=int(args.sc_iters),
-            max_linear_candidates=int(args.sc_max_linear_candidates),
-            factor=float(args.factor),
-        )
-        if include_self_consistent
-        else None
-    )
 
     run_path = Path(str(args.run))
     out_dir = Path(str(args.out))
     out_dir.mkdir(parents=True, exist_ok=True)
     run = load_run(run_path)
     slots = build_assembly_slots(run)
+    sc_source = str(args.sc_source)
+    if include_self_consistent and sc_source == "run":
+        self_consistent_config = self_consistent_config_from_run(
+            run,
+            factor=float(args.factor),
+            max_linear_candidates=int(args.sc_max_linear_candidates),
+            require=True,
+        )
+    elif include_self_consistent:
+        self_consistent_config = SelfConsistentConfig(
+            chi=float(args.sc_chi),
+            Nd=float(args.sc_Nd),
+            p0=float(args.sc_p0),
+            volume_m3=float(args.sc_volume_mm3) * 1.0e-9,
+            iters=int(args.sc_iters),
+            omega=float(args.sc_omega),
+            max_linear_candidates=int(args.sc_max_linear_candidates),
+            factor=float(args.factor),
+        )
+    else:
+        self_consistent_config = None
 
     if args.sensitivity is None:
         roi_mode = cast(RoiMode, str(args.roi_mode))
@@ -141,6 +185,7 @@ def main(argv: list[str] | None = None) -> None:
                 "roi_mode": str(args.roi_mode),
                 "roi_samples": int(args.roi_samples),
                 "engine": str(args.engine),
+                "sc_source": sc_source if include_self_consistent else None,
             },
         )
     else:
@@ -223,10 +268,12 @@ def main(argv: list[str] | None = None) -> None:
                 else {
                     "chi": self_consistent_config.chi,
                     "Nd": self_consistent_config.Nd,
+                    "p0": self_consistent_config.p0,
                     "volume_m3": self_consistent_config.volume_m3,
                     "iters": self_consistent_config.iters,
                     "omega": self_consistent_config.omega,
                     "max_linear_candidates": self_consistent_config.max_linear_candidates,
+                    "source": sc_source,
                 }
             ),
         },

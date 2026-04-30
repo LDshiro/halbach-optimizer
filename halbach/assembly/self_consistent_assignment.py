@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 
@@ -27,8 +28,9 @@ from halbach.assembly.types import (
     SensitivityTable,
     VirtualMagnet,
 )
-from halbach.constants import FACTOR, mu0
+from halbach.constants import FACTOR, m0 as nominal_moment_m0, mu0
 from halbach.physics import compute_B_and_B0_from_m_flat
+from halbach.run_types import RunBundle
 from halbach.types import FloatArray
 
 
@@ -43,6 +45,7 @@ class SelfConsistentConfig:
 
     chi: float = 0.0
     Nd: float = 1.0 / 3.0
+    p0: float = nominal_moment_m0
     volume_m3: float = 1.0e-9
     iters: int = 30
     omega: float = 0.6
@@ -89,6 +92,8 @@ def _validate_config(config: SelfConsistentConfig) -> None:
         raise ValueError("chi must be finite and >= 0")
     if not math.isfinite(config.Nd) or config.Nd < 0.0:
         raise ValueError("Nd must be finite and >= 0")
+    if not math.isfinite(config.p0) or config.p0 <= 0.0:
+        raise ValueError("p0 must be finite and positive")
     if not math.isfinite(config.volume_m3) or config.volume_m3 <= 0.0:
         raise ValueError("volume_m3 must be finite and positive")
     if config.iters < 0:
@@ -101,6 +106,89 @@ def _validate_config(config: SelfConsistentConfig) -> None:
         raise ValueError("max_linear_candidates must be positive")
     if not math.isfinite(config.min_b0_norm) or config.min_b0_norm < 0.0:
         raise ValueError("min_b0_norm must be finite and >= 0")
+
+
+def _run_self_consistent_meta(run: RunBundle, *, require: bool) -> Mapping[str, Any] | None:
+    magnetization = run.meta.get("magnetization")
+    if not isinstance(magnetization, Mapping):
+        if require:
+            raise ValueError(
+                "run metadata does not contain magnetization.self_consistent; "
+                "use --sc-source manual or select a self-consistent optimization run"
+            )
+        return None
+    sc_raw = magnetization.get("self_consistent")
+    if not isinstance(sc_raw, Mapping):
+        if require:
+            raise ValueError(
+                "run metadata does not contain magnetization.self_consistent; "
+                "use --sc-source manual or select a self-consistent optimization run"
+            )
+        return None
+    return sc_raw
+
+
+def _float_meta(sc: Mapping[str, Any], key: str, default: float) -> float:
+    raw = sc.get(key, default)
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"magnetization.self_consistent.{key} must be finite")
+    return value
+
+
+def _int_meta(sc: Mapping[str, Any], key: str, default: int) -> int:
+    raw = sc.get(key, default)
+    value = int(raw)
+    if value != float(raw):
+        raise ValueError(f"magnetization.self_consistent.{key} must be an integer")
+    return value
+
+
+def self_consistent_config_from_run(
+    run: RunBundle,
+    *,
+    factor: float = FACTOR,
+    max_linear_candidates: int = 8,
+    fallback: SelfConsistentConfig | None = None,
+    require: bool = False,
+) -> SelfConsistentConfig:
+    """
+    Build Plan C self-consistent config from optimization run metadata.
+
+    Reads ``run.meta["magnetization"]["self_consistent"]`` and maps the
+    supported optimization parameters into the lightweight Plan C re-ranker.
+    ``max_linear_candidates`` is a Plan C pruning parameter, so it is supplied
+    by the caller rather than the optimization run.
+    """
+    base = fallback if fallback is not None else SelfConsistentConfig()
+    sc = _run_self_consistent_meta(run, require=require)
+    if sc is None:
+        config = replace(
+            base,
+            factor=float(factor),
+            max_linear_candidates=int(max_linear_candidates),
+        )
+        _validate_config(config)
+        return config
+
+    if "volume_m3" in sc:
+        volume_m3 = _float_meta(sc, "volume_m3", base.volume_m3)
+    else:
+        volume_m3 = _float_meta(sc, "volume_mm3", base.volume_m3 / 1.0e-9) * 1.0e-9
+
+    config = replace(
+        base,
+        chi=_float_meta(sc, "chi", base.chi),
+        Nd=_float_meta(sc, "Nd", base.Nd),
+        p0=_float_meta(sc, "p0", base.p0),
+        volume_m3=volume_m3,
+        iters=_int_meta(sc, "iters", base.iters),
+        omega=_float_meta(sc, "omega", base.omega),
+        factor=float(factor),
+        max_linear_candidates=int(max_linear_candidates),
+    )
+    _validate_config(config)
+    return config
 
 
 def _slot_order(slots: Sequence[AssemblySlot]) -> list[AssemblySlot]:
@@ -174,7 +262,9 @@ def _model_arrays_for_candidate(
         elif candidate is not None and slot.slot_flat_id == candidate.slot_flat_id:
             if current_magnet is None:
                 raise ValueError("current_magnet is required when candidate is provided")
-            error = current_magnet.measured_error if use_measured_errors else current_magnet.true_error
+            error = (
+                current_magnet.measured_error if use_measured_errors else current_magnet.true_error
+            )
             orientation_id = candidate.orientation_id
 
         rotated_error = rotate_error_for_orientation(error, orientation_id)
@@ -265,7 +355,12 @@ def evaluate_self_consistent_arrays(
     if np.any(base_p0 <= 0.0):
         raise ValueError("all fixed moment vectors must be non-zero")
     override = _validate_p0_flat_override(p0_flat_override, expected_size=r0.shape[0])
-    p0 = override if override is not None else base_p0
+    p0_scale = float(config.p0) / float(nominal_moment_m0)
+    p0 = (
+        override
+        if override is not None
+        else np.ascontiguousarray(base_p0 * p0_scale, dtype=np.float64)
+    )
     if np.any(p0 <= 0.0):
         raise ValueError("all p0 values must be positive")
     u = np.ascontiguousarray(m0 / base_p0[:, None], dtype=np.float64)
@@ -313,7 +408,12 @@ def evaluate_self_consistent_placement(
         raise ValueError(
             f"placement slot coverage mismatch; unknown={unknown_slots}, missing={missing_slots}"
         )
-    if config.chi == 0.0 and p0_flat_override is None and not use_measured_errors:
+    if (
+        config.chi == 0.0
+        and config.p0 == float(nominal_moment_m0)
+        and p0_flat_override is None
+        and not use_measured_errors
+    ):
         return evaluate_fixed_placement(
             slots,
             magnets,
@@ -589,4 +689,5 @@ __all__ = [
     "evaluate_self_consistent_candidate",
     "evaluate_self_consistent_placement",
     "run_self_consistent_assignment",
+    "self_consistent_config_from_run",
 ]

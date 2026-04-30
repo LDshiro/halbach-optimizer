@@ -9,6 +9,7 @@ from halbach.assembly.self_consistent_assignment import (
     choose_self_consistent_candidate,
     evaluate_self_consistent_placement,
     run_self_consistent_assignment,
+    self_consistent_config_from_run,
 )
 from halbach.assembly.sensitivity import compute_sensitivity_table
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
@@ -160,6 +161,46 @@ def test_chi_zero_matches_fixed_placement() -> None:
     np.testing.assert_allclose(self_consistent.B, fixed.B)
     np.testing.assert_allclose(self_consistent.B0, fixed.B0)
     assert self_consistent.metrics.J_vector == pytest.approx(fixed.metrics.J_vector)
+
+
+def test_self_consistent_config_from_run_uses_saved_optimization_params(
+    tmp_path: Path,
+) -> None:
+    run = _write_generated_run(tmp_path)
+    run.meta["magnetization"] = {
+        "model_effective": "self-consistent-easy-axis",
+        "self_consistent": {
+            "chi": 0.025,
+            "Nd": 0.21,
+            "p0": 1.4,
+            "volume_mm3": 250.0,
+            "iters": 7,
+            "omega": 0.45,
+        },
+    }
+
+    config = self_consistent_config_from_run(
+        run,
+        factor=2.0,
+        max_linear_candidates=3,
+        require=True,
+    )
+
+    assert config.chi == pytest.approx(0.025)
+    assert config.Nd == pytest.approx(0.21)
+    assert config.p0 == pytest.approx(1.4)
+    assert config.volume_m3 == pytest.approx(250.0e-9)
+    assert config.iters == 7
+    assert config.omega == pytest.approx(0.45)
+    assert config.factor == pytest.approx(2.0)
+    assert config.max_linear_candidates == 3
+
+
+def test_self_consistent_config_from_run_requires_metadata(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path)
+
+    with pytest.raises(ValueError, match="magnetization.self_consistent"):
+        self_consistent_config_from_run(run, require=True)
 
 
 def test_top_k_limit_caps_self_consistent_evaluations() -> None:

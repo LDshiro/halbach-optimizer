@@ -42,6 +42,23 @@ def _write_generated_run(tmp_path: Path, *, N: int = 8, R: int = 1, K: int = 4) 
     return load_run(run_dir)
 
 
+def _write_self_consistent_meta(run: RunBundle) -> None:
+    assert run.meta_path is not None
+    meta = dict(run.meta)
+    meta["magnetization"] = {
+        "model_effective": "self-consistent-easy-axis",
+        "self_consistent": {
+            "chi": 0.012,
+            "Nd": 0.22,
+            "p0": 1.3,
+            "volume_mm3": 300.0,
+            "iters": 3,
+            "omega": 0.5,
+        },
+    }
+    run.meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
 def _magnets(count: int, seed: int):
     return generate_virtual_magnets(
         count=count,
@@ -88,7 +105,9 @@ def test_simulation_trial_linear_sensitivity_completes_and_is_reproducible(
     assert result_a.linear.assignment.placements == result_b.linear.assignment.placements
     assert result_a.random_baseline.placements == result_b.random_baseline.placements
     assert len(result_a.linear.assignment.placements) == len(slots)
-    assert len({placement.slot_flat_id for placement in result_a.linear.assignment.placements}) == len(slots)
+    assert len(
+        {placement.slot_flat_id for placement in result_a.linear.assignment.placements}
+    ) == len(slots)
     assert inventory_total_count(result_a.linear.assignment.inventory) == 0
     assert result_a.linear.evaluation.B.shape == (6, 3)
     assert np.isfinite(result_a.rms_ratio_linear_over_random)
@@ -162,6 +181,7 @@ def test_plan_c_simulate_cli_writes_summary_json(tmp_path: Path) -> None:
 
 def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Path) -> None:
     run = _write_generated_run(tmp_path, N=4, R=1, K=2)
+    _write_self_consistent_meta(run)
     out_dir = tmp_path / "plan_c_sim_sc"
 
     simulate_main(
@@ -186,8 +206,8 @@ def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Pa
             "surface-fibonacci",
             "--roi-samples",
             "3",
-            "--sc-chi",
-            "0.0",
+            "--sc-source",
+            "run",
             "--sc-max-linear-candidates",
             "2",
         ]
@@ -195,6 +215,13 @@ def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Pa
 
     payload = json.loads((out_dir / "simulation_summary.json").read_text(encoding="utf-8"))
     assert payload["metadata"]["engine"] == "sequential_self_consistent"
+    assert payload["metadata"]["self_consistent"]["source"] == "run"
+    assert payload["metadata"]["self_consistent"]["chi"] == 0.012
+    assert payload["metadata"]["self_consistent"]["Nd"] == 0.22
+    assert payload["metadata"]["self_consistent"]["p0"] == 1.3
+    assert np.isclose(payload["metadata"]["self_consistent"]["volume_m3"], 300.0e-9)
+    assert payload["metadata"]["self_consistent"]["iters"] == 3
+    assert payload["metadata"]["self_consistent"]["omega"] == 0.5
     assert payload["summary"]["self_consistent_trials"] == 1
     assert "rms_ratio_self_consistent_over_linear_mean" in payload["summary"]
     assert payload["trials"][0]["self_consistent_evaluated_count"] > 0
