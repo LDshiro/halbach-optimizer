@@ -15,6 +15,7 @@ from halbach.assembly.types import (
     Placement,
     SensitivityTable,
     VirtualMagnet,
+    WorkUnit,
 )
 from halbach.types import FloatArray
 
@@ -247,6 +248,125 @@ def run_linear_sensitivity_assignment(
     )
 
 
+def _ordered_unit_slot_ids(
+    table: SensitivityTable,
+    work_units: Sequence[WorkUnit],
+) -> tuple[tuple[int, ...], ...]:
+    if not work_units:
+        raise ValueError("work_units must be non-empty")
+    table_slot_ids = tuple(int(slot_id) for slot_id in table.slot_flat_id.tolist())
+    table_slot_set = set(table_slot_ids)
+    seen: set[int] = set()
+    ordered_units: list[tuple[int, ...]] = []
+    for unit in work_units:
+        if not unit.slot_flat_ids:
+            raise ValueError(f"work unit {unit.work_unit_id} has no slots")
+        unit_slots = tuple(int(slot_id) for slot_id in unit.slot_flat_ids)
+        for slot_id in unit_slots:
+            if slot_id in seen:
+                raise ValueError(f"slot_flat_id {slot_id} appears in multiple work units")
+            if slot_id not in table_slot_set:
+                raise ValueError(f"work unit references unknown slot_flat_id: {slot_id}")
+            seen.add(slot_id)
+        ordered_units.append(unit_slots)
+    if seen != table_slot_set:
+        missing = sorted(table_slot_set - seen)
+        extra = sorted(seen - table_slot_set)
+        raise ValueError(f"work unit slot coverage mismatch; missing={missing}, extra={extra}")
+    return tuple(ordered_units)
+
+
+def run_ring_constrained_linear_assignment(
+    table: SensitivityTable,
+    magnets: Sequence[VirtualMagnet],
+    work_units: Sequence[WorkUnit],
+    *,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+) -> LinearAssignmentResult:
+    """
+    Greedily place magnets while restricting candidate slots to one work unit at a time.
+
+    The residual is global, but each magnet can only choose among the remaining slots in
+    the current work unit. Once that unit is full, assignment advances to the next unit.
+    A single all-slot work unit delegates to the existing global implementation.
+    """
+    _validate_table(table)
+    ordered_unit_slots = _ordered_unit_slot_ids(table, work_units)
+    if len(ordered_unit_slots) == 1:
+        return run_linear_sensitivity_assignment(
+            table,
+            magnets,
+            assignments=assignments,
+            inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            magnet_order=magnet_order,
+        )
+    if len(magnets) != table.slot_flat_id.shape[0]:
+        raise ValueError("magnets count must match sensitivity slot count")
+    magnet_by_id = {magnet.magnet_id: magnet for magnet in magnets}
+    if len(magnet_by_id) != len(magnets):
+        raise ValueError("magnet_id values must be unique")
+
+    if magnet_order is None:
+        ordered_magnets = list(magnets)
+    else:
+        if len(magnet_order) != len(magnets):
+            raise ValueError("magnet_order length must match magnets length")
+        if len(set(int(item) for item in magnet_order)) != len(magnet_order):
+            raise ValueError("magnet_order contains duplicate magnet ids")
+        unknown = sorted(set(int(item) for item in magnet_order) - set(magnet_by_id))
+        if unknown:
+            raise ValueError(f"magnet_order references unknown magnet ids: {unknown}")
+        ordered_magnets = [magnet_by_id[int(magnet_id)] for magnet_id in magnet_order]
+
+    cluster_by_magnet = _assignment_cluster_map(assignments, magnets)
+    residual = np.zeros(table.C.shape[2], dtype=np.float64)
+    placements: list[Placement] = []
+    current_inventory = inventory
+    magnet_index = 0
+    for unit_slots in ordered_unit_slots:
+        remaining_unit_slot_ids = list(unit_slots)
+        while remaining_unit_slot_ids:
+            magnet = ordered_magnets[magnet_index]
+            candidate = choose_best_linear_candidate(
+                table,
+                residual,
+                remaining_unit_slot_ids,
+                magnet.measured_error,
+                allowed_orientation_ids=allowed_orientation_ids,
+            )
+            cluster_id = cluster_by_magnet.get(magnet.magnet_id)
+            if current_inventory is not None and cluster_id is not None:
+                current_inventory = decrement_cluster(current_inventory, cluster_id)
+            residual = np.ascontiguousarray(residual + candidate.contribution, dtype=np.float64)
+            remaining_unit_slot_ids.remove(candidate.slot_flat_id)
+            placements.append(
+                Placement(
+                    slot_flat_id=candidate.slot_flat_id,
+                    magnet_id=magnet.magnet_id,
+                    orientation_id=candidate.orientation_id,
+                    cluster_requested=cluster_id,
+                    insert_order=len(placements),
+                    decision_engine="ring_constrained_linear_sensitivity",
+                )
+            )
+            magnet_index += 1
+
+    linear_score = float(np.dot(residual, residual))
+    if not math.isfinite(linear_score):
+        raise ValueError("linear assignment produced a non-finite score")
+    return LinearAssignmentResult(
+        placements=tuple(placements),
+        residual=residual,
+        linear_score=linear_score,
+        remaining_slot_flat_ids=(),
+        inventory=current_inventory,
+    )
+
+
 def cluster_usage_from_placements(placements: Sequence[Placement]) -> dict[str, int]:
     """Count cluster_requested values in a completed placement sequence."""
     usage: dict[str, int] = {}
@@ -271,6 +391,7 @@ __all__ = [
     "choose_best_linear_candidate",
     "cluster_usage_from_placements",
     "planned_cluster_counts",
+    "run_ring_constrained_linear_assignment",
     "run_linear_sensitivity_assignment",
     "score_linear_candidates",
 ]

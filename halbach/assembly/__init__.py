@@ -68,6 +68,7 @@ from halbach.assembly.online_assignment import (
     cluster_usage_from_placements,
     planned_cluster_counts,
     run_linear_sensitivity_assignment,
+    run_ring_constrained_linear_assignment,
     score_linear_candidates,
 )
 from halbach.assembly.orientations import default_orientations, rotate_error_for_orientation
@@ -276,6 +277,7 @@ __all__ = [
     "run_linear_sensitivity_baseline",
     "run_linear_sensitivity_assignment",
     "run_random_baseline",
+    "run_ring_constrained_linear_assignment",
     "run_session_to_completion",
     "run_self_consistent_assignment",
     "run_self_consistent_baseline",

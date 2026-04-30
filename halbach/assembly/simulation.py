@@ -5,7 +5,10 @@ from collections.abc import Sequence
 import numpy as np
 
 from halbach.assembly.field_eval import evaluate_fixed_placement
-from halbach.assembly.online_assignment import run_linear_sensitivity_assignment
+from halbach.assembly.online_assignment import (
+    run_linear_sensitivity_assignment,
+    run_ring_constrained_linear_assignment,
+)
 from halbach.assembly.orientations import default_orientations
 from halbach.assembly.self_consistent_assignment import (
     SelfConsistentConfig,
@@ -22,10 +25,11 @@ from halbach.assembly.types import (
     Placement,
     PlacementOrientationMode,
     RandomBaselineResult,
-    SensitivityTable,
     SelfConsistentSimulationResult,
+    SensitivityTable,
     SimulationComparisonResult,
     VirtualMagnet,
+    WorkUnit,
 )
 from halbach.constants import FACTOR
 from halbach.types import FloatArray
@@ -49,12 +53,45 @@ def _validate_random_inputs(
         raise ValueError("magnets contain duplicate magnet_id values")
 
 
+def _slots_in_work_unit_order(
+    slots: Sequence[AssemblySlot],
+    work_units: Sequence[WorkUnit] | None,
+) -> list[AssemblySlot]:
+    if work_units is None:
+        return list(slots)
+    if not work_units:
+        raise ValueError("work_units must be non-empty")
+    slot_by_id = {slot.slot_flat_id: slot for slot in slots}
+    if len(slot_by_id) != len(slots):
+        raise ValueError("slots contain duplicate slot_flat_id values")
+    ordered: list[AssemblySlot] = []
+    seen: set[int] = set()
+    for unit in work_units:
+        if not unit.slot_flat_ids:
+            raise ValueError(f"work unit {unit.work_unit_id} has no slots")
+        for raw_slot_id in unit.slot_flat_ids:
+            slot_id = int(raw_slot_id)
+            if slot_id in seen:
+                raise ValueError(f"slot_flat_id {slot_id} appears in multiple work units")
+            if slot_id not in slot_by_id:
+                raise ValueError(f"work unit references unknown slot_flat_id: {slot_id}")
+            seen.add(slot_id)
+            ordered.append(slot_by_id[slot_id])
+    slot_ids = set(slot_by_id)
+    if seen != slot_ids:
+        missing = sorted(slot_ids - seen)
+        extra = sorted(seen - slot_ids)
+        raise ValueError(f"work unit slot coverage mismatch; missing={missing}, extra={extra}")
+    return ordered
+
+
 def build_random_placements(
     slots: Sequence[AssemblySlot],
     magnets: Sequence[VirtualMagnet],
     *,
     seed: int,
     orientation_mode: PlacementOrientationMode = "fixed_o0",
+    work_units: Sequence[WorkUnit] | None = None,
 ) -> list[Placement]:
     """
     Build a reproducible random one-to-one placement baseline.
@@ -66,20 +103,21 @@ def build_random_placements(
     if orientation_mode not in ("fixed_o0", "random_discrete4"):
         raise ValueError(f"unsupported orientation_mode: {orientation_mode}")
 
+    ordered_slots = _slots_in_work_unit_order(slots, work_units)
     rng = np.random.default_rng(int(seed))
     magnet_ids = np.asarray([magnet.magnet_id for magnet in magnets], dtype=np.int64)
     shuffled_magnet_ids = rng.permutation(magnet_ids)
 
     if orientation_mode == "fixed_o0":
-        orientation_ids = ["O0"] * len(slots)
+        orientation_ids = ["O0"] * len(ordered_slots)
     else:
         candidates = default_orientations()
-        indices = rng.integers(0, len(candidates), size=len(slots))
+        indices = rng.integers(0, len(candidates), size=len(ordered_slots))
         orientation_ids = [candidates[int(idx)].id for idx in indices]
 
     placements: list[Placement] = []
     for insert_order, (slot, magnet_id, orientation_id) in enumerate(
-        zip(slots, shuffled_magnet_ids, orientation_ids, strict=True)
+        zip(ordered_slots, shuffled_magnet_ids, orientation_ids, strict=True)
     ):
         placements.append(
             Placement(
@@ -137,6 +175,7 @@ def run_random_baseline(
     orientation_mode: PlacementOrientationMode = "fixed_o0",
     evaluation_model: EvaluationModel = "fixed",
     self_consistent_evaluation_config: SelfConsistentConfig | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> RandomBaselineResult:
@@ -146,6 +185,7 @@ def run_random_baseline(
         magnets,
         seed=seed,
         orientation_mode=orientation_mode,
+        work_units=work_units,
     )
     evaluation = _evaluate_placement(
         slots,
@@ -187,6 +227,7 @@ def run_linear_sensitivity_baseline(
     inventory: ClusterInventory | None = None,
     allowed_orientation_ids: Sequence[str] | None = None,
     magnet_order: Sequence[int] | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
     evaluation_model: EvaluationModel = "fixed",
     self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
@@ -194,14 +235,25 @@ def run_linear_sensitivity_baseline(
 ) -> LinearSimulationResult:
     """Run the Step 5 greedy Plan C linear sensitivity placement and evaluate it."""
     _validate_slot_table_coverage(slots, sensitivity_table)
-    assignment = run_linear_sensitivity_assignment(
-        sensitivity_table,
-        magnets,
-        assignments=assignments,
-        inventory=inventory,
-        allowed_orientation_ids=allowed_orientation_ids,
-        magnet_order=magnet_order,
-    )
+    if work_units is None:
+        assignment = run_linear_sensitivity_assignment(
+            sensitivity_table,
+            magnets,
+            assignments=assignments,
+            inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            magnet_order=magnet_order,
+        )
+    else:
+        assignment = run_ring_constrained_linear_assignment(
+            sensitivity_table,
+            magnets,
+            work_units,
+            assignments=assignments,
+            inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            magnet_order=magnet_order,
+        )
     evaluation = _evaluate_placement(
         slots,
         magnets,
@@ -266,6 +318,7 @@ def run_simulation_trial(
     inventory: ClusterInventory | None = None,
     random_orientation_mode: PlacementOrientationMode = "random_discrete4",
     allowed_orientation_ids: Sequence[str] | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
     include_self_consistent: bool = False,
     self_consistent_config: SelfConsistentConfig | None = None,
     evaluation_model: EvaluationModel = "fixed",
@@ -282,6 +335,7 @@ def run_simulation_trial(
         orientation_mode=random_orientation_mode,
         evaluation_model=evaluation_model,
         self_consistent_evaluation_config=self_consistent_evaluation_config,
+        work_units=work_units,
         factor=float(factor),
         min_B0_norm=min_B0_norm,
     )
@@ -293,6 +347,7 @@ def run_simulation_trial(
         assignments=assignments,
         inventory=inventory,
         allowed_orientation_ids=allowed_orientation_ids,
+        work_units=work_units,
         evaluation_model=evaluation_model,
         self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),
