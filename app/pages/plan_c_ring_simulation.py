@@ -216,7 +216,13 @@ with st.sidebar:
         BuildWorkUnitMode,
         st.selectbox(
             "Work unit mode",
-            ["ring_by_ring_outer_to_inner", "auto", "mirror_ring_pair", "all_slots"],
+            [
+                "layer_by_layer_outer_to_inner",
+                "auto",
+                "mirror_ring_pair",
+                "all_slots",
+                "ring_by_ring_outer_to_inner",
+            ],
             index=0,
         ),
     )
@@ -345,7 +351,10 @@ with playback_tab:
     info_cols = st.columns(5)
     info_cols[0].metric("Placed", state.placed_count)
     info_cols[1].metric("Layer", "-" if state.active_layer_id is None else state.active_layer_id)
-    info_cols[2].metric("Ring", "-" if state.active_ring_id is None else state.active_ring_id)
+    info_cols[2].metric(
+        "Current Ring",
+        "-" if state.active_ring_id is None else state.active_ring_id,
+    )
     info_cols[3].metric("Cluster", state.current_cluster or "-")
     info_cols[4].metric(
         "Residual",

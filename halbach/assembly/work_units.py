@@ -94,14 +94,30 @@ def _build_ring_by_ring_outer_to_inner(slots: list[AssemblySlot]) -> list[WorkUn
     return units
 
 
+def _build_layer_by_layer_outer_to_inner(slots: list[AssemblySlot]) -> list[WorkUnit]:
+    groups = _group_by_physical_ring(slots)
+    units: list[WorkUnit] = []
+    for layer_id in _outer_to_inner_layers_from_slots(slots):
+        ring_ids = sorted(ring_id for group_layer, ring_id in groups if group_layer == layer_id)
+        layer_slots: list[AssemblySlot] = []
+        for ring_id in ring_ids:
+            layer_slots.extend(groups[(layer_id, ring_id)])
+        units.append(
+            WorkUnit(
+                work_unit_id=f"W_LAYER{layer_id:03d}",
+                mode="layer_by_layer_outer_to_inner",
+                slot_flat_ids=_slot_ids(layer_slots),
+                label=f"outer-to-inner layer {layer_id}, all rings",
+            )
+        )
+    return units
+
+
 def _build_mirror_ring_pair(slots: list[AssemblySlot]) -> list[WorkUnit]:
     groups = _group_by_physical_ring(slots)
     layers = _outer_to_inner_layers_from_slots(slots)
     ring_ids = sorted({slot.ring_id for slot in slots})
-    pair_layers = [
-        tuple(layers[idx : idx + 2])
-        for idx in range(0, len(layers), 2)
-    ]
+    pair_layers = [tuple(layers[idx : idx + 2]) for idx in range(0, len(layers), 2)]
     units: list[WorkUnit] = []
     for pair_index, layer_pair in enumerate(pair_layers):
         for ring_id in ring_ids:
@@ -116,7 +132,9 @@ def _build_mirror_ring_pair(slots: list[AssemblySlot]) -> list[WorkUnit]:
             if not chunk_slots:
                 continue
             if len(present_layers) == 1:
-                label = f"mirror pair {pair_index}: center layer {present_layers[0]}, ring {ring_id}"
+                label = (
+                    f"mirror pair {pair_index}: center layer {present_layers[0]}, ring {ring_id}"
+                )
             else:
                 label = (
                     f"mirror pair {pair_index}: layers {present_layers[0]}"
@@ -171,7 +189,7 @@ def _resolve_auto_mode(
     magnets_per_physical_ring = max(len(group_slots) for group_slots in groups.values())
     total_magnets = len(slots)
     if magnets_per_physical_ring >= large_ring_threshold:
-        return "ring_by_ring_outer_to_inner"
+        return "layer_by_layer_outer_to_inner"
     if total_magnets <= small_total_threshold:
         return "all_slots"
     return "ring_group"
@@ -207,6 +225,8 @@ def build_work_units(
         return _build_all_slots(slots)
     if resolved_mode == "single_physical_ring":
         return _build_single_physical_ring(slots)
+    if resolved_mode == "layer_by_layer_outer_to_inner":
+        return _build_layer_by_layer_outer_to_inner(slots)
     if resolved_mode == "ring_by_ring_outer_to_inner":
         return _build_ring_by_ring_outer_to_inner(slots)
     if resolved_mode == "mirror_ring_pair":
@@ -216,7 +236,9 @@ def build_work_units(
     raise ValueError(f"Unsupported work unit mode: {resolved_mode}")
 
 
-def assign_work_unit_ids(slots: list[AssemblySlot], work_units: list[WorkUnit]) -> list[AssemblySlot]:
+def assign_work_unit_ids(
+    slots: list[AssemblySlot], work_units: list[WorkUnit]
+) -> list[AssemblySlot]:
     """Return copies of slots with `work_unit_id` populated from work units."""
     slot_to_unit: dict[int, str] = {}
     for unit in work_units:

@@ -286,8 +286,10 @@ def plot_side_stack_view(
     for layer_id, ring_id in placed_keys:
         if layer_id in layer_to_idx and ring_id in ring_to_idx:
             z[layer_to_idx[layer_id], ring_to_idx[ring_id]] = 1.0
-    if state.active_layer_id in layer_to_idx and state.active_ring_id in ring_to_idx:
-        z[layer_to_idx[int(state.active_layer_id)], ring_to_idx[int(state.active_ring_id)]] = 2.0
+    if state.active_layer_id in layer_to_idx:
+        layer_idx = layer_to_idx[int(state.active_layer_id)]
+        for ring_idx in range(len(metric.x)):
+            z[layer_idx, ring_idx] = 2.0
     fig = go.Figure(
         go.Heatmap(
             x=metric.x,

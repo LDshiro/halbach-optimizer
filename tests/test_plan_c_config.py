@@ -61,7 +61,11 @@ def test_plan_c_config_json_roundtrip(tmp_path) -> None:
 
 
 def test_plan_c_config_accepts_ring_by_ring_work_unit_modes() -> None:
-    for mode in ("ring_by_ring_outer_to_inner", "mirror_ring_pair"):
+    for mode in (
+        "layer_by_layer_outer_to_inner",
+        "ring_by_ring_outer_to_inner",
+        "mirror_ring_pair",
+    ):
         config = plan_c_config_from_dict({"work_units": {"mode": mode}})
         assert config.work_units.mode == mode
         data = plan_c_config_to_dict(config)

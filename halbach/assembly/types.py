@@ -12,6 +12,7 @@ WorkUnitMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
 ]
@@ -19,6 +20,7 @@ BuildWorkUnitMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
     "auto",

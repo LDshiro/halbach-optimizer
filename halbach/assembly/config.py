@@ -11,6 +11,7 @@ WorkUnitConfigMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
     "auto",
@@ -133,12 +134,8 @@ def plan_c_config_to_dict(config: PlanCConfig) -> dict[str, object]:
         },
         "measurement_noise": {
             "strength_sigma": config.measurement_noise.strength_sigma,
-            "transverse_component_1_sigma": (
-                config.measurement_noise.transverse_component_1_sigma
-            ),
-            "transverse_component_2_sigma": (
-                config.measurement_noise.transverse_component_2_sigma
-            ),
+            "transverse_component_1_sigma": (config.measurement_noise.transverse_component_1_sigma),
+            "transverse_component_2_sigma": (config.measurement_noise.transverse_component_2_sigma),
         },
     }
 
@@ -256,9 +253,7 @@ def plan_c_config_from_dict(data: dict[str, object]) -> PlanCConfig:
             ),
         ),
         clusters=PlanCClustersConfig(
-            strength_count=_int_value(
-                clusters.get("strength_count", base.clusters.strength_count)
-            ),
+            strength_count=_int_value(clusters.get("strength_count", base.clusters.strength_count)),
             angle_count=_int_value(clusters.get("angle_count", base.clusters.angle_count)),
             transverse_2_weight=_float_value(
                 clusters.get("transverse_2_weight", base.clusters.transverse_2_weight)

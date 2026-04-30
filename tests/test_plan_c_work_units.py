@@ -139,6 +139,31 @@ def test_ring_by_ring_outer_to_inner_orders_rings_within_layer(tmp_path: Path) -
     ]
 
 
+def test_layer_by_layer_outer_to_inner_uses_one_unit_per_layer(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=2, K=4)
+    slots = build_assembly_slots(run)
+    units = build_work_units(slots, "layer_by_layer_outer_to_inner")
+
+    assert [unit.mode for unit in units] == ["layer_by_layer_outer_to_inner"] * 4
+    assert [unit.work_unit_id for unit in units] == [
+        "W_LAYER000",
+        "W_LAYER003",
+        "W_LAYER001",
+        "W_LAYER002",
+    ]
+    assert [len(unit.slot_flat_ids) for unit in units] == [8, 8, 8, 8]
+    first_layer_slots = sorted(
+        [slot for slot in slots if slot.layer_id == 0],
+        key=lambda slot: (slot.ring_id, slot.theta_id),
+    )
+    first_unit_slots = [slot.slot_flat_id for slot in first_layer_slots]
+    assert list(units[0].slot_flat_ids) == first_unit_slots
+    _assert_unit_coverage(
+        {slot.slot_flat_id for slot in slots},
+        [slot_id for unit in units for slot_id in unit.slot_flat_ids],
+    )
+
+
 def test_mirror_ring_pair_even_layers(tmp_path: Path) -> None:
     run = _write_generated_run(tmp_path, N=4, R=1, K=6)
     slots = build_assembly_slots(run)
@@ -154,11 +179,7 @@ def test_mirror_ring_pair_even_layers(tmp_path: Path) -> None:
     unit_layer_sets = []
     for unit in units:
         layer_ids = sorted(
-            {
-                slot.layer_id
-                for slot in slots
-                if slot.slot_flat_id in set(unit.slot_flat_ids)
-            }
+            {slot.layer_id for slot in slots if slot.slot_flat_id in set(unit.slot_flat_ids)}
         )
         unit_layer_sets.append(tuple(layer_ids))
     assert unit_layer_sets == [(0, 5), (1, 4), (2, 3)]
@@ -183,11 +204,7 @@ def test_mirror_ring_pair_odd_layers_has_center_unit(tmp_path: Path) -> None:
     unit_layer_sets = []
     for unit in units:
         layer_ids = sorted(
-            {
-                slot.layer_id
-                for slot in slots
-                if slot.slot_flat_id in set(unit.slot_flat_ids)
-            }
+            {slot.layer_id for slot in slots if slot.slot_flat_id in set(unit.slot_flat_ids)}
         )
         unit_layer_sets.append(tuple(layer_ids))
     assert unit_layer_sets == [(0, 4), (1, 3), (2,)]
@@ -197,7 +214,11 @@ def test_assign_work_unit_ids_accepts_new_modes(tmp_path: Path) -> None:
     run = _write_generated_run(tmp_path, N=4, R=1, K=5)
     slots = build_assembly_slots(run)
 
-    for mode in ("ring_by_ring_outer_to_inner", "mirror_ring_pair"):
+    for mode in (
+        "layer_by_layer_outer_to_inner",
+        "ring_by_ring_outer_to_inner",
+        "mirror_ring_pair",
+    ):
         assigned = assign_work_unit_ids(slots, build_work_units(slots, mode))
         assert all(slot.work_unit_id for slot in assigned)
         assert all(slot.work_unit_id == "" for slot in slots)
@@ -214,9 +235,7 @@ def test_ring_group_chunks_physical_rings_in_layer_ring_order(tmp_path: Path) ->
     assert [len(unit.slot_flat_ids) for unit in units] == [8, 8, 8]
 
     expected_first = [
-        slot.slot_flat_id
-        for slot in slots
-        if (slot.layer_id, slot.ring_id) in ((0, 0), (1, 0))
+        slot.slot_flat_id for slot in slots if (slot.layer_id, slot.ring_id) in ((0, 0), (1, 0))
     ]
     assert list(units[0].slot_flat_ids) == expected_first
     _assert_unit_coverage(
@@ -228,12 +247,12 @@ def test_ring_group_chunks_physical_rings_in_layer_ring_order(tmp_path: Path) ->
 def test_auto_mode_selects_outer_to_inner_all_or_ring_group(tmp_path: Path) -> None:
     run_large_ring = _write_generated_run(tmp_path, N=60, R=1, K=4)
     units_large = build_work_units(build_assembly_slots(run_large_ring), "auto")
-    assert {unit.mode for unit in units_large} == {"ring_by_ring_outer_to_inner"}
+    assert {unit.mode for unit in units_large} == {"layer_by_layer_outer_to_inner"}
     assert [unit.work_unit_id for unit in units_large] == [
-        "W_K000_R000",
-        "W_K003_R000",
-        "W_K001_R000",
-        "W_K002_R000",
+        "W_LAYER000",
+        "W_LAYER003",
+        "W_LAYER001",
+        "W_LAYER002",
     ]
 
     run_small_total = _write_generated_run(tmp_path, N=8, R=1, K=4)

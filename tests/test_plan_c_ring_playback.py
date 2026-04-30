@@ -212,7 +212,14 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
         out_dir=tmp_path,
         trial_id=0,
         summary={},
-        ring_summary=[],
+        ring_summary=[
+            {
+                "layer_id": "0",
+                "ring_id": str(ring_id),
+                "mean_epsilon": "0.0",
+            }
+            for ring_id in (0, 1)
+        ],
         ring_pair_summary=[],
         timeline=timeline,
         quota_plan=[],
@@ -221,9 +228,11 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
     state = playback_state_at_step(bundle, 4)
 
     fig = plot_active_ring_polar_view(bundle, state)
+    stack = plot_side_stack_view(bundle, state)
     completed = next(trace for trace in fig.data if trace.name == "completed")
     pending = next(trace for trace in fig.data if trace.name == "pending")
 
     assert list(completed.r) == [1, 1, 1, 1, 2]
     assert set(pending.r) == {2}
+    assert np.asarray(stack.data[0].z).tolist() == [[2.0, 2.0]]
     assert fig.layout.title.text == "Active Layer 0 Rings"

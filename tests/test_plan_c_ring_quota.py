@@ -187,6 +187,23 @@ def test_plan_work_unit_cluster_quotas_aggregates_mirror_pair_units() -> None:
     assert aligned[0].expected_mean_epsilon == pytest.approx(expected_outer_mean)
 
 
+def test_plan_work_unit_cluster_quotas_aggregates_layer_units() -> None:
+    slots = _slots(K=3, N=2, R=2)
+    inventory = _matrix_inventory([-0.01, 0.01], [0, 1, 2], count_per_cluster=2)
+    work_units = build_work_units(slots, "layer_by_layer_outer_to_inner")
+
+    aligned = plan_work_unit_cluster_quotas(slots, inventory, work_units)
+
+    assert [plan.work_unit_id for plan in aligned] == [
+        "W_LAYER000",
+        "W_LAYER002",
+        "W_LAYER001",
+    ]
+    assert [plan.target_count for plan in aligned] == [4, 4, 4]
+    assert sum(plan.target_count for plan in aligned) == len(slots)
+    assert all(sum(plan.quota_by_cluster.values()) == plan.target_count for plan in aligned)
+
+
 def test_plan_work_unit_cluster_quotas_aggregates_all_slots_unit() -> None:
     slots = _slots(K=3, N=2)
     inventory = _matrix_inventory([-0.01, 0.01], [0, 1, 2], count_per_cluster=1)
