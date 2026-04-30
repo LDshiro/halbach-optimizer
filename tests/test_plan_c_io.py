@@ -4,14 +4,20 @@ from pathlib import Path
 from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import (
+    CLUSTER_PICKUP_LOG_COLUMNS,
+    CLUSTER_QUOTA_PLAN_COLUMNS,
     FINAL_PLACEMENT_COLUMNS,
+    RING_PAIR_SUMMARY_COLUMNS,
+    RING_SUMMARY_COLUMNS,
     SIMULATION_TRIAL_COLUMNS,
     SimulationTrialArtifacts,
     load_json_dict,
     read_csv_dicts,
+    read_jsonl_dicts,
     validate_final_placement_csv,
     write_simulation_outputs,
 )
+from halbach.assembly.ring_quota import plan_ring_cluster_quotas
 from halbach.assembly.sensitivity import compute_sensitivity_table
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
 from halbach.assembly.slots import build_assembly_slots
@@ -46,7 +52,11 @@ def _write_generated_run(tmp_path: Path, *, N: int = 8, R: int = 1, K: int = 4) 
     return load_run(run_dir)
 
 
-def _artifact(tmp_path: Path) -> tuple[list, SimulationTrialArtifacts, dict[str, object]]:
+def _artifact(
+    tmp_path: Path,
+    *,
+    with_quotas: bool = False,
+) -> tuple[list, SimulationTrialArtifacts, dict[str, object]]:
     run = _write_generated_run(tmp_path)
     slots = build_assembly_slots(run)
     slots = assign_work_unit_ids(slots, build_work_units(slots, "all_slots"))
@@ -78,12 +88,13 @@ def _artifact(tmp_path: Path) -> tuple[list, SimulationTrialArtifacts, dict[str,
         result=result,
         magnets=tuple(magnets),
         assignments=tuple(assignments),
+        quota_plans=plan_ring_cluster_quotas(slots, inventory) if with_quotas else None,
     )
     summary = summarize_comparison_results([result])
     return slots, artifact, summary
 
 
-def test_write_simulation_outputs_creates_step6_files(tmp_path: Path) -> None:
+def test_write_simulation_outputs_creates_plan_c_files(tmp_path: Path) -> None:
     slots, artifact, summary = _artifact(tmp_path)
     out_dir = tmp_path / "out"
 
@@ -101,6 +112,11 @@ def test_write_simulation_outputs_creates_step6_files(tmp_path: Path) -> None:
         "final_placement_trial_000.csv",
         "cluster_usage_trial_000.csv",
         "work_unit_summary_trial_000.csv",
+        "ring_summary_trial_000.csv",
+        "ring_pair_summary_trial_000.csv",
+        "assembly_timeline_trial_000.jsonl",
+        "cluster_quota_plan_trial_000.csv",
+        "cluster_pickup_log_trial_000.csv",
         "field_metrics_trial_000.json",
         "streamlit_session_log_trial_000.jsonl",
     }
@@ -147,9 +163,49 @@ def test_field_metrics_json_and_session_log_have_schema_version(tmp_path: Path) 
     assert "random_baseline" in metrics
     assert "linear_sensitivity" in metrics
 
-    log_lines = (out_dir / "streamlit_session_log_trial_000.jsonl").read_text(
-        encoding="utf-8"
-    ).splitlines()
+    log_lines = (
+        (out_dir / "streamlit_session_log_trial_000.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     assert json.loads(log_lines[0])["event"] == "session_started"
     assert json.loads(log_lines[-1])["event"] == "session_completed"
     assert all(json.loads(line)["schema_version"] == 1 for line in log_lines)
+
+
+def test_visualization_outputs_match_placement_counts_and_replay(tmp_path: Path) -> None:
+    slots, artifact, summary = _artifact(tmp_path, with_quotas=True)
+    out_dir = tmp_path / "out"
+    write_simulation_outputs(out_dir, [artifact], slots, summary)
+    placements = artifact.result.linear.assignment.placements
+
+    ring_rows = read_csv_dicts(out_dir / "ring_summary_trial_000.csv")
+    assert list(ring_rows[0]) == RING_SUMMARY_COLUMNS
+    assert sum(int(row["count"]) for row in ring_rows) == len(placements)
+
+    pair_rows = read_csv_dicts(out_dir / "ring_pair_summary_trial_000.csv")
+    assert list(pair_rows[0]) == RING_PAIR_SUMMARY_COLUMNS
+    assert pair_rows
+
+    timeline = read_jsonl_dicts(out_dir / "assembly_timeline_trial_000.jsonl")
+    assert len(timeline) == len(placements)
+    assert all(row["event"] == "insert_confirmed" for row in timeline)
+    replayed = {
+        int(row["slot_flat_id"]): (int(row["magnet_id"]), str(row["orientation_id"]))
+        for row in timeline
+    }
+    expected = {
+        placement.slot_flat_id: (placement.magnet_id, placement.orientation_id)
+        for placement in placements
+    }
+    assert replayed == expected
+
+    pickup_rows = read_csv_dicts(out_dir / "cluster_pickup_log_trial_000.csv")
+    assert list(pickup_rows[0]) == CLUSTER_PICKUP_LOG_COLUMNS
+    assert len(pickup_rows) == len(placements)
+    assert {int(row["magnet_id"]) for row in pickup_rows} == {
+        placement.magnet_id for placement in placements
+    }
+
+    quota_rows = read_csv_dicts(out_dir / "cluster_quota_plan_trial_000.csv")
+    assert list(quota_rows[0]) == CLUSTER_QUOTA_PLAN_COLUMNS
+    assert quota_rows
+    assert sum(int(row["target_count"]) for row in quota_rows) == len(slots)

@@ -10,11 +10,21 @@ from typing import Any
 import numpy as np
 
 from halbach.assembly.orientations import default_orientations
+from halbach.assembly.ring_summary import (
+    ring_pair_summary_from_ring_summaries,
+    ring_summary_from_placements,
+    timeline_from_placements,
+)
 from halbach.assembly.types import (
     AssemblySlot,
+    AssemblyTimelineEvent,
     ClusterAssignment,
     FieldMetrics,
     Placement,
+    RingKey,
+    RingPairSummary,
+    RingQuotaPlan,
+    RingSummary,
     SimulationComparisonResult,
     VirtualMagnet,
 )
@@ -61,16 +71,98 @@ SIMULATION_TRIAL_COLUMNS = [
     "linear_score_measured",
 ]
 
+RING_SUMMARY_COLUMNS = [
+    "trial_id",
+    "work_unit_id",
+    "layer_id",
+    "ring_id",
+    "count",
+    "mean_epsilon",
+    "std_epsilon",
+    "min_epsilon",
+    "max_epsilon",
+    "mean_angle_error",
+    "std_angle_error",
+    "mean_true_epsilon",
+    "mean_true_delta_perp_1",
+    "mean_true_delta_perp_2",
+    "mean_measured_epsilon",
+    "mean_measured_delta_perp_1",
+    "mean_measured_delta_perp_2",
+    "cluster_counts_json",
+    "B0_norm_after_ring",
+    "rms_homogeneity_ppm_after_ring",
+    "J_vector_after_ring",
+]
+
+RING_PAIR_SUMMARY_COLUMNS = [
+    "trial_id",
+    "pair_id",
+    "pair_index",
+    "ring_id",
+    "lower_layer_id",
+    "upper_layer_id",
+    "lower_count",
+    "upper_count",
+    "lower_mean_epsilon",
+    "upper_mean_epsilon",
+    "mean_epsilon_difference",
+    "mean_angle_error_difference",
+    "residual_norm_after_lower",
+    "residual_norm_after_upper",
+    "residual_norm_after_pair",
+    "pair_complete",
+]
+
+CLUSTER_QUOTA_PLAN_COLUMNS = [
+    "trial_id",
+    "work_unit_id",
+    "layer_id",
+    "ring_id",
+    "target_count",
+    "target_mean_epsilon",
+    "ring_importance",
+    "expected_mean_epsilon",
+    "expected_mean_angle_bin",
+    "expected_angle_error",
+    "mirror_pair_id",
+    "allowed_clusters_json",
+    "quota_by_cluster_json",
+]
+
+CLUSTER_PICKUP_LOG_COLUMNS = [
+    "trial_id",
+    "insert_order",
+    "decision_engine",
+    "work_unit_id",
+    "layer_id",
+    "ring_id",
+    "theta_id",
+    "slot_flat_id",
+    "physical_slot_number",
+    "magnet_id",
+    "assignment_cluster_id",
+    "cluster_requested",
+    "epsilon_parallel",
+    "delta_perp_1",
+    "delta_perp_2",
+    "measured_epsilon_parallel",
+    "measured_delta_perp_1",
+    "measured_delta_perp_2",
+    "orientation_id",
+]
+
 
 @dataclass(frozen=True)
 class SimulationTrialArtifacts:
-    """All per-trial data needed for Step 6 output files."""
+    """All per-trial data needed for Plan C simulation output files."""
 
     trial_id: int
     seed: int
     result: SimulationComparisonResult
     magnets: Sequence[VirtualMagnet]
     assignments: Sequence[ClusterAssignment]
+    quota_plans: Sequence[RingQuotaPlan] | None = None
 
 
 def _json_default(value: object) -> object:
@@ -98,6 +190,10 @@ def _write_csv(path: Path, fieldnames: Sequence[str], rows: Sequence[dict[str, o
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def _json_cell(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=_json_default)
 
 
 def field_metrics_to_dict(metrics: FieldMetrics) -> dict[str, float]:
@@ -231,6 +327,17 @@ def _used_cluster_counts(placements: Sequence[Placement]) -> dict[str, int]:
     return counts
 
 
+def _assignment_cluster_by_magnet(
+    assignments: Sequence[ClusterAssignment],
+) -> dict[int, str | None]:
+    cluster_by_magnet: dict[int, str | None] = {}
+    for assignment in assignments:
+        if assignment.magnet_id in cluster_by_magnet:
+            raise ValueError(f"duplicate assignment magnet_id: {assignment.magnet_id}")
+        cluster_by_magnet[assignment.magnet_id] = assignment.cluster_id
+    return cluster_by_magnet
+
+
 def write_cluster_usage_csv(
     path: str | Path,
     assignments: Sequence[ClusterAssignment],
@@ -253,6 +360,300 @@ def write_cluster_usage_csv(
         Path(path),
         ["cluster_id", "planned_count", "used_count", "remaining_count"],
         rows,
+    )
+
+
+def _ring_work_unit_by_key(slots: Sequence[AssemblySlot]) -> dict[RingKey, str]:
+    by_key: dict[RingKey, str] = {}
+    for slot in slots:
+        key = RingKey(layer_id=slot.layer_id, ring_id=slot.ring_id)
+        work_unit_id = slot.work_unit_id or "W_UNASSIGNED"
+        if key in by_key and by_key[key] != work_unit_id:
+            # A mirror-pair work unit can intentionally share one id across two rings,
+            # but one physical ring should still have one work unit id.
+            raise ValueError(
+                f"physical ring {key} appears in multiple work units: "
+                f"{by_key[key]} and {work_unit_id}"
+            )
+        by_key[key] = work_unit_id
+    return by_key
+
+
+def ring_summary_rows(
+    trial_id: int,
+    slots: Sequence[AssemblySlot],
+    summaries: Sequence[RingSummary],
+) -> list[dict[str, object]]:
+    """Build rows for ring_summary_trial_XXX.csv."""
+    work_unit_by_key = _ring_work_unit_by_key(slots)
+    rows: list[dict[str, object]] = []
+    for summary in summaries:
+        true_mean = np.asarray(summary.mean_true_error, dtype=np.float64).reshape(3)
+        measured_mean = np.asarray(summary.mean_measured_error, dtype=np.float64).reshape(3)
+        rows.append(
+            {
+                "trial_id": int(trial_id),
+                "work_unit_id": work_unit_by_key.get(summary.ring_key, ""),
+                "layer_id": summary.layer_id,
+                "ring_id": summary.ring_id,
+                "count": summary.count,
+                "mean_epsilon": summary.mean_epsilon,
+                "std_epsilon": summary.std_epsilon,
+                "min_epsilon": summary.min_epsilon,
+                "max_epsilon": summary.max_epsilon,
+                "mean_angle_error": summary.mean_angle_error,
+                "std_angle_error": summary.std_angle_error,
+                "mean_true_epsilon": float(true_mean[0]),
+                "mean_true_delta_perp_1": float(true_mean[1]),
+                "mean_true_delta_perp_2": float(true_mean[2]),
+                "mean_measured_epsilon": float(measured_mean[0]),
+                "mean_measured_delta_perp_1": float(measured_mean[1]),
+                "mean_measured_delta_perp_2": float(measured_mean[2]),
+                "cluster_counts_json": _json_cell(summary.cluster_counts),
+                "B0_norm_after_ring": summary.B0_norm_after_ring,
+                "rms_homogeneity_ppm_after_ring": summary.rms_homogeneity_ppm_after_ring,
+                "J_vector_after_ring": summary.J_vector_after_ring,
+            }
+        )
+    return rows
+
+
+def write_ring_summary_csv(
+    path: str | Path,
+    trial_id: int,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+) -> tuple[RingSummary, ...]:
+    """Write per-physical-ring magnet-error statistics for visualization."""
+    summaries = ring_summary_from_placements(slots, magnets, placements)
+    _write_csv(
+        Path(path),
+        RING_SUMMARY_COLUMNS,
+        ring_summary_rows(trial_id, slots, summaries),
+    )
+    return summaries
+
+
+def ring_pair_summary_rows(
+    trial_id: int,
+    pair_summaries: Sequence[RingPairSummary],
+) -> list[dict[str, object]]:
+    """Build rows for ring_pair_summary_trial_XXX.csv."""
+    rows: list[dict[str, object]] = []
+    for summary in pair_summaries:
+        rows.append(
+            {
+                "trial_id": int(trial_id),
+                "pair_id": summary.pair_id,
+                "pair_index": summary.pair_index,
+                "ring_id": summary.ring_id,
+                "lower_layer_id": summary.lower_ring.layer_id,
+                "upper_layer_id": (
+                    "" if summary.upper_ring is None else summary.upper_ring.layer_id
+                ),
+                "lower_count": summary.lower_count,
+                "upper_count": summary.upper_count,
+                "lower_mean_epsilon": summary.lower_mean_epsilon,
+                "upper_mean_epsilon": summary.upper_mean_epsilon,
+                "mean_epsilon_difference": summary.mean_epsilon_difference,
+                "mean_angle_error_difference": summary.mean_angle_error_difference,
+                "residual_norm_after_lower": summary.residual_norm_after_lower,
+                "residual_norm_after_upper": summary.residual_norm_after_upper,
+                "residual_norm_after_pair": summary.residual_norm_after_pair,
+                "pair_complete": summary.pair_complete,
+            }
+        )
+    return rows
+
+
+def write_ring_pair_summary_csv(
+    path: str | Path,
+    trial_id: int,
+    ring_summaries: Sequence[RingSummary],
+    *,
+    pair_summaries: Sequence[RingPairSummary] | None = None,
+) -> tuple[RingPairSummary, ...]:
+    """Write mirror-pair ring-balance summary for visualization."""
+    summaries = (
+        tuple(pair_summaries)
+        if pair_summaries is not None and len(pair_summaries) > 0
+        else ring_pair_summary_from_ring_summaries(ring_summaries)
+    )
+    _write_csv(
+        Path(path),
+        RING_PAIR_SUMMARY_COLUMNS,
+        ring_pair_summary_rows(trial_id, summaries),
+    )
+    return summaries
+
+
+def _timeline_event_to_dict(
+    trial_id: int,
+    event: AssemblyTimelineEvent,
+) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "trial_id": int(trial_id),
+        "step": event.step,
+        "event": event.event,
+        "result_label": event.result_label,
+        "work_unit_id": event.work_unit_id,
+        "layer_id": event.layer_id,
+        "ring_id": event.ring_id,
+        "theta_id": event.theta_id,
+        "slot_flat_id": event.slot_flat_id,
+        "physical_slot_number": event.physical_slot_number,
+        "magnet_id": event.magnet_id,
+        "cluster_requested": event.cluster_requested,
+        "epsilon_parallel": event.epsilon_parallel,
+        "angle_error": event.angle_error,
+        "orientation_id": event.orientation_id,
+        "insert_order": event.insert_order,
+        "decision_engine": event.decision_engine,
+        "ring_count_so_far": event.ring_count_so_far,
+        "ring_mean_epsilon_so_far": event.ring_mean_epsilon_so_far,
+        "ring_mean_angle_error_so_far": event.ring_mean_angle_error_so_far,
+        "residual_norm": event.residual_norm,
+        "B0_norm": event.B0_norm,
+        "rms_homogeneity_ppm": event.rms_homogeneity_ppm,
+        "J_vector": event.J_vector,
+    }
+
+
+def write_assembly_timeline_jsonl(
+    path: str | Path,
+    trial_id: int,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+    *,
+    result_label: str = "linear",
+) -> tuple[AssemblyTimelineEvent, ...]:
+    """Write one insert event per line for ring-by-ring playback."""
+    events = timeline_from_placements(
+        slots,
+        magnets,
+        placements,
+        result_label=result_label,
+    )
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(
+                json.dumps(
+                    _timeline_event_to_dict(trial_id, event),
+                    sort_keys=True,
+                    default=_json_default,
+                )
+                + "\n"
+            )
+    return events
+
+
+def cluster_quota_plan_rows(
+    trial_id: int,
+    quota_plans: Sequence[RingQuotaPlan] | None,
+) -> list[dict[str, object]]:
+    """Build rows for cluster_quota_plan_trial_XXX.csv."""
+    if quota_plans is None:
+        return []
+    rows: list[dict[str, object]] = []
+    for plan in quota_plans:
+        rows.append(
+            {
+                "trial_id": int(trial_id),
+                "work_unit_id": plan.work_unit_id,
+                "layer_id": plan.layer_id,
+                "ring_id": plan.ring_id,
+                "target_count": plan.target_count,
+                "target_mean_epsilon": plan.target_mean_epsilon,
+                "ring_importance": plan.ring_importance,
+                "expected_mean_epsilon": plan.expected_mean_epsilon,
+                "expected_mean_angle_bin": plan.expected_mean_angle_bin,
+                "expected_angle_error": plan.expected_angle_error,
+                "mirror_pair_id": plan.mirror_pair_id or "",
+                "allowed_clusters_json": _json_cell(list(plan.allowed_clusters)),
+                "quota_by_cluster_json": _json_cell(plan.quota_by_cluster),
+            }
+        )
+    return rows
+
+
+def write_cluster_quota_plan_csv(
+    path: str | Path,
+    trial_id: int,
+    quota_plans: Sequence[RingQuotaPlan] | None,
+) -> None:
+    """Write planned per-ring cluster quotas; writes headers even when no plan exists."""
+    _write_csv(
+        Path(path),
+        CLUSTER_QUOTA_PLAN_COLUMNS,
+        cluster_quota_plan_rows(trial_id, quota_plans),
+    )
+
+
+def cluster_pickup_log_rows(
+    trial_id: int,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    assignments: Sequence[ClusterAssignment],
+    placements: Sequence[Placement],
+) -> list[dict[str, object]]:
+    """Build one pickup row per placed magnet for playback and inventory analysis."""
+    slot_by_id = _slot_by_id(slots)
+    magnet_by_id = _magnet_by_id(magnets)
+    cluster_by_magnet = _assignment_cluster_by_magnet(assignments)
+    rows: list[dict[str, object]] = []
+    for placement in sorted(placements, key=lambda item: item.insert_order):
+        if placement.slot_flat_id not in slot_by_id:
+            raise ValueError(f"unknown placed slot_flat_id: {placement.slot_flat_id}")
+        if placement.magnet_id not in magnet_by_id:
+            raise ValueError(f"unknown placed magnet_id: {placement.magnet_id}")
+        slot = slot_by_id[placement.slot_flat_id]
+        magnet = magnet_by_id[placement.magnet_id]
+        true_error = magnet.true_error
+        measured_error = magnet.measured_error
+        rows.append(
+            {
+                "trial_id": int(trial_id),
+                "insert_order": placement.insert_order,
+                "decision_engine": placement.decision_engine,
+                "work_unit_id": slot.work_unit_id,
+                "layer_id": slot.layer_id,
+                "ring_id": slot.ring_id,
+                "theta_id": slot.theta_id,
+                "slot_flat_id": slot.slot_flat_id,
+                "physical_slot_number": slot.physical_slot_number,
+                "magnet_id": placement.magnet_id,
+                "assignment_cluster_id": cluster_by_magnet.get(placement.magnet_id) or "",
+                "cluster_requested": placement.cluster_requested or "",
+                "epsilon_parallel": true_error.epsilon_parallel,
+                "delta_perp_1": true_error.delta_perp_1,
+                "delta_perp_2": true_error.delta_perp_2,
+                "measured_epsilon_parallel": measured_error.epsilon_parallel,
+                "measured_delta_perp_1": measured_error.delta_perp_1,
+                "measured_delta_perp_2": measured_error.delta_perp_2,
+                "orientation_id": placement.orientation_id,
+            }
+        )
+    return rows
+
+
+def write_cluster_pickup_log_csv(
+    path: str | Path,
+    trial_id: int,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    assignments: Sequence[ClusterAssignment],
+    placements: Sequence[Placement],
+) -> None:
+    """Write the simulated cluster pickup sequence for one trial."""
+    _write_csv(
+        Path(path),
+        CLUSTER_PICKUP_LOG_COLUMNS,
+        cluster_pickup_log_rows(trial_id, slots, magnets, assignments, placements),
     )
 
 
@@ -328,9 +729,7 @@ def write_field_metrics_json(path: str | Path, artifact: SimulationTrialArtifact
         payload["rms_ratio_self_consistent_over_linear"] = (
             result.rms_ratio_self_consistent_over_linear
         )
-        payload["j_ratio_self_consistent_over_linear"] = (
-            result.j_ratio_self_consistent_over_linear
-        )
+        payload["j_ratio_self_consistent_over_linear"] = result.j_ratio_self_consistent_over_linear
         payload["self_consistent_evaluated_count"] = result.self_consistent.evaluated_count
     _write_json(Path(path), payload)
 
@@ -412,9 +811,7 @@ def simulation_trial_row(artifact: SimulationTrialArtifacts) -> dict[str, object
                 "rms_ratio_self_consistent_over_linear": (
                     result.rms_ratio_self_consistent_over_linear
                 ),
-                "j_ratio_self_consistent_over_linear": (
-                    result.j_ratio_self_consistent_over_linear
-                ),
+                "j_ratio_self_consistent_over_linear": (result.j_ratio_self_consistent_over_linear),
                 "self_consistent_evaluated_count": result.self_consistent.evaluated_count,
             }
         )
@@ -476,12 +873,13 @@ def write_simulation_outputs(
 
     for artifact in artifacts:
         suffix = f"trial_{artifact.trial_id:03d}"
+        placements = artifact.result.linear.assignment.placements
         final_path = out_path / f"final_placement_{suffix}.csv"
         write_final_placement_csv(
             final_path,
             slots,
             artifact.magnets,
-            artifact.result.linear.assignment.placements,
+            placements,
         )
         written[f"final_placement_{suffix}"] = final_path
 
@@ -489,7 +887,7 @@ def write_simulation_outputs(
         write_cluster_usage_csv(
             cluster_path,
             artifact.assignments,
-            artifact.result.linear.assignment.placements,
+            placements,
         )
         written[f"cluster_usage_{suffix}"] = cluster_path
 
@@ -498,9 +896,57 @@ def write_simulation_outputs(
             work_unit_path,
             slots,
             artifact.magnets,
-            artifact.result.linear.assignment.placements,
+            placements,
         )
         written[f"work_unit_summary_{suffix}"] = work_unit_path
+
+        ring_summary_path = out_path / f"ring_summary_{suffix}.csv"
+        ring_summaries = write_ring_summary_csv(
+            ring_summary_path,
+            artifact.trial_id,
+            slots,
+            artifact.magnets,
+            placements,
+        )
+        written[f"ring_summary_{suffix}"] = ring_summary_path
+
+        ring_pair_path = out_path / f"ring_pair_summary_{suffix}.csv"
+        write_ring_pair_summary_csv(
+            ring_pair_path,
+            artifact.trial_id,
+            ring_summaries,
+            pair_summaries=artifact.result.linear.assignment.mirror_pair_summaries,
+        )
+        written[f"ring_pair_summary_{suffix}"] = ring_pair_path
+
+        timeline_path = out_path / f"assembly_timeline_{suffix}.jsonl"
+        write_assembly_timeline_jsonl(
+            timeline_path,
+            artifact.trial_id,
+            slots,
+            artifact.magnets,
+            placements,
+        )
+        written[f"assembly_timeline_{suffix}"] = timeline_path
+
+        quota_path = out_path / f"cluster_quota_plan_{suffix}.csv"
+        write_cluster_quota_plan_csv(
+            quota_path,
+            artifact.trial_id,
+            artifact.quota_plans,
+        )
+        written[f"cluster_quota_plan_{suffix}"] = quota_path
+
+        pickup_log_path = out_path / f"cluster_pickup_log_{suffix}.csv"
+        write_cluster_pickup_log_csv(
+            pickup_log_path,
+            artifact.trial_id,
+            slots,
+            artifact.magnets,
+            artifact.assignments,
+            placements,
+        )
+        written[f"cluster_pickup_log_{suffix}"] = pickup_log_path
 
         metrics_path = out_path / f"field_metrics_{suffix}.json"
         write_field_metrics_json(metrics_path, artifact)
@@ -519,6 +965,19 @@ def read_csv_dicts(path: str | Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def read_jsonl_dicts(path: str | Path) -> list[dict[str, Any]]:
+    """Read a JSONL file containing one JSON object per non-empty line."""
+    rows: list[dict[str, Any]] = []
+    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        if not isinstance(raw, dict):
+            raise ValueError(f"JSONL line {line_number} must contain an object")
+        rows.append(raw)
+    return rows
+
+
 def load_json_dict(path: str | Path) -> dict[str, Any]:
     """Read a JSON object."""
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -529,19 +988,33 @@ def load_json_dict(path: str | Path) -> dict[str, Any]:
 
 __all__ = [
     "FINAL_PLACEMENT_COLUMNS",
+    "CLUSTER_PICKUP_LOG_COLUMNS",
+    "CLUSTER_QUOTA_PLAN_COLUMNS",
+    "RING_PAIR_SUMMARY_COLUMNS",
+    "RING_SUMMARY_COLUMNS",
     "SCHEMA_VERSION",
     "SIMULATION_TRIAL_COLUMNS",
     "SimulationTrialArtifacts",
     "build_simulation_summary_payload",
+    "cluster_pickup_log_rows",
+    "cluster_quota_plan_rows",
     "field_metrics_to_dict",
     "final_placement_rows",
     "load_json_dict",
     "read_csv_dicts",
+    "read_jsonl_dicts",
+    "ring_pair_summary_rows",
+    "ring_summary_rows",
     "simulation_trial_row",
     "validate_final_placement_csv",
+    "write_assembly_timeline_jsonl",
+    "write_cluster_pickup_log_csv",
+    "write_cluster_quota_plan_csv",
     "write_cluster_usage_csv",
     "write_field_metrics_json",
     "write_final_placement_csv",
+    "write_ring_pair_summary_csv",
+    "write_ring_summary_csv",
     "write_session_log_jsonl",
     "write_simulation_outputs",
     "write_work_unit_summary_csv",
