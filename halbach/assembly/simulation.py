@@ -6,6 +6,7 @@ import numpy as np
 
 from halbach.assembly.field_eval import evaluate_fixed_placement
 from halbach.assembly.online_assignment import (
+    run_cluster_mpc_ring_constrained_linear_assignment,
     run_linear_sensitivity_assignment,
     run_quota_ordered_ring_constrained_linear_assignment,
     run_ring_constrained_linear_assignment,
@@ -20,6 +21,7 @@ from halbach.assembly.types import (
     AssemblySlot,
     ClusterAssignment,
     ClusterInventory,
+    ClusterMPCConfig,
     ClusterPickupPolicy,
     EvaluationModel,
     FieldEvaluation,
@@ -232,6 +234,7 @@ def run_linear_sensitivity_baseline(
     magnet_order: Sequence[int] | None = None,
     work_units: Sequence[WorkUnit] | None = None,
     cluster_pickup_policy: ClusterPickupPolicy | None = None,
+    cluster_mpc_config: ClusterMPCConfig | None = None,
     quota_plans: Sequence[RingQuotaPlan] | None = None,
     pickup_seed: int = 0,
     evaluation_model: EvaluationModel = "fixed",
@@ -241,7 +244,7 @@ def run_linear_sensitivity_baseline(
 ) -> LinearSimulationResult:
     """Run the Step 5 greedy Plan C linear sensitivity placement and evaluate it."""
     _validate_slot_table_coverage(slots, sensitivity_table)
-    if cluster_pickup_policy is not None and cluster_pickup_policy != "quota_ordered":
+    if cluster_pickup_policy not in (None, "quota_ordered", "cluster_mpc"):
         raise ValueError(f"unsupported cluster_pickup_policy: {cluster_pickup_policy}")
     if cluster_pickup_policy == "quota_ordered":
         if work_units is None:
@@ -257,6 +260,26 @@ def run_linear_sensitivity_baseline(
             quota_plans,
             assignments=assignments,
             inventory=inventory,
+            allowed_orientation_ids=allowed_orientation_ids,
+            seed=pickup_seed,
+        )
+    elif cluster_pickup_policy == "cluster_mpc":
+        if work_units is None:
+            raise ValueError("cluster_mpc pickup requires work_units")
+        if quota_plans is None:
+            raise ValueError("cluster_mpc pickup requires quota_plans")
+        if assignments is None:
+            raise ValueError("cluster_mpc pickup requires cluster assignments")
+        if inventory is None:
+            raise ValueError("cluster_mpc pickup requires inventory")
+        assignment = run_cluster_mpc_ring_constrained_linear_assignment(
+            sensitivity_table,
+            magnets,
+            work_units,
+            quota_plans,
+            assignments=assignments,
+            inventory=inventory,
+            config=cluster_mpc_config,
             allowed_orientation_ids=allowed_orientation_ids,
             seed=pickup_seed,
         )
@@ -345,6 +368,7 @@ def run_simulation_trial(
     allowed_orientation_ids: Sequence[str] | None = None,
     work_units: Sequence[WorkUnit] | None = None,
     cluster_pickup_policy: ClusterPickupPolicy | None = None,
+    cluster_mpc_config: ClusterMPCConfig | None = None,
     quota_plans: Sequence[RingQuotaPlan] | None = None,
     include_self_consistent: bool = False,
     self_consistent_config: SelfConsistentConfig | None = None,
@@ -376,6 +400,7 @@ def run_simulation_trial(
         allowed_orientation_ids=allowed_orientation_ids,
         work_units=work_units,
         cluster_pickup_policy=cluster_pickup_policy,
+        cluster_mpc_config=cluster_mpc_config,
         quota_plans=quota_plans,
         pickup_seed=seed,
         evaluation_model=evaluation_model,

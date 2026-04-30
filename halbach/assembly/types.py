@@ -25,7 +25,7 @@ BuildWorkUnitMode = Literal[
 ]
 PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
 EvaluationModel = Literal["fixed", "self_consistent"]
-ClusterPickupPolicy = Literal["quota_ordered"]
+ClusterPickupPolicy = Literal["quota_ordered", "cluster_mpc"]
 QuarantineReason = Literal[
     "Q_MEASUREMENT_UNSTABLE",
     "Q_DIRECTION_OUTLIER",
@@ -283,6 +283,34 @@ class ClusterInventory:
 
 
 @dataclass(frozen=True)
+class ClusterMPCConfig:
+    """Weights for Step R6 cluster-level MPC scoring."""
+
+    lambda_field: float = 1.0
+    lambda_quota: float = 1.0
+    lambda_ring_mean: float = 1.0
+    lambda_angle: float = 1.0
+    lambda_future: float = 1.0
+    lambda_mirror: float = 1.0
+
+
+@dataclass(frozen=True)
+class ClusterMPCDecision:
+    """One scored cluster decision for current-ring MPC pickup."""
+
+    cluster_id: str
+    total_score: float
+    field_cost: float
+    quota_cost: float
+    ring_mean_cost: float
+    angle_cost: float
+    future_cost: float
+    mirror_cost: float
+    best_slot_flat_id: int
+    best_orientation_id: str
+
+
+@dataclass(frozen=True)
 class FieldMetrics:
     """
     Plan C vector field homogeneity metrics.
@@ -407,6 +435,8 @@ __all__ = [
     "BuildWorkUnitMode",
     "ClusterAssignment",
     "ClusterInventory",
+    "ClusterMPCConfig",
+    "ClusterMPCDecision",
     "ClusterPickupPolicy",
     "ClusterStats",
     "FieldEvaluation",

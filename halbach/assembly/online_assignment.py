@@ -9,6 +9,9 @@ from halbach.assembly.inventory import decrement_cluster
 from halbach.assembly.types import (
     ClusterAssignment,
     ClusterInventory,
+    ClusterMPCConfig,
+    ClusterMPCDecision,
+    ClusterStats,
     LinearAssignmentResult,
     LinearCandidate,
     MagnetError,
@@ -86,6 +89,41 @@ def _slot_index(table: SensitivityTable) -> dict[int, int]:
 
 def _orientation_index(table: SensitivityTable) -> dict[str, int]:
     return {orientation_id: idx for idx, orientation_id in enumerate(table.orientation_id)}
+
+
+def _angle_bin_from_cluster_id(cluster_id: str) -> int:
+    try:
+        angle_part = cluster_id.split("_A", maxsplit=1)[1]
+    except IndexError as exc:
+        raise ValueError(f"cluster_id must use Sxx_Ayy format: {cluster_id}") from exc
+    return int(angle_part)
+
+
+def _validate_cluster_stats(stats: ClusterStats) -> None:
+    if stats.count < 0:
+        raise ValueError(f"cluster {stats.cluster_id} count must be non-negative")
+    if stats.mean.shape != (3,):
+        raise ValueError(f"cluster {stats.cluster_id} mean must have shape (3,)")
+    if stats.cov.shape != (3, 3):
+        raise ValueError(f"cluster {stats.cluster_id} cov must have shape (3, 3)")
+    if not np.all(np.isfinite(stats.mean)):
+        raise ValueError(f"cluster {stats.cluster_id} mean must contain finite values")
+    if not np.all(np.isfinite(stats.cov)):
+        raise ValueError(f"cluster {stats.cluster_id} cov must contain finite values")
+
+
+def _validate_cluster_mpc_config(config: ClusterMPCConfig) -> None:
+    weights = {
+        "lambda_field": config.lambda_field,
+        "lambda_quota": config.lambda_quota,
+        "lambda_ring_mean": config.lambda_ring_mean,
+        "lambda_angle": config.lambda_angle,
+        "lambda_future": config.lambda_future,
+        "lambda_mirror": config.lambda_mirror,
+    }
+    for name, value in weights.items():
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and >= 0")
 
 
 def score_linear_candidates(
@@ -171,6 +209,120 @@ def choose_best_linear_candidate(
         error,
         allowed_orientation_ids=allowed_orientation_ids,
     )[0]
+
+
+def score_cluster_for_current_ring(
+    table: SensitivityTable,
+    residual: FloatArray,
+    remaining_slot_flat_ids: Sequence[int],
+    cluster_stats: ClusterStats,
+    quota_plan: RingQuotaPlan,
+    current_ring_cluster_usage: dict[str, int],
+    current_ring_epsilon_sum: float,
+    current_ring_count: int,
+    remaining_cluster_counts: dict[str, int],
+    future_cluster_demand: dict[str, int],
+    config: ClusterMPCConfig,
+    *,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    mirror_mean_epsilon: float | None = None,
+) -> ClusterMPCDecision:
+    """Score one cluster as the next pickup candidate for the current ring."""
+    _validate_table(table)
+    _validate_cluster_stats(cluster_stats)
+    _validate_cluster_mpc_config(config)
+    residual_arr = np.asarray(residual, dtype=np.float64)
+    if residual_arr.shape != (table.C.shape[2],):
+        raise ValueError(f"residual must have shape ({table.C.shape[2]},)")
+    if not np.all(np.isfinite(residual_arr)):
+        raise ValueError("residual must contain finite values")
+    if current_ring_count < 0:
+        raise ValueError("current_ring_count must be non-negative")
+    if not math.isfinite(current_ring_epsilon_sum):
+        raise ValueError("current_ring_epsilon_sum must be finite")
+    if not remaining_slot_flat_ids:
+        raise ValueError("remaining_slot_flat_ids must be non-empty")
+    if remaining_cluster_counts.get(cluster_stats.cluster_id, 0) <= 0:
+        raise ValueError(f"cluster {cluster_stats.cluster_id} has no remaining magnets")
+
+    slot_to_idx = _slot_index(table)
+    orientation_to_idx = _orientation_index(table)
+    orientation_ids = (
+        tuple(table.orientation_id)
+        if allowed_orientation_ids is None
+        else tuple(allowed_orientation_ids)
+    )
+    if not orientation_ids:
+        raise ValueError("allowed_orientation_ids must be non-empty")
+
+    mean = np.asarray(cluster_stats.mean, dtype=np.float64)
+    cov = np.asarray(cluster_stats.cov, dtype=np.float64)
+    best_field_cost = math.inf
+    best_slot_id = int(remaining_slot_flat_ids[0])
+    best_orientation_id = orientation_ids[0]
+    for slot_flat_id in remaining_slot_flat_ids:
+        slot_key = int(slot_flat_id)
+        if slot_key not in slot_to_idx:
+            raise KeyError(f"unknown slot_flat_id: {slot_key}")
+        slot_idx = slot_to_idx[slot_key]
+        for orientation_id in orientation_ids:
+            if orientation_id not in orientation_to_idx:
+                raise KeyError(f"unknown orientation_id: {orientation_id}")
+            orientation_idx = orientation_to_idx[orientation_id]
+            C_j = np.asarray(table.C[slot_idx, orientation_idx, :, :], dtype=np.float64)
+            expected = residual_arr + C_j @ mean
+            trace_term = float(np.trace((C_j.T @ C_j) @ cov))
+            field_cost = float(np.dot(expected, expected) + trace_term)
+            if field_cost < best_field_cost:
+                best_field_cost = field_cost
+                best_slot_id = slot_key
+                best_orientation_id = orientation_id
+
+    cluster_id = cluster_stats.cluster_id
+    planned_count = int(quota_plan.quota_by_cluster.get(cluster_id, 0))
+    used_count = int(current_ring_cluster_usage.get(cluster_id, 0))
+    quota_overuse = max(0, used_count + 1 - planned_count)
+    quota_cost = float(quota_overuse * quota_overuse)
+
+    projected_count = current_ring_count + 1
+    projected_mean = (current_ring_epsilon_sum + float(cluster_stats.mean[0])) / projected_count
+    mean_delta = projected_mean - float(quota_plan.target_mean_epsilon)
+    ring_mean_cost = float(mean_delta * mean_delta)
+
+    angle_delta = float(_angle_bin_from_cluster_id(cluster_id)) - float(
+        quota_plan.expected_mean_angle_bin
+    )
+    angle_cost = float(angle_delta * angle_delta)
+
+    projected_remaining = int(remaining_cluster_counts.get(cluster_id, 0)) - 1
+    future_shortage = max(0, int(future_cluster_demand.get(cluster_id, 0)) - projected_remaining)
+    future_cost = float(future_shortage * future_shortage)
+
+    mirror_cost = 0.0
+    if mirror_mean_epsilon is not None:
+        mirror_delta = projected_mean - float(mirror_mean_epsilon)
+        mirror_cost = float(mirror_delta * mirror_delta)
+
+    total_score = float(
+        config.lambda_field * best_field_cost
+        + config.lambda_quota * quota_cost
+        + config.lambda_ring_mean * ring_mean_cost
+        + config.lambda_angle * angle_cost
+        + config.lambda_future * future_cost
+        + config.lambda_mirror * mirror_cost
+    )
+    return ClusterMPCDecision(
+        cluster_id=cluster_id,
+        total_score=total_score,
+        field_cost=best_field_cost,
+        quota_cost=quota_cost,
+        ring_mean_cost=ring_mean_cost,
+        angle_cost=angle_cost,
+        future_cost=future_cost,
+        mirror_cost=mirror_cost,
+        best_slot_flat_id=best_slot_id,
+        best_orientation_id=best_orientation_id,
+    )
 
 
 def run_linear_sensitivity_assignment(
@@ -334,6 +486,19 @@ def _validate_quota_work_units(
             )
 
 
+def _future_quota_demand(
+    quota_plans: Sequence[RingQuotaPlan],
+    start_index: int,
+) -> dict[str, int]:
+    demand: dict[str, int] = {}
+    for plan in quota_plans[start_index:]:
+        for cluster_id, count in plan.quota_by_cluster.items():
+            if count < 0:
+                raise ValueError(f"quota count for {cluster_id} must be non-negative")
+            demand[cluster_id] = demand.get(cluster_id, 0) + int(count)
+    return demand
+
+
 def build_quota_ordered_magnet_order(
     magnets: Sequence[VirtualMagnet],
     assignments: Sequence[ClusterAssignment],
@@ -494,6 +659,127 @@ def run_quota_ordered_ring_constrained_linear_assignment(
     )
 
 
+def run_cluster_mpc_ring_constrained_linear_assignment(
+    table: SensitivityTable,
+    magnets: Sequence[VirtualMagnet],
+    work_units: Sequence[WorkUnit],
+    quota_plans: Sequence[RingQuotaPlan],
+    *,
+    assignments: Sequence[ClusterAssignment],
+    inventory: ClusterInventory,
+    config: ClusterMPCConfig | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    seed: int = 0,
+) -> LinearAssignmentResult:
+    """Run Step R6 cluster-level MPC pickup with ring-constrained placement."""
+    _validate_table(table)
+    mpc_config = ClusterMPCConfig() if config is None else config
+    _validate_cluster_mpc_config(mpc_config)
+    ordered_unit_slots = _ordered_unit_slot_ids(table, work_units)
+    _validate_quota_work_units(work_units, quota_plans)
+    if len(magnets) != table.slot_flat_id.shape[0]:
+        raise ValueError("magnets count must match sensitivity slot count")
+    magnet_by_id = {magnet.magnet_id: magnet for magnet in magnets}
+    if len(magnet_by_id) != len(magnets):
+        raise ValueError("magnet_id values must be unique")
+
+    pools = _assignment_cluster_pools(assignments, magnets, seed=seed)
+    residual = np.zeros(table.C.shape[2], dtype=np.float64)
+    placements: list[Placement] = []
+    current_inventory = inventory
+    completed_mirror_means: dict[str, float] = {}
+
+    for unit_index, (unit_slots, quota_plan) in enumerate(
+        zip(ordered_unit_slots, quota_plans, strict=True)
+    ):
+        remaining_unit_slot_ids = list(unit_slots)
+        current_usage: dict[str, int] = {}
+        ring_epsilon_sum = 0.0
+        ring_count = 0
+        future_demand = _future_quota_demand(quota_plans, unit_index + 1)
+        mirror_mean = (
+            None
+            if quota_plan.mirror_pair_id is None
+            else completed_mirror_means.get(quota_plan.mirror_pair_id)
+        )
+        while remaining_unit_slot_ids:
+            remaining_counts = {
+                cluster_id: len(pool) for cluster_id, pool in pools.items() if len(pool) > 0
+            }
+            if not remaining_counts:
+                raise ValueError("cluster_mpc exhausted all cluster pools before filling slots")
+
+            decisions: list[ClusterMPCDecision] = []
+            for cluster_id in sorted(remaining_counts):
+                if cluster_id not in current_inventory.clusters:
+                    raise ValueError(f"cluster {cluster_id} is missing from inventory")
+                decision = score_cluster_for_current_ring(
+                    table,
+                    residual,
+                    remaining_unit_slot_ids,
+                    current_inventory.clusters[cluster_id],
+                    quota_plan,
+                    current_usage,
+                    ring_epsilon_sum,
+                    ring_count,
+                    remaining_counts,
+                    future_demand,
+                    mpc_config,
+                    allowed_orientation_ids=allowed_orientation_ids,
+                    mirror_mean_epsilon=mirror_mean,
+                )
+                decisions.append(decision)
+            selected = min(
+                decisions, key=lambda decision: (decision.total_score, decision.cluster_id)
+            )
+            pool = pools[selected.cluster_id]
+            if not pool:
+                raise ValueError(
+                    f"cluster_mpc selected cluster {selected.cluster_id} but pool is empty"
+                )
+            magnet_id = pool.pop(0)
+            magnet = magnet_by_id[magnet_id]
+            candidate = choose_best_linear_candidate(
+                table,
+                residual,
+                remaining_unit_slot_ids,
+                magnet.measured_error,
+                allowed_orientation_ids=allowed_orientation_ids,
+            )
+            current_inventory = decrement_cluster(current_inventory, selected.cluster_id)
+            residual = np.ascontiguousarray(residual + candidate.contribution, dtype=np.float64)
+            remaining_unit_slot_ids.remove(candidate.slot_flat_id)
+            current_usage[selected.cluster_id] = current_usage.get(selected.cluster_id, 0) + 1
+            ring_epsilon_sum += float(magnet.measured_error.epsilon_parallel)
+            ring_count += 1
+            placements.append(
+                Placement(
+                    slot_flat_id=candidate.slot_flat_id,
+                    magnet_id=magnet.magnet_id,
+                    orientation_id=candidate.orientation_id,
+                    cluster_requested=selected.cluster_id,
+                    insert_order=len(placements),
+                    decision_engine="cluster_mpc",
+                )
+            )
+        if quota_plan.mirror_pair_id is not None and ring_count > 0:
+            completed_mirror_means.setdefault(
+                quota_plan.mirror_pair_id,
+                ring_epsilon_sum / ring_count,
+            )
+
+    linear_score = float(np.dot(residual, residual))
+    if not math.isfinite(linear_score):
+        raise ValueError("cluster_mpc assignment produced a non-finite score")
+    return LinearAssignmentResult(
+        placements=tuple(placements),
+        residual=residual,
+        linear_score=linear_score,
+        remaining_slot_flat_ids=(),
+        inventory=current_inventory,
+    )
+
+
 def cluster_usage_from_placements(placements: Sequence[Placement]) -> dict[str, int]:
     """Count cluster_requested values in a completed placement sequence."""
     usage: dict[str, int] = {}
@@ -519,8 +805,10 @@ __all__ = [
     "choose_best_linear_candidate",
     "cluster_usage_from_placements",
     "planned_cluster_counts",
+    "run_cluster_mpc_ring_constrained_linear_assignment",
     "run_quota_ordered_ring_constrained_linear_assignment",
     "run_ring_constrained_linear_assignment",
     "run_linear_sensitivity_assignment",
+    "score_cluster_for_current_ring",
     "score_linear_candidates",
 ]
