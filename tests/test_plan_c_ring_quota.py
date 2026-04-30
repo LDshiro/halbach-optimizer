@@ -5,6 +5,7 @@ from halbach.assembly.ring_quota import (
     compute_inventory_target_mean_epsilon,
     compute_ring_importance,
     plan_ring_cluster_quotas,
+    plan_work_unit_cluster_quotas,
 )
 from halbach.assembly.types import (
     AssemblySlot,
@@ -13,6 +14,7 @@ from halbach.assembly.types import (
     RingKey,
     RingQuotaPlannerConfig,
 )
+from halbach.assembly.work_units import build_work_units
 
 
 def _slots(*, K: int, N: int, R: int = 1) -> list[AssemblySlot]:
@@ -158,6 +160,45 @@ def test_mirror_pair_plans_have_balanced_strength_means() -> None:
     assert left.mirror_pair_id == "P000_R000"
     assert right.mirror_pair_id == "P000_R000"
     assert left.expected_mean_epsilon == pytest.approx(right.expected_mean_epsilon)
+
+
+def test_plan_work_unit_cluster_quotas_aggregates_mirror_pair_units() -> None:
+    slots = _slots(K=4, N=2)
+    inventory = _matrix_inventory([-0.02, 0.02], [0, 1, 2, 3], count_per_cluster=1)
+    work_units = build_work_units(slots, "mirror_ring_pair")
+
+    base_plans = plan_ring_cluster_quotas(slots, inventory)
+    aligned = plan_work_unit_cluster_quotas(slots, inventory, work_units)
+
+    assert [plan.work_unit_id for plan in aligned] == ["W_PAIR000_R000", "W_PAIR001_R000"]
+    assert [plan.target_count for plan in aligned] == [4, 4]
+    assert all(plan.mirror_pair_id is None for plan in aligned)
+    assert sum(plan.target_count for plan in aligned) == len(slots)
+    assert _cluster_usage(aligned) == _cluster_usage(base_plans)
+
+    outer_pair = [
+        plan
+        for plan in base_plans
+        if plan.ring_key in {RingKey(layer_id=0, ring_id=0), RingKey(layer_id=3, ring_id=0)}
+    ]
+    expected_outer_mean = sum(
+        plan.expected_mean_epsilon * plan.target_count for plan in outer_pair
+    ) / sum(plan.target_count for plan in outer_pair)
+    assert aligned[0].expected_mean_epsilon == pytest.approx(expected_outer_mean)
+
+
+def test_plan_work_unit_cluster_quotas_aggregates_all_slots_unit() -> None:
+    slots = _slots(K=3, N=2)
+    inventory = _matrix_inventory([-0.01, 0.01], [0, 1, 2], count_per_cluster=1)
+    work_units = build_work_units(slots, "all_slots")
+
+    aligned = plan_work_unit_cluster_quotas(slots, inventory, work_units)
+
+    assert len(aligned) == 1
+    assert aligned[0].work_unit_id == "W_ALL"
+    assert aligned[0].target_count == len(slots)
+    assert sum(aligned[0].quota_by_cluster.values()) == len(slots)
+    assert aligned[0].mirror_pair_id is None
 
 
 def test_plan_ring_cluster_quotas_rejects_insufficient_inventory() -> None:

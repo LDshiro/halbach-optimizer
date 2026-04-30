@@ -94,6 +94,7 @@ from halbach.assembly.ring_quota import (
     compute_inventory_target_mean_epsilon,
     compute_ring_importance,
     plan_ring_cluster_quotas,
+    plan_work_unit_cluster_quotas,
 )
 from halbach.assembly.ring_summary import (
     ring_pair_summary_from_ring_summaries,
@@ -304,6 +305,7 @@ __all__ = [
     "parse_serial_measurement_line",
     "planned_cluster_counts",
     "plan_ring_cluster_quotas",
+    "plan_work_unit_cluster_quotas",
     "plan_c_config_from_dict",
     "plan_c_config_to_dict",
     "read_csv_dicts",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,6 +14,7 @@ from halbach.assembly.types import (
     RingKey,
     RingQuotaPlan,
     RingQuotaPlannerConfig,
+    WorkUnit,
 )
 from halbach.assembly.work_units import outer_to_inner_layer_order
 
@@ -327,8 +328,166 @@ def plan_ring_cluster_quotas(
     return tuple(plans)
 
 
+def _plan_weighted_mean(
+    plans: Sequence[RingQuotaPlan],
+    getter: Callable[[RingQuotaPlan], float],
+) -> float:
+    total_count = sum(plan.target_count for plan in plans)
+    if total_count <= 0:
+        raise ValueError("aggregated quota plan target_count must be positive")
+    weighted_sum = sum(float(getter(plan)) * plan.target_count for plan in plans)
+    return float(weighted_sum / total_count)
+
+
+def _merge_quota_by_cluster(plans: Sequence[RingQuotaPlan]) -> dict[str, int]:
+    quota: dict[str, int] = {}
+    for plan in plans:
+        for cluster_id, count in plan.quota_by_cluster.items():
+            if count < 0:
+                raise ValueError(f"quota count for {cluster_id} must be non-negative")
+            quota[cluster_id] = quota.get(cluster_id, 0) + int(count)
+    return dict(sorted((cluster_id, count) for cluster_id, count in quota.items() if count > 0))
+
+
+def _unit_ring_keys(
+    unit: WorkUnit,
+    *,
+    slot_to_ring: Mapping[int, RingKey],
+    ring_slot_ids: Mapping[RingKey, set[int]],
+) -> tuple[RingKey, ...]:
+    unit_slot_ids = set(int(slot_id) for slot_id in unit.slot_flat_ids)
+    if len(unit_slot_ids) != len(unit.slot_flat_ids):
+        raise ValueError(f"work unit {unit.work_unit_id} contains duplicate slots")
+    ring_keys = tuple(sorted({slot_to_ring[slot_id] for slot_id in unit_slot_ids}))
+    for ring_key in ring_keys:
+        ring_ids = ring_slot_ids[ring_key]
+        covered = unit_slot_ids & ring_ids
+        if covered != ring_ids:
+            raise ValueError(
+                "quota aggregation requires work units to contain complete physical rings; "
+                f"work_unit_id={unit.work_unit_id}, ring={ring_key}"
+            )
+    expected_slots = set().union(*(ring_slot_ids[ring_key] for ring_key in ring_keys))
+    if unit_slot_ids != expected_slots:
+        raise ValueError(
+            "quota aggregation found slot coverage mismatch for work unit " f"{unit.work_unit_id}"
+        )
+    return ring_keys
+
+
+def _aggregate_quota_plans(
+    unit: WorkUnit,
+    plans: Sequence[RingQuotaPlan],
+) -> RingQuotaPlan:
+    if not plans:
+        raise ValueError(f"work unit {unit.work_unit_id} has no source quota plans")
+    target_count = sum(plan.target_count for plan in plans)
+    if target_count != len(unit.slot_flat_ids):
+        raise ValueError(
+            f"aggregated quota target_count mismatch for {unit.work_unit_id}; "
+            f"target={target_count}, unit_slots={len(unit.slot_flat_ids)}"
+        )
+    quota_by_cluster = _merge_quota_by_cluster(plans)
+    if sum(quota_by_cluster.values()) != target_count:
+        raise ValueError(
+            f"aggregated quota count mismatch for {unit.work_unit_id}; "
+            f"target={target_count}, quota_sum={sum(quota_by_cluster.values())}"
+        )
+    first = plans[0]
+    if len(plans) == 1:
+        mirror_pair_id = first.mirror_pair_id
+    else:
+        mirror_pair_id = None
+    return RingQuotaPlan(
+        ring_key=first.ring_key,
+        layer_id=first.layer_id,
+        ring_id=first.ring_id,
+        work_unit_id=unit.work_unit_id,
+        target_count=target_count,
+        target_mean_epsilon=_plan_weighted_mean(
+            plans,
+            lambda plan: plan.target_mean_epsilon,
+        ),
+        ring_importance=_plan_weighted_mean(plans, lambda plan: plan.ring_importance),
+        allowed_clusters=tuple(quota_by_cluster),
+        quota_by_cluster=quota_by_cluster,
+        expected_mean_epsilon=_plan_weighted_mean(
+            plans,
+            lambda plan: plan.expected_mean_epsilon,
+        ),
+        expected_mean_angle_bin=_plan_weighted_mean(
+            plans,
+            lambda plan: plan.expected_mean_angle_bin,
+        ),
+        expected_angle_error=_plan_weighted_mean(plans, lambda plan: plan.expected_angle_error),
+        mirror_pair_id=mirror_pair_id,
+    )
+
+
+def plan_work_unit_cluster_quotas(
+    slots: Sequence[AssemblySlot],
+    inventory: ClusterInventory,
+    work_units: Sequence[WorkUnit],
+    config: RingQuotaPlannerConfig | None = None,
+) -> tuple[RingQuotaPlan, ...]:
+    """
+    Return cluster quota plans aligned 1:1 with assembly work units.
+
+    The Level 1 planner works per physical ring. Ring-by-ring work units can use those
+    plans directly, while paired/grouped work units need the corresponding ring plans
+    summed into one quota plan per work unit.
+    """
+    _validate_slots(slots)
+    if not work_units:
+        raise ValueError("work_units must be non-empty")
+    base_plans = plan_ring_cluster_quotas(slots, inventory, config)
+    plan_by_ring = {plan.ring_key: plan for plan in base_plans}
+    if len(plan_by_ring) != len(base_plans):
+        raise ValueError("ring quota plans contain duplicate ring keys")
+
+    rings = _ring_slots(slots)
+    ring_slot_ids = {
+        ring_key: {slot.slot_flat_id for slot in ring_slots}
+        for ring_key, ring_slots in rings.items()
+    }
+    slot_to_ring: dict[int, RingKey] = {}
+    for ring_key, slot_ids in ring_slot_ids.items():
+        for slot_id in slot_ids:
+            slot_to_ring[slot_id] = ring_key
+
+    table_slot_ids = set(slot_to_ring)
+    seen_slots: set[int] = set()
+    aligned_plans: list[RingQuotaPlan] = []
+    for unit in work_units:
+        unit_slot_ids = set(int(slot_id) for slot_id in unit.slot_flat_ids)
+        unknown = sorted(unit_slot_ids - table_slot_ids)
+        if unknown:
+            raise ValueError(f"work unit {unit.work_unit_id} references unknown slots: {unknown}")
+        duplicate_across_units = sorted(seen_slots & unit_slot_ids)
+        if duplicate_across_units:
+            raise ValueError(
+                f"work unit {unit.work_unit_id} reuses slots: {duplicate_across_units}"
+            )
+        seen_slots.update(unit_slot_ids)
+        ring_keys = _unit_ring_keys(
+            unit,
+            slot_to_ring=slot_to_ring,
+            ring_slot_ids=ring_slot_ids,
+        )
+        aligned_plans.append(
+            _aggregate_quota_plans(unit, tuple(plan_by_ring[ring_key] for ring_key in ring_keys))
+        )
+
+    if seen_slots != table_slot_ids:
+        missing = sorted(table_slot_ids - seen_slots)
+        extra = sorted(seen_slots - table_slot_ids)
+        raise ValueError(f"work unit slot coverage mismatch; missing={missing}, extra={extra}")
+    return tuple(aligned_plans)
+
+
 __all__ = [
     "compute_inventory_target_mean_epsilon",
     "compute_ring_importance",
     "plan_ring_cluster_quotas",
+    "plan_work_unit_cluster_quotas",
 ]

@@ -28,7 +28,7 @@ from app.plan_c_run_selector import (
 from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import SimulationTrialArtifacts, write_simulation_outputs
-from halbach.assembly.ring_quota import plan_ring_cluster_quotas
+from halbach.assembly.ring_quota import plan_work_unit_cluster_quotas
 from halbach.assembly.self_consistent_assignment import self_consistent_config_from_run
 from halbach.assembly.sensitivity import compute_sensitivity_table
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
@@ -45,10 +45,6 @@ from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
 from halbach.constants import FACTOR
 from halbach.geom import build_roi_points
 from halbach.run_io import load_run
-
-
-def _matching_quota_plans(work_unit_ids: list[str], quota_work_unit_ids: list[str]) -> bool:
-    return work_unit_ids == quota_work_unit_ids
 
 
 def _run_ring_simulation(
@@ -72,7 +68,6 @@ def _run_ring_simulation(
     raw_slots = build_assembly_slots(run)
     work_units = build_work_units(raw_slots, work_unit_mode)
     slots = assign_work_unit_ids(raw_slots, work_units)
-    work_unit_ids = [unit.work_unit_id for unit in work_units]
     roi_points = build_roi_points(
         float(roi_r),
         0.01,
@@ -122,13 +117,7 @@ def _run_ring_simulation(
             angle_count=int(angle_count),
         )
         inventory = build_cluster_inventory(magnets, assignments)
-        quota_plans = plan_ring_cluster_quotas(slots, inventory)
-        quota_work_unit_ids = [plan.work_unit_id for plan in quota_plans]
-        if not _matching_quota_plans(work_unit_ids, quota_work_unit_ids):
-            raise ValueError(
-                "R10 cluster pickup currently requires ring_by_ring_outer_to_inner work units; "
-                f"work_units={work_unit_ids[:3]}..., quota_plans={quota_work_unit_ids[:3]}..."
-            )
+        quota_plans = plan_work_unit_cluster_quotas(slots, inventory, work_units)
 
         result = run_simulation_trial(
             slots,
