@@ -236,6 +236,21 @@ def build_summary_ui_payload(summary: dict[str, object]) -> dict[str, object]:
             if isinstance(summary_block, dict)
             else None
         ),
+        "self_consistent_trials": (
+            summary_block.get("self_consistent_trials")
+            if isinstance(summary_block, dict)
+            else None
+        ),
+        "rms_ratio_self_consistent_over_linear_mean": (
+            summary_block.get("rms_ratio_self_consistent_over_linear_mean")
+            if isinstance(summary_block, dict)
+            else None
+        ),
+        "self_consistent_improved_over_linear_count": (
+            summary_block.get("self_consistent_improved_over_linear_count")
+            if isinstance(summary_block, dict)
+            else None
+        ),
         "trial_rows": trials if isinstance(trials, list) else [],
     }
 

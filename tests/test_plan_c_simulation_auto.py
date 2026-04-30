@@ -158,3 +158,44 @@ def test_plan_c_simulate_cli_writes_summary_json(tmp_path: Path) -> None:
     assert payload["metadata"]["n_slots"] == len(build_assembly_slots(run))
     assert (out_dir / "simulation_trials.csv").exists()
     assert (out_dir / "final_placement_trial_000.csv").exists()
+
+
+def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=2)
+    out_dir = tmp_path / "plan_c_sim_sc"
+
+    simulate_main(
+        [
+            "--run",
+            str(run.run_dir),
+            "--out",
+            str(out_dir),
+            "--engine",
+            "sequential_self_consistent",
+            "--trials",
+            "1",
+            "--seed",
+            "9",
+            "--strength-sigma",
+            "0.001",
+            "--direction-sigma",
+            "0.0005",
+            "--roi-r",
+            "0.02",
+            "--roi-mode",
+            "surface-fibonacci",
+            "--roi-samples",
+            "3",
+            "--sc-chi",
+            "0.0",
+            "--sc-max-linear-candidates",
+            "2",
+        ]
+    )
+
+    payload = json.loads((out_dir / "simulation_summary.json").read_text(encoding="utf-8"))
+    assert payload["metadata"]["engine"] == "sequential_self_consistent"
+    assert payload["summary"]["self_consistent_trials"] == 1
+    assert "rms_ratio_self_consistent_over_linear_mean" in payload["summary"]
+    assert payload["trials"][0]["self_consistent_evaluated_count"] > 0
+    assert "self_consistent_rms_homogeneity_ppm" in payload["trials"][0]

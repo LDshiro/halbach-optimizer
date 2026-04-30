@@ -19,35 +19,51 @@ from halbach.cli.plan_c_simulate import main as simulate_main
 def _run_simulation(
     run_path: str,
     out_dir: str,
+    engine: str,
     trials: int,
     seed: int,
     roi_r: float,
     roi_samples: int,
     strength_sigma: float,
     direction_sigma: float,
+    sc_chi: float,
+    sc_iters: int,
+    sc_max_linear_candidates: int,
 ) -> None:
-    simulate_main(
-        [
-            "--run",
-            run_path,
-            "--out",
-            out_dir,
-            "--trials",
-            str(trials),
-            "--seed",
-            str(seed),
-            "--roi-r",
-            str(roi_r),
-            "--roi-mode",
-            "surface-fibonacci",
-            "--roi-samples",
-            str(roi_samples),
-            "--strength-sigma",
-            str(strength_sigma),
-            "--direction-sigma",
-            str(direction_sigma),
-        ]
-    )
+    args = [
+        "--run",
+        run_path,
+        "--out",
+        out_dir,
+        "--engine",
+        engine,
+        "--trials",
+        str(trials),
+        "--seed",
+        str(seed),
+        "--roi-r",
+        str(roi_r),
+        "--roi-mode",
+        "surface-fibonacci",
+        "--roi-samples",
+        str(roi_samples),
+        "--strength-sigma",
+        str(strength_sigma),
+        "--direction-sigma",
+        str(direction_sigma),
+    ]
+    if engine == "sequential_self_consistent":
+        args.extend(
+            [
+                "--sc-chi",
+                str(sc_chi),
+                "--sc-iters",
+                str(sc_iters),
+                "--sc-max-linear-candidates",
+                str(sc_max_linear_candidates),
+            ]
+        )
+    simulate_main(args)
 
 
 st.set_page_config(page_title="Plan C Simulation", layout="wide")
@@ -71,12 +87,20 @@ with st.sidebar:
         "Output directory",
         value=default_plan_c_child_output_dir(run_path, "plan_c_sim"),
     )
+    engine = st.selectbox(
+        "Plan C engine",
+        ["linear_sensitivity", "sequential_self_consistent"],
+        index=0,
+    )
     trials = st.number_input("Trials", min_value=1, max_value=100, value=3, step=1)
     seed = st.number_input("Seed", min_value=0, value=1234, step=1)
     roi_r = st.number_input("ROI radius [m]", min_value=0.001, value=0.05, step=0.01)
     roi_samples = st.number_input("ROI samples", min_value=1, value=100, step=10)
     strength_sigma = st.number_input("Strength sigma", min_value=0.0, value=0.01, step=0.001)
     direction_sigma = st.number_input("Direction sigma", min_value=0.0, value=0.001, step=0.0001, format="%.5f")
+    sc_chi = st.number_input("SC chi", min_value=0.0, value=0.0, step=0.001, format="%.6f")
+    sc_iters = st.number_input("SC iterations", min_value=0, max_value=200, value=30, step=1)
+    sc_max_linear_candidates = st.number_input("SC top-k", min_value=1, max_value=64, value=8, step=1)
     run_clicked = st.button("Run Simulation", type="primary")
 
 if run_clicked:
@@ -85,12 +109,16 @@ if run_clicked:
             _run_simulation(
                 run_path,
                 out_dir,
+                str(engine),
                 int(trials),
                 int(seed),
                 float(roi_r),
                 int(roi_samples),
                 float(strength_sigma),
                 float(direction_sigma),
+                float(sc_chi),
+                int(sc_iters),
+                int(sc_max_linear_candidates),
             )
         st.success("Simulation completed")
     except Exception as exc:  # pragma: no cover - UI safety net
@@ -108,6 +136,20 @@ cols[0].metric("Trials", payload["trials"] or 0)
 cols[1].metric("RMS Ratio Mean", "n/a" if payload["rms_ratio_mean"] is None else f"{float(payload['rms_ratio_mean']):.4g}")
 cols[2].metric("Linear Improved", payload["linear_improved_count"] or 0)
 cols[3].metric("Engine", payload["engine"] or "unknown")
+
+if payload["self_consistent_trials"]:
+    sc_cols = st.columns(3)
+    sc_cols[0].metric("SC Trials", payload["self_consistent_trials"])
+    sc_cols[1].metric(
+        "SC / Linear RMS",
+        "n/a"
+        if payload["rms_ratio_self_consistent_over_linear_mean"] is None
+        else f"{float(payload['rms_ratio_self_consistent_over_linear_mean']):.4g}",
+    )
+    sc_cols[2].metric(
+        "SC Improved",
+        payload["self_consistent_improved_over_linear_count"] or 0,
+    )
 
 trial_rows = payload["trial_rows"]
 if trial_rows:

@@ -137,6 +137,9 @@ def test_summary_ui_payload_normalizes_simulation_summary() -> None:
                 "trials": 2,
                 "rms_ratio_mean": 0.8,
                 "linear_improved_count": 1,
+                "self_consistent_trials": 2,
+                "rms_ratio_self_consistent_over_linear_mean": 0.95,
+                "self_consistent_improved_over_linear_count": 1,
             },
             "trials": [{"trial_id": 0}, {"trial_id": 1}],
         }
@@ -147,4 +150,7 @@ def test_summary_ui_payload_normalizes_simulation_summary() -> None:
     assert payload["trials"] == 2
     assert payload["rms_ratio_mean"] == 0.8
     assert payload["linear_improved_count"] == 1
+    assert payload["self_consistent_trials"] == 2
+    assert payload["rms_ratio_self_consistent_over_linear_mean"] == 0.95
+    assert payload["self_consistent_improved_over_linear_count"] == 1
     assert len(payload["trial_rows"]) == 2

@@ -8,6 +8,7 @@ from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import SimulationTrialArtifacts, write_simulation_outputs
 from halbach.assembly.sensitivity import compute_sensitivity_table, load_sensitivity_table
+from halbach.assembly.self_consistent_assignment import SelfConsistentConfig
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
 from halbach.assembly.slots import build_assembly_slots
 from halbach.assembly.variation import generate_virtual_magnets
@@ -25,9 +26,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=0, help="base RNG seed")
     ap.add_argument(
         "--engine",
-        choices=["linear_sensitivity"],
+        choices=["linear_sensitivity", "sequential_self_consistent"],
         default="linear_sensitivity",
         help="Plan C assignment engine",
+    )
+    ap.add_argument(
+        "--sc-chi",
+        type=float,
+        default=0.0,
+        help="sequential_self_consistent susceptibility-like chi",
+    )
+    ap.add_argument(
+        "--sc-iters",
+        type=int,
+        default=30,
+        help="sequential_self_consistent fixed-point iterations",
+    )
+    ap.add_argument(
+        "--sc-max-linear-candidates",
+        type=int,
+        default=8,
+        help="linear top-k candidates re-evaluated by sequential_self_consistent",
     )
     ap.add_argument("--strength-mu", type=float, default=0.0, help="iid strength error mean")
     ap.add_argument("--strength-sigma", type=float, default=0.01, help="iid strength error sigma")
@@ -83,6 +102,18 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if int(args.trials) <= 0:
         raise ValueError("--trials must be positive")
+    engine = str(args.engine)
+    include_self_consistent = engine == "sequential_self_consistent"
+    self_consistent_config = (
+        SelfConsistentConfig(
+            chi=float(args.sc_chi),
+            iters=int(args.sc_iters),
+            max_linear_candidates=int(args.sc_max_linear_candidates),
+            factor=float(args.factor),
+        )
+        if include_self_consistent
+        else None
+    )
 
     run_path = Path(str(args.run))
     out_dir = Path(str(args.out))
@@ -153,6 +184,8 @@ def main(argv: list[str] | None = None) -> None:
             seed=trial_seed,
             assignments=assignments,
             inventory=inventory,
+            include_self_consistent=include_self_consistent,
+            self_consistent_config=self_consistent_config,
             factor=float(args.factor),
         )
         artifacts.append(
@@ -184,6 +217,18 @@ def main(argv: list[str] | None = None) -> None:
             },
             "direction_sigma_1": sigma1,
             "direction_sigma_2": sigma2,
+            "self_consistent": (
+                None
+                if self_consistent_config is None
+                else {
+                    "chi": self_consistent_config.chi,
+                    "Nd": self_consistent_config.Nd,
+                    "volume_m3": self_consistent_config.volume_m3,
+                    "iters": self_consistent_config.iters,
+                    "omega": self_consistent_config.omega,
+                    "max_linear_candidates": self_consistent_config.max_linear_candidates,
+                }
+            ),
         },
     )
     summary_path = written["simulation_summary"]
