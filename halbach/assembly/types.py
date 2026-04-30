@@ -155,6 +155,12 @@ class RingPairSummary:
     upper_count: int
     mean_epsilon_difference: float | None
     mean_angle_error_difference: float | None
+    lower_mean_epsilon: float | None = None
+    upper_mean_epsilon: float | None = None
+    residual_norm_after_lower: float | None = None
+    residual_norm_after_upper: float | None = None
+    residual_norm_after_pair: float | None = None
+    pair_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -371,6 +377,7 @@ class LinearAssignmentResult:
     linear_score: float
     remaining_slot_flat_ids: tuple[int, ...]
     inventory: ClusterInventory | None = None
+    mirror_pair_summaries: tuple[RingPairSummary, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -172,6 +172,9 @@ def ring_pair_summary_from_ring_summaries(
                         upper_count=0,
                         mean_epsilon_difference=None,
                         mean_angle_error_difference=None,
+                        lower_mean_epsilon=lower.mean_epsilon,
+                        upper_mean_epsilon=None,
+                        pair_complete=True,
                     )
                 )
             else:
@@ -189,6 +192,9 @@ def ring_pair_summary_from_ring_summaries(
                         mean_angle_error_difference=(
                             lower.mean_angle_error - upper.mean_angle_error
                         ),
+                        lower_mean_epsilon=lower.mean_epsilon,
+                        upper_mean_epsilon=upper.mean_epsilon,
+                        pair_complete=True,
                     )
                 )
             left += 1

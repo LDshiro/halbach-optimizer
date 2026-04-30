@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -16,6 +17,8 @@ from halbach.assembly.types import (
     LinearCandidate,
     MagnetError,
     Placement,
+    RingKey,
+    RingPairSummary,
     RingQuotaPlan,
     SensitivityTable,
     VirtualMagnet,
@@ -53,6 +56,133 @@ def _error_vector(error: MagnetError) -> FloatArray:
     if not np.all(np.isfinite(x)):
         raise ValueError("magnet error components must be finite")
     return x
+
+
+def _angle_error(error: MagnetError) -> float:
+    return float(math.hypot(float(error.delta_perp_1), float(error.delta_perp_2)))
+
+
+@dataclass(frozen=True)
+class _MirrorRingCompletion:
+    pair_id: str
+    ring_key: RingKey
+    work_unit_id: str
+    count: int
+    epsilon_sum: float
+    angle_error_sum: float
+    residual_norm_after_ring: float
+    cluster_counts: dict[str, int]
+
+    @property
+    def mean_epsilon(self) -> float:
+        return self.epsilon_sum / self.count
+
+    @property
+    def mean_angle_error(self) -> float:
+        return self.angle_error_sum / self.count
+
+
+def _pair_index_from_pair_id(pair_id: str) -> int:
+    head = pair_id.split("_", maxsplit=1)[0]
+    if not head.startswith("P"):
+        return 0
+    try:
+        return int(head[1:])
+    except ValueError:
+        return 0
+
+
+class _MirrorPairTracker:
+    """Track completed mirror rings during online cluster MPC assignment."""
+
+    def __init__(self) -> None:
+        self._completed: dict[str, list[_MirrorRingCompletion]] = {}
+
+    def mirror_mean_for(self, quota_plan: RingQuotaPlan) -> float | None:
+        if quota_plan.mirror_pair_id is None:
+            return None
+        for completion in self._completed.get(quota_plan.mirror_pair_id, []):
+            if completion.ring_key != quota_plan.ring_key:
+                return completion.mean_epsilon
+        return None
+
+    def complete_ring(
+        self,
+        quota_plan: RingQuotaPlan,
+        *,
+        count: int,
+        epsilon_sum: float,
+        angle_error_sum: float,
+        residual: FloatArray,
+        cluster_counts: dict[str, int],
+    ) -> None:
+        if quota_plan.mirror_pair_id is None:
+            return
+        if count <= 0:
+            raise ValueError("completed mirror ring count must be positive")
+        if not math.isfinite(epsilon_sum):
+            raise ValueError("completed mirror ring epsilon_sum must be finite")
+        if not math.isfinite(angle_error_sum):
+            raise ValueError("completed mirror ring angle_error_sum must be finite")
+        residual_arr = np.asarray(residual, dtype=np.float64)
+        if residual_arr.ndim != 1 or not np.all(np.isfinite(residual_arr)):
+            raise ValueError("completed mirror ring residual must be a finite vector")
+        pair_id = quota_plan.mirror_pair_id
+        completions = self._completed.setdefault(pair_id, [])
+        if any(completion.ring_key == quota_plan.ring_key for completion in completions):
+            raise ValueError(f"mirror pair {pair_id} already contains ring {quota_plan.ring_key}")
+        if len(completions) >= 2:
+            raise ValueError(f"mirror pair {pair_id} already has two completed rings")
+        completions.append(
+            _MirrorRingCompletion(
+                pair_id=pair_id,
+                ring_key=quota_plan.ring_key,
+                work_unit_id=quota_plan.work_unit_id,
+                count=count,
+                epsilon_sum=float(epsilon_sum),
+                angle_error_sum=float(angle_error_sum),
+                residual_norm_after_ring=float(np.linalg.norm(residual_arr)),
+                cluster_counts=dict(sorted(cluster_counts.items())),
+            )
+        )
+
+    def summaries(self) -> tuple[RingPairSummary, ...]:
+        summaries: list[RingPairSummary] = []
+        for pair_id in sorted(self._completed):
+            completions = sorted(
+                self._completed[pair_id],
+                key=lambda item: (item.ring_key.layer_id, item.ring_key.ring_id),
+            )
+            lower = completions[0]
+            upper = completions[1] if len(completions) > 1 else None
+            summaries.append(
+                RingPairSummary(
+                    pair_id=pair_id,
+                    pair_index=_pair_index_from_pair_id(pair_id),
+                    ring_id=lower.ring_key.ring_id,
+                    lower_ring=lower.ring_key,
+                    upper_ring=None if upper is None else upper.ring_key,
+                    lower_count=lower.count,
+                    upper_count=0 if upper is None else upper.count,
+                    mean_epsilon_difference=(
+                        None if upper is None else lower.mean_epsilon - upper.mean_epsilon
+                    ),
+                    mean_angle_error_difference=(
+                        None if upper is None else lower.mean_angle_error - upper.mean_angle_error
+                    ),
+                    lower_mean_epsilon=lower.mean_epsilon,
+                    upper_mean_epsilon=None if upper is None else upper.mean_epsilon,
+                    residual_norm_after_lower=lower.residual_norm_after_ring,
+                    residual_norm_after_upper=(
+                        None if upper is None else upper.residual_norm_after_ring
+                    ),
+                    residual_norm_after_pair=(
+                        None if upper is None else upper.residual_norm_after_ring
+                    ),
+                    pair_complete=upper is not None,
+                )
+            )
+        return tuple(summaries)
 
 
 def _assignment_cluster_map(
@@ -687,7 +817,7 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
     residual = np.zeros(table.C.shape[2], dtype=np.float64)
     placements: list[Placement] = []
     current_inventory = inventory
-    completed_mirror_means: dict[str, float] = {}
+    mirror_tracker = _MirrorPairTracker()
 
     for unit_index, (unit_slots, quota_plan) in enumerate(
         zip(ordered_unit_slots, quota_plans, strict=True)
@@ -695,13 +825,10 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
         remaining_unit_slot_ids = list(unit_slots)
         current_usage: dict[str, int] = {}
         ring_epsilon_sum = 0.0
+        ring_angle_sum = 0.0
         ring_count = 0
         future_demand = _future_quota_demand(quota_plans, unit_index + 1)
-        mirror_mean = (
-            None
-            if quota_plan.mirror_pair_id is None
-            else completed_mirror_means.get(quota_plan.mirror_pair_id)
-        )
+        mirror_mean = mirror_tracker.mirror_mean_for(quota_plan)
         while remaining_unit_slot_ids:
             remaining_counts = {
                 cluster_id: len(pool) for cluster_id, pool in pools.items() if len(pool) > 0
@@ -751,6 +878,7 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
             remaining_unit_slot_ids.remove(candidate.slot_flat_id)
             current_usage[selected.cluster_id] = current_usage.get(selected.cluster_id, 0) + 1
             ring_epsilon_sum += float(magnet.measured_error.epsilon_parallel)
+            ring_angle_sum += _angle_error(magnet.measured_error)
             ring_count += 1
             placements.append(
                 Placement(
@@ -762,11 +890,14 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
                     decision_engine="cluster_mpc",
                 )
             )
-        if quota_plan.mirror_pair_id is not None and ring_count > 0:
-            completed_mirror_means.setdefault(
-                quota_plan.mirror_pair_id,
-                ring_epsilon_sum / ring_count,
-            )
+        mirror_tracker.complete_ring(
+            quota_plan,
+            count=ring_count,
+            epsilon_sum=ring_epsilon_sum,
+            angle_error_sum=ring_angle_sum,
+            residual=residual,
+            cluster_counts=current_usage,
+        )
 
     linear_score = float(np.dot(residual, residual))
     if not math.isfinite(linear_score):
@@ -777,6 +908,7 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
         linear_score=linear_score,
         remaining_slot_flat_ids=(),
         inventory=current_inventory,
+        mirror_pair_summaries=mirror_tracker.summaries(),
     )
 
 
