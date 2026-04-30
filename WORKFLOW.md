@@ -21,7 +21,13 @@ python -m mypy .
 python -m pytest -q
 ```
 
-### 1.3 GUI
+### 1.3 pre-commit
+```powershell
+.\.venv\Scripts\pre-commit.exe install --install-hooks
+.\.venv\Scripts\pre-commit.exe run --files halbach/assembly/types.py
+```
+
+### 1.4 GUI
 ```powershell
 python -m streamlit run app\streamlit_app.py
 ```

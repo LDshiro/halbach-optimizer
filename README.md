@@ -369,6 +369,6 @@ python -m pytest -q
 
 pre-commit:
 ```powershell
-pre-commit install
-pre-commit run -a
+.\.venv\Scripts\pre-commit.exe install --install-hooks
+.\.venv\Scripts\pre-commit.exe run --files halbach/assembly/types.py
 ```
