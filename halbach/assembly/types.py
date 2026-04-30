@@ -11,6 +11,7 @@ from halbach.types import FloatArray
 WorkUnitMode = Literal["all_slots", "single_physical_ring", "ring_group"]
 BuildWorkUnitMode = Literal["all_slots", "single_physical_ring", "ring_group", "auto"]
 PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
+EvaluationModel = Literal["fixed", "self_consistent"]
 QuarantineReason = Literal[
     "Q_MEASUREMENT_UNSTABLE",
     "Q_DIRECTION_OUTLIER",
@@ -187,7 +188,7 @@ class FieldEvaluation:
 
 @dataclass(frozen=True)
 class RandomBaselineResult:
-    """Random placement baseline and its fixed-model field evaluation."""
+    """Random placement baseline and its field evaluation."""
 
     placements: tuple[Placement, ...]
     evaluation: FieldEvaluation
@@ -216,7 +217,7 @@ class LinearAssignmentResult:
 
 @dataclass(frozen=True)
 class LinearSimulationResult:
-    """Linear sensitivity placement and its fixed-model field evaluation."""
+    """Linear sensitivity placement and its field evaluation."""
 
     assignment: LinearAssignmentResult
     evaluation: FieldEvaluation
@@ -278,6 +279,7 @@ __all__ = [
     "ClusterStats",
     "FieldEvaluation",
     "FieldMetrics",
+    "EvaluationModel",
     "IntArray",
     "LinearAssignmentResult",
     "LinearCandidate",

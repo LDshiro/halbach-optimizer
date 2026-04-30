@@ -14,6 +14,7 @@ from halbach.assembly.self_consistent_assignment import (
 )
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
 from halbach.assembly.slots import build_assembly_slots
+from halbach.assembly.types import EvaluationModel
 from halbach.assembly.variation import generate_virtual_magnets
 from halbach.constants import FACTOR
 from halbach.geom import RoiMode, build_roi_points
@@ -32,6 +33,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["linear_sensitivity", "sequential_self_consistent"],
         default="linear_sensitivity",
         help="Plan C assignment engine",
+    )
+    ap.add_argument(
+        "--evaluation-model",
+        choices=["fixed", "self_consistent_from_run"],
+        default="fixed",
+        help="field model used for final random/linear placement homogeneity evaluation",
     )
     ap.add_argument(
         "--sc-source",
@@ -144,12 +151,30 @@ def main(argv: list[str] | None = None) -> None:
     run = load_run(run_path)
     slots = build_assembly_slots(run)
     sc_source = str(args.sc_source)
-    if include_self_consistent and sc_source == "run":
-        self_consistent_config = self_consistent_config_from_run(
+    evaluation_model_arg = str(args.evaluation_model)
+    evaluation_model: EvaluationModel = (
+        "self_consistent" if evaluation_model_arg == "self_consistent_from_run" else "fixed"
+    )
+    self_consistent_evaluation_config = (
+        self_consistent_config_from_run(
             run,
             factor=float(args.factor),
             max_linear_candidates=int(args.sc_max_linear_candidates),
             require=True,
+        )
+        if evaluation_model == "self_consistent"
+        else None
+    )
+    if include_self_consistent and sc_source == "run":
+        self_consistent_config = (
+            self_consistent_evaluation_config
+            if self_consistent_evaluation_config is not None
+            else self_consistent_config_from_run(
+                run,
+                factor=float(args.factor),
+                max_linear_candidates=int(args.sc_max_linear_candidates),
+                require=True,
+            )
         )
     elif include_self_consistent:
         self_consistent_config = SelfConsistentConfig(
@@ -185,6 +210,7 @@ def main(argv: list[str] | None = None) -> None:
                 "roi_mode": str(args.roi_mode),
                 "roi_samples": int(args.roi_samples),
                 "engine": str(args.engine),
+                "evaluation_model": evaluation_model_arg,
                 "sc_source": sc_source if include_self_consistent else None,
             },
         )
@@ -231,6 +257,8 @@ def main(argv: list[str] | None = None) -> None:
             inventory=inventory,
             include_self_consistent=include_self_consistent,
             self_consistent_config=self_consistent_config,
+            evaluation_model=evaluation_model,
+            self_consistent_evaluation_config=self_consistent_evaluation_config,
             factor=float(args.factor),
         )
         artifacts.append(
@@ -251,6 +279,7 @@ def main(argv: list[str] | None = None) -> None:
         summary,
         metadata={
             "engine": str(args.engine),
+            "evaluation_model": evaluation_model_arg,
             "run_path": str(run_path),
             "n_slots": len(slots),
             "n_roi_points": int(roi_points.shape[0]),
@@ -274,6 +303,19 @@ def main(argv: list[str] | None = None) -> None:
                     "omega": self_consistent_config.omega,
                     "max_linear_candidates": self_consistent_config.max_linear_candidates,
                     "source": sc_source,
+                }
+            ),
+            "self_consistent_evaluation": (
+                None
+                if self_consistent_evaluation_config is None
+                else {
+                    "chi": self_consistent_evaluation_config.chi,
+                    "Nd": self_consistent_evaluation_config.Nd,
+                    "p0": self_consistent_evaluation_config.p0,
+                    "volume_m3": self_consistent_evaluation_config.volume_m3,
+                    "iters": self_consistent_evaluation_config.iters,
+                    "omega": self_consistent_evaluation_config.omega,
+                    "source": "run",
                 }
             ),
         },

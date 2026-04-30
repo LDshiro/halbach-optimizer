@@ -226,3 +226,48 @@ def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Pa
     assert "rms_ratio_self_consistent_over_linear_mean" in payload["summary"]
     assert payload["trials"][0]["self_consistent_evaluated_count"] > 0
     assert "self_consistent_rms_homogeneity_ppm" in payload["trials"][0]
+
+
+def test_plan_c_simulate_cli_can_evaluate_linear_with_run_self_consistent(
+    tmp_path: Path,
+) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=2)
+    _write_self_consistent_meta(run)
+    out_dir = tmp_path / "plan_c_sim_linear_sc_eval"
+
+    simulate_main(
+        [
+            "--run",
+            str(run.run_dir),
+            "--out",
+            str(out_dir),
+            "--engine",
+            "linear_sensitivity",
+            "--evaluation-model",
+            "self_consistent_from_run",
+            "--trials",
+            "1",
+            "--seed",
+            "11",
+            "--strength-sigma",
+            "0.001",
+            "--direction-sigma",
+            "0.0005",
+            "--roi-r",
+            "0.02",
+            "--roi-mode",
+            "surface-fibonacci",
+            "--roi-samples",
+            "3",
+        ]
+    )
+
+    payload = json.loads((out_dir / "simulation_summary.json").read_text(encoding="utf-8"))
+    assert payload["metadata"]["engine"] == "linear_sensitivity"
+    assert payload["metadata"]["evaluation_model"] == "self_consistent_from_run"
+    assert payload["metadata"]["self_consistent"] is None
+    assert payload["metadata"]["self_consistent_evaluation"]["source"] == "run"
+    assert payload["metadata"]["self_consistent_evaluation"]["chi"] == 0.012
+    assert payload["summary"]["trials"] == 1
+    assert "self_consistent_trials" not in payload["summary"]
+    assert payload["trials"][0]["linear_B0_norm"] > 0.0

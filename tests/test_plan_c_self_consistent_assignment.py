@@ -12,7 +12,11 @@ from halbach.assembly.self_consistent_assignment import (
     self_consistent_config_from_run,
 )
 from halbach.assembly.sensitivity import compute_sensitivity_table
-from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
+from halbach.assembly.simulation import (
+    run_linear_sensitivity_baseline,
+    run_simulation_trial,
+    summarize_comparison_results,
+)
 from halbach.assembly.slots import build_assembly_slots
 from halbach.assembly.types import (
     AssemblySlot,
@@ -365,6 +369,37 @@ def test_simulation_summary_can_include_self_consistent_comparison() -> None:
     assert summary["self_consistent_trials"] == 1
     assert "self_consistent_rms_ppm_mean" in summary
     assert "rms_ratio_self_consistent_over_linear_mean" in summary
+
+
+def test_linear_sensitivity_can_be_evaluated_with_self_consistent_model() -> None:
+    slots = _manual_slots(5)
+    table = _manual_table(slots)
+    magnets = _manual_magnets(len(slots))
+    pts = _manual_points()
+
+    fixed = run_linear_sensitivity_baseline(
+        slots,
+        magnets,
+        table,
+        pts,
+        evaluation_model="fixed",
+    )
+    self_consistent = run_linear_sensitivity_baseline(
+        slots,
+        magnets,
+        table,
+        pts,
+        evaluation_model="self_consistent",
+        self_consistent_evaluation_config=SelfConsistentConfig(chi=0.0, p0=2.0),
+    )
+
+    assert self_consistent.assignment.placements == fixed.assignment.placements
+    assert self_consistent.evaluation.metrics.B0_norm == pytest.approx(
+        2.0 * fixed.evaluation.metrics.B0_norm
+    )
+    assert self_consistent.evaluation.metrics.J_vector == pytest.approx(
+        4.0 * fixed.evaluation.metrics.J_vector
+    )
 
 
 def test_p0_flat_shape_mismatch_is_rejected() -> None:

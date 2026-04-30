@@ -9,12 +9,15 @@ from halbach.assembly.online_assignment import run_linear_sensitivity_assignment
 from halbach.assembly.orientations import default_orientations
 from halbach.assembly.self_consistent_assignment import (
     SelfConsistentConfig,
+    evaluate_self_consistent_placement,
     run_self_consistent_assignment,
 )
 from halbach.assembly.types import (
     AssemblySlot,
     ClusterAssignment,
     ClusterInventory,
+    EvaluationModel,
+    FieldEvaluation,
     LinearSimulationResult,
     Placement,
     PlacementOrientationMode,
@@ -91,6 +94,40 @@ def build_random_placements(
     return placements
 
 
+def _evaluate_placement(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+    pts: FloatArray,
+    *,
+    evaluation_model: EvaluationModel,
+    self_consistent_evaluation_config: SelfConsistentConfig | None,
+    factor: float,
+    min_B0_norm: float,
+) -> FieldEvaluation:
+    if evaluation_model == "fixed":
+        return evaluate_fixed_placement(
+            slots,
+            magnets,
+            placements,
+            pts,
+            factor=float(factor),
+            min_B0_norm=min_B0_norm,
+        )
+    config = (
+        SelfConsistentConfig(factor=float(factor), min_b0_norm=min_B0_norm)
+        if self_consistent_evaluation_config is None
+        else self_consistent_evaluation_config
+    )
+    return evaluate_self_consistent_placement(
+        slots,
+        magnets,
+        placements,
+        pts,
+        config,
+    )
+
+
 def run_random_baseline(
     slots: Sequence[AssemblySlot],
     magnets: Sequence[VirtualMagnet],
@@ -98,21 +135,25 @@ def run_random_baseline(
     *,
     seed: int,
     orientation_mode: PlacementOrientationMode = "fixed_o0",
+    evaluation_model: EvaluationModel = "fixed",
+    self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> RandomBaselineResult:
-    """Generate a random placement baseline and evaluate its fixed-model ROI field."""
+    """Generate a random placement baseline and evaluate its ROI field."""
     placements = build_random_placements(
         slots,
         magnets,
         seed=seed,
         orientation_mode=orientation_mode,
     )
-    evaluation = evaluate_fixed_placement(
+    evaluation = _evaluate_placement(
         slots,
         magnets,
         placements,
         pts,
+        evaluation_model=evaluation_model,
+        self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),
         min_B0_norm=min_B0_norm,
     )
@@ -146,6 +187,8 @@ def run_linear_sensitivity_baseline(
     inventory: ClusterInventory | None = None,
     allowed_orientation_ids: Sequence[str] | None = None,
     magnet_order: Sequence[int] | None = None,
+    evaluation_model: EvaluationModel = "fixed",
+    self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> LinearSimulationResult:
@@ -159,11 +202,13 @@ def run_linear_sensitivity_baseline(
         allowed_orientation_ids=allowed_orientation_ids,
         magnet_order=magnet_order,
     )
-    evaluation = evaluate_fixed_placement(
+    evaluation = _evaluate_placement(
         slots,
         magnets,
         assignment.placements,
         pts,
+        evaluation_model=evaluation_model,
+        self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),
         min_B0_norm=min_B0_norm,
     )
@@ -223,6 +268,8 @@ def run_simulation_trial(
     allowed_orientation_ids: Sequence[str] | None = None,
     include_self_consistent: bool = False,
     self_consistent_config: SelfConsistentConfig | None = None,
+    evaluation_model: EvaluationModel = "fixed",
+    self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
 ) -> SimulationComparisonResult:
@@ -233,6 +280,8 @@ def run_simulation_trial(
         pts,
         seed=seed,
         orientation_mode=random_orientation_mode,
+        evaluation_model=evaluation_model,
+        self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),
         min_B0_norm=min_B0_norm,
     )
@@ -244,6 +293,8 @@ def run_simulation_trial(
         assignments=assignments,
         inventory=inventory,
         allowed_orientation_ids=allowed_orientation_ids,
+        evaluation_model=evaluation_model,
+        self_consistent_evaluation_config=self_consistent_evaluation_config,
         factor=float(factor),
         min_B0_norm=min_B0_norm,
     )
@@ -263,7 +314,7 @@ def run_simulation_trial(
             magnets,
             sensitivity_table,
             pts,
-            config=self_consistent_config,
+            config=self_consistent_config or self_consistent_evaluation_config,
             assignments=assignments,
             inventory=inventory,
             allowed_orientation_ids=allowed_orientation_ids,
@@ -293,10 +344,7 @@ def summarize_comparison_results(
     if not results:
         raise ValueError("results must be non-empty")
     random_rms = np.array(
-        [
-            result.random_baseline.evaluation.metrics.rms_homogeneity_ppm
-            for result in results
-        ],
+        [result.random_baseline.evaluation.metrics.rms_homogeneity_ppm for result in results],
         dtype=np.float64,
     )
     linear_rms = np.array(

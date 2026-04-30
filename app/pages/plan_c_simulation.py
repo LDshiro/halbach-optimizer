@@ -20,6 +20,7 @@ def _run_simulation(
     run_path: str,
     out_dir: str,
     engine: str,
+    evaluation_model: str,
     trials: int,
     seed: int,
     roi_r: float,
@@ -38,6 +39,8 @@ def _run_simulation(
         out_dir,
         "--engine",
         engine,
+        "--evaluation-model",
+        evaluation_model,
         "--trials",
         str(trials),
         "--seed",
@@ -100,6 +103,15 @@ with st.sidebar:
         ["linear_sensitivity", "sequential_self_consistent"],
         index=0,
     )
+    evaluation_model = st.selectbox(
+        "Final evaluation model",
+        ["fixed", "self_consistent_from_run"],
+        index=0,
+    )
+    if evaluation_model == "self_consistent_from_run":
+        st.caption(
+            "Final homogeneity uses magnetization.self_consistent from the optimization run."
+        )
     trials = st.number_input("Trials", min_value=1, max_value=100, value=3, step=1)
     seed = st.number_input("Seed", min_value=0, value=1234, step=1)
     roi_r = st.number_input("ROI radius [m]", min_value=0.001, value=0.05, step=0.01)
@@ -137,6 +149,7 @@ if run_clicked:
                 run_path,
                 out_dir,
                 str(engine),
+                str(evaluation_model),
                 int(trials),
                 int(seed),
                 float(roi_r),
@@ -167,6 +180,8 @@ cols[1].metric(
 )
 cols[2].metric("Linear Improved", payload["linear_improved_count"] or 0)
 cols[3].metric("Engine", payload["engine"] or "unknown")
+if payload["evaluation_model"]:
+    st.caption(f"Final evaluation model: {payload['evaluation_model']}")
 
 if payload["self_consistent_trials"]:
     sc_cols = st.columns(3)

@@ -116,9 +116,7 @@ def build_slot_display_rows(
     """
     occupied = {placement.slot_flat_id for placement in snapshot.placements}
     recommended = (
-        None
-        if snapshot.pending_candidate is None
-        else snapshot.pending_candidate.slot_flat_id
+        None if snapshot.pending_candidate is None else snapshot.pending_candidate.slot_flat_id
     )
     rows: list[dict[str, object]] = []
     for slot in sorted(slots, key=lambda item: (item.layer_id, item.ring_id, item.theta_id)):
@@ -160,19 +158,13 @@ def build_session_ui_payload(
     assignment_by_magnet = _assignment_map(assignments)
     pending_magnet = snapshot.pending_magnet
     recommended_slot_id = (
-        None
-        if snapshot.pending_candidate is None
-        else snapshot.pending_candidate.slot_flat_id
+        None if snapshot.pending_candidate is None else snapshot.pending_candidate.slot_flat_id
     )
     recommended_orientation_id = (
-        None
-        if snapshot.pending_candidate is None
-        else snapshot.pending_candidate.orientation_id
+        None if snapshot.pending_candidate is None else snapshot.pending_candidate.orientation_id
     )
     cluster_id = (
-        None
-        if pending_magnet is None
-        else assignment_by_magnet.get(pending_magnet.magnet_id)
+        None if pending_magnet is None else assignment_by_magnet.get(pending_magnet.magnet_id)
     )
     residual_norm = float(np.linalg.norm(snapshot.residual))
     log_saved = False if log_path is None else Path(log_path).exists()
@@ -227,19 +219,18 @@ def build_summary_ui_payload(summary: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": summary.get("schema_version"),
         "engine": metadata.get("engine") if isinstance(metadata, dict) else None,
+        "evaluation_model": (
+            metadata.get("evaluation_model") if isinstance(metadata, dict) else None
+        ),
         "trials": summary_block.get("trials") if isinstance(summary_block, dict) else None,
         "rms_ratio_mean": (
             summary_block.get("rms_ratio_mean") if isinstance(summary_block, dict) else None
         ),
         "linear_improved_count": (
-            summary_block.get("linear_improved_count")
-            if isinstance(summary_block, dict)
-            else None
+            summary_block.get("linear_improved_count") if isinstance(summary_block, dict) else None
         ),
         "self_consistent_trials": (
-            summary_block.get("self_consistent_trials")
-            if isinstance(summary_block, dict)
-            else None
+            summary_block.get("self_consistent_trials") if isinstance(summary_block, dict) else None
         ),
         "rms_ratio_self_consistent_over_linear_mean": (
             summary_block.get("rms_ratio_self_consistent_over_linear_mean")

@@ -132,7 +132,10 @@ def test_summary_ui_payload_normalizes_simulation_summary() -> None:
     payload = build_summary_ui_payload(
         {
             "schema_version": 1,
-            "metadata": {"engine": "linear_sensitivity"},
+            "metadata": {
+                "engine": "linear_sensitivity",
+                "evaluation_model": "self_consistent_from_run",
+            },
             "summary": {
                 "trials": 2,
                 "rms_ratio_mean": 0.8,
@@ -147,6 +150,7 @@ def test_summary_ui_payload_normalizes_simulation_summary() -> None:
 
     assert payload["schema_version"] == 1
     assert payload["engine"] == "linear_sensitivity"
+    assert payload["evaluation_model"] == "self_consistent_from_run"
     assert payload["trials"] == 2
     assert payload["rms_ratio_mean"] == 0.8
     assert payload["linear_improved_count"] == 1
