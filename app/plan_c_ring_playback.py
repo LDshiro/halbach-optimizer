@@ -313,28 +313,47 @@ def plot_active_ring_polar_view(
     bundle: RingTrialBundle,
     state: PlaybackState,
 ) -> go.Figure:
-    """Plot placed magnets in the current physical ring as a polar scatter."""
-    rows = [
-        row
-        for row in bundle.pickup_log
-        if _to_int(row.get("insert_order")) <= state.step
-        and _to_int(row.get("layer_id")) == state.active_layer_id
-        and _to_int(row.get("ring_id")) == state.active_ring_id
+    """Plot all physical rings in the active layer as a polar scatter."""
+    if state.active_layer_id is None:
+        fig = go.Figure()
+        fig.update_layout(
+            title="Active Layer Rings",
+            height=420,
+            margin={"l": 30, "r": 30, "b": 30, "t": 45},
+        )
+        return fig
+
+    layer_rows = [
+        row for row in bundle.pickup_log if _to_int(row.get("layer_id")) == state.active_layer_id
     ]
-    ring_rows = [
-        row
-        for row in bundle.pickup_log
-        if _to_int(row.get("layer_id")) == state.active_layer_id
-        and _to_int(row.get("ring_id")) == state.active_ring_id
-    ]
-    theta = np.asarray([_to_int(row.get("theta_id")) for row in rows], dtype=np.float64)
-    ring_theta = np.asarray([_to_int(row.get("theta_id")) for row in ring_rows], dtype=np.float64)
-    count_hint = max(1, int(np.nanmax(ring_theta)) + 1) if ring_theta.size else 1
-    theta_deg = theta / count_hint * 360.0 if theta.size else np.asarray([], dtype=np.float64)
+    completed_rows = [row for row in layer_rows if _to_int(row.get("insert_order")) <= state.step]
+    pending_rows = [row for row in layer_rows if _to_int(row.get("insert_order")) > state.step]
+    ring_ids = tuple(sorted({_to_int(row.get("ring_id")) for row in layer_rows}))
+    ring_to_radius = {ring_id: index + 1 for index, ring_id in enumerate(ring_ids)}
+    all_theta = np.asarray(
+        [_to_int(row.get("theta_id")) for row in layer_rows],
+        dtype=np.float64,
+    )
+    count_hint = max(1, int(np.nanmax(all_theta)) + 1) if all_theta.size else 1
+
+    def row_theta_deg(rows: list[dict[str, str]]) -> np.ndarray:
+        theta = np.asarray([_to_int(row.get("theta_id")) for row in rows], dtype=np.float64)
+        return theta / count_hint * 360.0 if theta.size else np.asarray([], dtype=np.float64)
+
+    pending_theta = row_theta_deg(pending_rows)
+    pending_r = np.asarray(
+        [ring_to_radius[_to_int(row.get("ring_id"))] for row in pending_rows],
+        dtype=np.float64,
+    )
+    completed_theta = row_theta_deg(completed_rows)
+    completed_r = np.asarray(
+        [ring_to_radius[_to_int(row.get("ring_id"))] for row in completed_rows],
+        dtype=np.float64,
+    )
     angle_error = np.asarray(
         [
             math.hypot(_to_float(row.get("delta_perp_1")), _to_float(row.get("delta_perp_2")))
-            for row in rows
+            for row in completed_rows
         ],
         dtype=np.float64,
     )
@@ -342,22 +361,45 @@ def plot_active_ring_polar_view(
     hover = [
         (
             f"magnet {row.get('magnet_id')}<br>"
+            f"ring {row.get('ring_id')}<br>"
             f"cluster {row.get('cluster_requested')}<br>"
             f"slot {row.get('physical_slot_number')}<br>"
             f"orientation {row.get('orientation_id')}<br>"
             f"epsilon {row.get('epsilon_parallel')}"
         )
-        for row in rows
+        for row in completed_rows
     ]
-    fig = go.Figure(
+    pending_hover = [
+        (f"pending<br>" f"ring {row.get('ring_id')}<br>" f"slot {row.get('physical_slot_number')}")
+        for row in pending_rows
+    ]
+    fig = go.Figure()
+    if pending_rows:
+        fig.add_trace(
+            go.Scatterpolar(
+                r=pending_r,
+                theta=pending_theta,
+                mode="markers",
+                name="pending",
+                text=pending_hover,
+                hoverinfo="text",
+                marker={
+                    "color": "rgba(148, 163, 184, 0.30)",
+                    "size": 6,
+                    "line": {"color": "rgba(148, 163, 184, 0.55)", "width": 1},
+                },
+            )
+        )
+    fig.add_trace(
         go.Scatterpolar(
-            r=np.ones(len(rows), dtype=np.float64),
-            theta=theta_deg,
+            r=completed_r,
+            theta=completed_theta,
             mode="markers",
+            name="completed",
             text=hover,
             hoverinfo="text",
             marker={
-                "color": [_to_float(row.get("epsilon_parallel")) for row in rows],
+                "color": [_to_float(row.get("epsilon_parallel")) for row in completed_rows],
                 "colorscale": "RdBu",
                 "reversescale": True,
                 "size": marker_size,
@@ -367,9 +409,38 @@ def plot_active_ring_polar_view(
             },
         )
     )
+    if state.current_event is not None and state.current_slot_flat_id is not None:
+        current_ring_id = _to_int(state.current_event.get("ring_id"))
+        if current_ring_id in ring_to_radius:
+            fig.add_trace(
+                go.Scatterpolar(
+                    r=np.asarray([ring_to_radius[current_ring_id]], dtype=np.float64),
+                    theta=np.asarray(
+                        [_to_int(state.current_event.get("theta_id")) / count_hint * 360.0],
+                        dtype=np.float64,
+                    ),
+                    mode="markers",
+                    name="current",
+                    hoverinfo="skip",
+                    marker={
+                        "symbol": "circle-open",
+                        "size": 20,
+                        "color": "black",
+                        "line": {"color": "black", "width": 3},
+                    },
+                )
+            )
     fig.update_layout(
-        title="Active Ring",
-        polar={"radialaxis": {"visible": False}},
+        title=f"Active Layer {state.active_layer_id} Rings",
+        polar={
+            "radialaxis": {
+                "tickmode": "array",
+                "tickvals": [ring_to_radius[ring_id] for ring_id in ring_ids],
+                "ticktext": [f"R{ring_id}" for ring_id in ring_ids],
+                "range": [0, max(ring_to_radius.values(), default=1) + 0.6],
+            }
+        },
+        showlegend=True,
         height=420,
         margin={"l": 30, "r": 30, "b": 30, "t": 45},
     )

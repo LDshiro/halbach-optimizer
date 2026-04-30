@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from app.plan_c_ring_playback import (
+    RingTrialBundle,
     cluster_inventory_counts,
     cluster_inventory_matrix,
     discover_trial_ids,
@@ -172,3 +173,57 @@ def test_ring_playback_plot_helpers_return_non_empty_figures(tmp_path: Path) -> 
     ]
 
     assert all(len(fig.data) > 0 for fig in figures)
+
+
+def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> None:
+    pickup_log: list[dict[str, str]] = []
+    timeline: list[dict[str, object]] = []
+    insert_order = 0
+    for ring_id in (0, 1):
+        for theta_id in range(4):
+            row = {
+                "insert_order": str(insert_order),
+                "layer_id": "0",
+                "ring_id": str(ring_id),
+                "theta_id": str(theta_id),
+                "slot_flat_id": str(100 + insert_order),
+                "physical_slot_number": str(theta_id + 1),
+                "magnet_id": str(insert_order),
+                "cluster_requested": "S00_A00",
+                "epsilon_parallel": "0.001",
+                "delta_perp_1": "0.0001",
+                "delta_perp_2": "0.0002",
+                "orientation_id": "O0",
+            }
+            pickup_log.append(row)
+            timeline.append(
+                {
+                    **row,
+                    "event": "insert_confirmed",
+                    "work_unit_id": f"W_K000_R{ring_id:03d}",
+                    "step": insert_order,
+                    "ring_count_so_far": theta_id + 1,
+                    "ring_mean_epsilon_so_far": 0.001,
+                    "ring_mean_angle_error_so_far": 0.0002,
+                }
+            )
+            insert_order += 1
+    bundle = RingTrialBundle(
+        out_dir=tmp_path,
+        trial_id=0,
+        summary={},
+        ring_summary=[],
+        ring_pair_summary=[],
+        timeline=timeline,
+        quota_plan=[],
+        pickup_log=pickup_log,
+    )
+    state = playback_state_at_step(bundle, 4)
+
+    fig = plot_active_ring_polar_view(bundle, state)
+    completed = next(trace for trace in fig.data if trace.name == "completed")
+    pending = next(trace for trace in fig.data if trace.name == "pending")
+
+    assert list(completed.r) == [1, 1, 1, 1, 2]
+    assert set(pending.r) == {2}
+    assert fig.layout.title.text == "Active Layer 0 Rings"
