@@ -71,6 +71,11 @@ from halbach.assembly.online_assignment import (
     score_linear_candidates,
 )
 from halbach.assembly.orientations import default_orientations, rotate_error_for_orientation
+from halbach.assembly.ring_quota import (
+    compute_inventory_target_mean_epsilon,
+    compute_ring_importance,
+    plan_ring_cluster_quotas,
+)
 from halbach.assembly.ring_summary import (
     ring_pair_summary_from_ring_summaries,
     ring_summary_from_placements,
@@ -136,6 +141,8 @@ from halbach.assembly.types import (
     RandomBaselineResult,
     RingKey,
     RingPairSummary,
+    RingQuotaPlan,
+    RingQuotaPlannerConfig,
     RingSummary,
     SelfConsistentSimulationResult,
     SensitivityTable,
@@ -194,6 +201,8 @@ __all__ = [
     "RandomBaselineResult",
     "RingKey",
     "RingPairSummary",
+    "RingQuotaPlan",
+    "RingQuotaPlannerConfig",
     "RingSummary",
     "SENSITIVITY_SCHEMA_VERSION",
     "SelfConsistentAssignmentResult",
@@ -229,6 +238,8 @@ __all__ = [
     "choose_best_linear_candidate",
     "choose_self_consistent_candidate",
     "cluster_usage_from_placements",
+    "compute_inventory_target_mean_epsilon",
+    "compute_ring_importance",
     "compute_sensitivity_table",
     "default_plan_c_config",
     "compute_field_metrics",
@@ -255,6 +266,7 @@ __all__ = [
     "outer_to_inner_layer_order",
     "parse_serial_measurement_line",
     "planned_cluster_counts",
+    "plan_ring_cluster_quotas",
     "plan_c_config_from_dict",
     "plan_c_config_to_dict",
     "read_csv_dicts",

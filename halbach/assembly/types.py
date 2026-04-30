@@ -157,6 +157,42 @@ class RingPairSummary:
 
 
 @dataclass(frozen=True)
+class RingQuotaPlannerConfig:
+    """Weights and targets for Level 1 ring cluster quota planning."""
+
+    target_mean_epsilon: float | None = None
+    lambda_ring_mean: float = 1.0
+    lambda_angle: float = 1.0
+    lambda_inventory: float = 0.0
+    lambda_mirror_mean: float = 1.0
+    mirror_balance: bool = True
+
+
+@dataclass(frozen=True)
+class RingQuotaPlan:
+    """
+    Planned cluster quota for one physical ring.
+
+    quota_by_cluster maps cluster id to the number of magnets planned for the ring.
+    expected_mean_angle_bin is the weighted mean of Axx bin ids in the quota.
+    """
+
+    ring_key: RingKey
+    layer_id: int
+    ring_id: int
+    work_unit_id: str
+    target_count: int
+    target_mean_epsilon: float
+    ring_importance: float
+    allowed_clusters: tuple[str, ...]
+    quota_by_cluster: dict[str, int]
+    expected_mean_epsilon: float
+    expected_mean_angle_bin: float
+    expected_angle_error: float
+    mirror_pair_id: str | None = None
+
+
+@dataclass(frozen=True)
 class AssemblyTimelineEvent:
     """One replayable ring assembly event for visualization and later JSONL output."""
 
@@ -387,6 +423,8 @@ __all__ = [
     "RandomBaselineResult",
     "RingKey",
     "RingPairSummary",
+    "RingQuotaPlan",
+    "RingQuotaPlannerConfig",
     "RingSummary",
     "SensitivityTable",
     "SelfConsistentSimulationResult",
