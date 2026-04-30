@@ -110,6 +110,11 @@ from halbach.assembly.types import (
     VirtualMagnet,
     WorkUnit,
 )
+from halbach.assembly.ui_payload import (
+    build_session_ui_payload,
+    build_slot_display_rows,
+    build_summary_ui_payload,
+)
 from halbach.assembly.variation import generate_virtual_magnets
 from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
 
@@ -163,6 +168,9 @@ __all__ = [
     "build_fixed_model_arrays",
     "build_random_placements",
     "build_simulation_summary_payload",
+    "build_session_ui_payload",
+    "build_slot_display_rows",
+    "build_summary_ui_payload",
     "build_work_units",
     "choose_best_linear_candidate",
     "cluster_usage_from_placements",
