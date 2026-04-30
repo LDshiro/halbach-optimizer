@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory, inventory_total_count
@@ -54,6 +55,8 @@ def _write_self_consistent_meta(run: RunBundle) -> None:
             "volume_mm3": 300.0,
             "iters": 3,
             "omega": 0.5,
+            "near_kernel": "dipole",
+            "near_window": {"wr": 0, "wz": 1, "wphi": 1},
         },
     }
     run.meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -180,6 +183,7 @@ def test_plan_c_simulate_cli_writes_summary_json(tmp_path: Path) -> None:
 
 
 def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Path) -> None:
+    pytest.importorskip("jax")
     run = _write_generated_run(tmp_path, N=4, R=1, K=2)
     _write_self_consistent_meta(run)
     out_dir = tmp_path / "plan_c_sim_sc"
@@ -222,6 +226,13 @@ def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Pa
     assert np.isclose(payload["metadata"]["self_consistent"]["volume_m3"], 300.0e-9)
     assert payload["metadata"]["self_consistent"]["iters"] == 3
     assert payload["metadata"]["self_consistent"]["omega"] == 0.5
+    assert payload["metadata"]["self_consistent"]["backend"] == "jax"
+    assert payload["metadata"]["self_consistent"]["near_kernel"] == "dipole"
+    assert payload["metadata"]["self_consistent"]["near_window"] == {
+        "wr": 0,
+        "wz": 1,
+        "wphi": 1,
+    }
     assert payload["summary"]["self_consistent_trials"] == 1
     assert "rms_ratio_self_consistent_over_linear_mean" in payload["summary"]
     assert payload["trials"][0]["self_consistent_evaluated_count"] > 0
@@ -231,6 +242,7 @@ def test_plan_c_simulate_cli_can_include_sequential_self_consistent(tmp_path: Pa
 def test_plan_c_simulate_cli_can_evaluate_linear_with_run_self_consistent(
     tmp_path: Path,
 ) -> None:
+    pytest.importorskip("jax")
     run = _write_generated_run(tmp_path, N=4, R=1, K=2)
     _write_self_consistent_meta(run)
     out_dir = tmp_path / "plan_c_sim_linear_sc_eval"
@@ -267,6 +279,8 @@ def test_plan_c_simulate_cli_can_evaluate_linear_with_run_self_consistent(
     assert payload["metadata"]["evaluation_model"] == "self_consistent_from_run"
     assert payload["metadata"]["self_consistent"] is None
     assert payload["metadata"]["self_consistent_evaluation"]["source"] == "run"
+    assert payload["metadata"]["self_consistent_evaluation"]["backend"] == "jax"
+    assert payload["metadata"]["self_consistent_evaluation"]["near_kernel"] == "dipole"
     assert payload["metadata"]["self_consistent_evaluation"]["chi"] == 0.012
     assert payload["summary"]["trials"] == 1
     assert "self_consistent_trials" not in payload["summary"]

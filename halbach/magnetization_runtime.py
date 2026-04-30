@@ -366,6 +366,193 @@ def compute_p_flat_self_consistent_jax(
     return p_out
 
 
+def compute_p_flat_self_consistent_from_u_jax(
+    u_flat: NDArray[np.float64],
+    r0_flat: NDArray[np.float64],
+    p0_flat: NDArray[np.float64],
+    geom: Geometry,
+    sc_cfg: dict[str, Any],
+    *,
+    ring_active_mask: NDArray[np.bool_] | None = None,
+    active_flat: NDArray[Any] | None = None,
+) -> NDArray[np.float64]:
+    """
+    Compute self-consistent moment magnitudes from Plan C per-magnet axes and p0.
+
+    ``u_flat`` and ``r0_flat`` use the dense optimization slot order
+    ``((r*K + k)*N + n)``. ``p0_flat`` carries per-magnet nominal moment
+    magnitudes, including Plan C strength variation.
+    """
+    _require_jax()
+    import jax.numpy as jnp
+
+    from halbach.autodiff.jax_self_consistent import (
+        _gl_double_delta_table_n2,
+        _gl_double_delta_table_n3,
+        solve_p_easy_axis_near_cellavg_from_u,
+        solve_p_easy_axis_near_from_u_with_p0_flat,
+        solve_p_easy_axis_near_gl_double_mixed_from_u,
+        solve_p_easy_axis_near_multi_dipole_from_u_with_p0_flat,
+    )
+
+    R = int(geom.R)
+    K = int(geom.K)
+    N = int(geom.N)
+    M = R * K * N
+    u_arr = np.asarray(u_flat, dtype=np.float64)
+    r0_arr = np.asarray(r0_flat, dtype=np.float64)
+    p0_arr = np.asarray(p0_flat, dtype=np.float64).reshape(-1)
+    if u_arr.shape != (M, 3):
+        raise ValueError(f"u_flat shape {u_arr.shape} does not match expected {(M, 3)}")
+    if r0_arr.shape != (M, 3):
+        raise ValueError(f"r0_flat shape {r0_arr.shape} does not match expected {(M, 3)}")
+    if p0_arr.shape != (M,):
+        raise ValueError(f"p0_flat shape {p0_arr.shape} does not match expected {(M,)}")
+    if not np.all(np.isfinite(u_arr)) or not np.all(np.isfinite(r0_arr)):
+        raise ValueError("u_flat and r0_flat must contain finite values")
+    if not np.all(np.isfinite(p0_arr)):
+        raise ValueError("p0_flat must contain finite values")
+    if np.any(p0_arr <= 0.0):
+        raise ValueError("p0_flat values must be positive")
+
+    if ring_active_mask is not None and active_flat is not None:
+        raise ValueError("provide either ring_active_mask or active_flat, not both")
+    active_flat_np: NDArray[np.bool_] | None = None
+    if ring_active_mask is not None:
+        mask = np.asarray(ring_active_mask, dtype=np.bool_)
+        expected = (R, K)
+        if mask.shape != expected:
+            raise ValueError(
+                f"ring_active_mask shape {mask.shape} does not match expected {expected}"
+            )
+        active_flat_np = flatten_ring_active_mask(mask, N)
+    elif active_flat is not None:
+        active = np.asarray(active_flat, dtype=np.float64).reshape(-1)
+        if active.shape != (M,):
+            raise ValueError(f"active_flat shape {active.shape} does not match expected {(M,)}")
+        if not np.all(np.isfinite(active)):
+            raise ValueError("active_flat must contain finite values")
+        active_flat_np = active > 0.0
+
+    norm = np.linalg.norm(u_arr, axis=1)
+    safe_u = np.empty_like(u_arr)
+    valid = norm > EPS
+    safe_u[valid, :] = u_arr[valid, :] / norm[valid, None]
+    safe_u[~valid, :] = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    if active_flat_np is None and not np.all(valid):
+        raise ValueError("active u_flat rows must be non-zero")
+    if active_flat_np is not None and np.any((~valid) & active_flat_np):
+        raise ValueError("active u_flat rows must be non-zero")
+
+    sc = _parse_sc_cfg(sc_cfg)
+    volume_m3 = float(sc["volume_mm3"]) * 1e-9
+    window = sc["near_window"]
+    near = build_near_graph(
+        R,
+        K,
+        N,
+        NearWindow(wr=int(window["wr"]), wz=int(window["wz"]), wphi=int(window["wphi"])),
+    )
+
+    u_j = jnp.asarray(safe_u, dtype=jnp.float64)
+    r0_j = jnp.asarray(r0_arr, dtype=jnp.float64)
+    p0_j = jnp.asarray(p0_arr, dtype=jnp.float64)
+    nbr_idx_j = jnp.asarray(near.nbr_idx, dtype=jnp.int32)
+    nbr_mask_j = jnp.asarray(near.nbr_mask, dtype=bool)
+    active_flat_j = (
+        None if active_flat_np is None else jnp.asarray(active_flat_np, dtype=jnp.float64)
+    )
+
+    if sc["near_kernel"] == "dipole":
+        p_flat = solve_p_easy_axis_near_from_u_with_p0_flat(
+            u_j,
+            r0_j,
+            nbr_idx_j,
+            nbr_mask_j,
+            p0_flat=p0_j,
+            chi=float(sc["chi"]),
+            Nd=float(sc["Nd"]),
+            volume_m3=volume_m3,
+            iters=int(sc["iters"]),
+            omega=float(sc["omega"]),
+            active_flat=active_flat_j,
+        )
+    elif sc["near_kernel"] == "multi-dipole":
+        p_flat = solve_p_easy_axis_near_multi_dipole_from_u_with_p0_flat(
+            u_j,
+            r0_j,
+            nbr_idx_j,
+            nbr_mask_j,
+            p0_flat=p0_j,
+            chi=float(sc["chi"]),
+            Nd=float(sc["Nd"]),
+            volume_m3=volume_m3,
+            subdip_n=int(sc["subdip_n"]),
+            iters=int(sc["iters"]),
+            omega=float(sc["omega"]),
+            active_flat=active_flat_j,
+        )
+    elif sc["near_kernel"] == "cellavg":
+        p_flat = solve_p_easy_axis_near_cellavg_from_u(
+            u_j,
+            r0_j,
+            nbr_idx_j,
+            nbr_mask_j,
+            p0_flat=p0_j,
+            chi=float(sc["chi"]),
+            Nd=float(sc["Nd"]),
+            volume_m3=volume_m3,
+            iters=int(sc["iters"]),
+            omega=float(sc["omega"]),
+            active_flat=active_flat_j,
+        )
+    elif sc["near_kernel"] == "gl-double-mixed":
+        i_edge_np, j_edge_np = edges_from_near(near.nbr_idx, near.nbr_mask)
+        idx_lo_np, idx_hi_np = _edge_partition_face_to_face(i_edge_np, j_edge_np, R=R, K=K, N=N)
+        i_edge_j = jnp.asarray(i_edge_np, dtype=jnp.int32)
+        j_edge_j = jnp.asarray(j_edge_np, dtype=jnp.int32)
+        idx_lo_j = jnp.asarray(idx_lo_np, dtype=jnp.int32)
+        idx_hi_j = jnp.asarray(idx_hi_np, dtype=jnp.int32)
+        cube_edge = float(volume_m3) ** (1.0 / 3.0)
+        gl_order = sc.get("gl_order")
+        if gl_order == 2:
+            delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+            delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n2(cube_edge)
+        elif gl_order == 3:
+            delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n3(cube_edge)
+            delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+        else:
+            delta_lo_offsets, delta_lo_w = _gl_double_delta_table_n2(cube_edge)
+            delta_hi_offsets, delta_hi_w = _gl_double_delta_table_n3(cube_edge)
+        p_flat = solve_p_easy_axis_near_gl_double_mixed_from_u(
+            u_j,
+            r0_j,
+            p0=p0_j,
+            chi=float(sc["chi"]),
+            Nd=float(sc["Nd"]),
+            volume_m3=volume_m3,
+            iters=int(sc["iters"]),
+            omega=float(sc["omega"]),
+            i_edge=i_edge_j,
+            j_edge=j_edge_j,
+            idx_lo=idx_lo_j,
+            idx_hi=idx_hi_j,
+            delta_lo_offsets=delta_lo_offsets,
+            delta_lo_w=delta_lo_w,
+            delta_hi_offsets=delta_hi_offsets,
+            delta_hi_w=delta_hi_w,
+            implicit_diff=False,
+            active_flat=active_flat_j,
+        )
+    else:
+        raise ValueError(f"Unsupported near_kernel: {sc['near_kernel']}")
+
+    p_out = np.asarray(p_flat, dtype=np.float64)
+    if active_flat_np is not None:
+        p_out = p_out * active_flat_np.astype(np.float64)
+    return p_out
+
+
 def build_m_flat_from_phi_and_p(
     phi_flat: NDArray[np.float64],
     p_flat: NDArray[np.float64],
@@ -538,6 +725,7 @@ __all__ = [
     "get_magnetization_config_from_meta",
     "sc_cfg_fingerprint",
     "compute_p_flat_self_consistent_jax",
+    "compute_p_flat_self_consistent_from_u_jax",
     "build_m_flat_from_phi_and_p",
     "build_m_flat_from_phi_beta_and_p",
     "compute_b_and_b0_from_m_flat",

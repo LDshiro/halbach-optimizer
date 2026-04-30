@@ -198,6 +198,16 @@ def test_self_consistent_config_from_run_uses_saved_optimization_params(
     assert config.omega == pytest.approx(0.45)
     assert config.factor == pytest.approx(2.0)
     assert config.max_linear_candidates == 3
+    assert config.backend == "jax"
+    assert config.raw_sc_cfg is not None
+    assert config.raw_sc_cfg["volume_mm3"] == pytest.approx(250.0)
+    assert config.geom is run.geometry
+    assert config.dense_r0_flat is not None
+    assert config.dense_u_flat is not None
+    assert config.active_flat is not None
+    assert config.dense_r0_flat.shape == (run.geometry.R * run.geometry.K * run.geometry.N, 3)
+    assert config.dense_u_flat.shape == (run.geometry.R * run.geometry.K * run.geometry.N, 3)
+    assert config.active_flat.shape == (run.geometry.R * run.geometry.K * run.geometry.N,)
 
 
 def test_self_consistent_config_from_run_requires_metadata(tmp_path: Path) -> None:

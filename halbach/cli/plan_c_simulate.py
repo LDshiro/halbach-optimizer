@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from halbach.assembly.clustering import assign_quantile_clusters
 from halbach.assembly.inventory import build_cluster_inventory
@@ -19,6 +19,43 @@ from halbach.assembly.variation import generate_virtual_magnets
 from halbach.constants import FACTOR
 from halbach.geom import RoiMode, build_roi_points
 from halbach.run_io import load_run
+
+
+def _self_consistent_metadata(
+    config: SelfConsistentConfig | None,
+    *,
+    source: str,
+) -> dict[str, Any] | None:
+    if config is None:
+        return None
+    raw = config.raw_sc_cfg or {}
+    near_window_raw = raw.get("near_window", {})
+    near_window = near_window_raw if isinstance(near_window_raw, dict) else {}
+    near_kernel = str(raw.get("near_kernel", "dipole"))
+    if near_kernel == "cube-average":
+        near_kernel = "cellavg"
+    volume_mm3 = float(raw.get("volume_mm3", config.volume_m3 / 1.0e-9))
+    payload: dict[str, Any] = {
+        "chi": config.chi,
+        "Nd": config.Nd,
+        "p0": config.p0,
+        "volume_m3": config.volume_m3,
+        "volume_mm3": volume_mm3,
+        "iters": config.iters,
+        "omega": config.omega,
+        "max_linear_candidates": config.max_linear_candidates,
+        "source": source,
+        "backend": config.backend,
+        "near_kernel": near_kernel,
+        "near_window": {
+            "wr": int(near_window.get("wr", 0)),
+            "wz": int(near_window.get("wz", 1)),
+            "wphi": int(near_window.get("wphi", 2)),
+        },
+        "subdip_n": int(raw.get("subdip_n", 2)),
+        "gl_order": raw.get("gl_order"),
+    }
+    return payload
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -165,16 +202,14 @@ def main(argv: list[str] | None = None) -> None:
         if evaluation_model == "self_consistent"
         else None
     )
-    if include_self_consistent and sc_source == "run":
-        self_consistent_config = (
-            self_consistent_evaluation_config
-            if self_consistent_evaluation_config is not None
-            else self_consistent_config_from_run(
-                run,
-                factor=float(args.factor),
-                max_linear_candidates=int(args.sc_max_linear_candidates),
-                require=True,
-            )
+    if include_self_consistent and self_consistent_evaluation_config is not None:
+        self_consistent_config = self_consistent_evaluation_config
+    elif include_self_consistent and sc_source == "run":
+        self_consistent_config = self_consistent_config_from_run(
+            run,
+            factor=float(args.factor),
+            max_linear_candidates=int(args.sc_max_linear_candidates),
+            require=True,
         )
     elif include_self_consistent:
         self_consistent_config = SelfConsistentConfig(
@@ -291,32 +326,18 @@ def main(argv: list[str] | None = None) -> None:
             },
             "direction_sigma_1": sigma1,
             "direction_sigma_2": sigma2,
-            "self_consistent": (
-                None
-                if self_consistent_config is None
-                else {
-                    "chi": self_consistent_config.chi,
-                    "Nd": self_consistent_config.Nd,
-                    "p0": self_consistent_config.p0,
-                    "volume_m3": self_consistent_config.volume_m3,
-                    "iters": self_consistent_config.iters,
-                    "omega": self_consistent_config.omega,
-                    "max_linear_candidates": self_consistent_config.max_linear_candidates,
-                    "source": sc_source,
-                }
+            "self_consistent": _self_consistent_metadata(
+                self_consistent_config,
+                source=(
+                    "run"
+                    if self_consistent_config is self_consistent_evaluation_config
+                    and self_consistent_config is not None
+                    else sc_source
+                ),
             ),
-            "self_consistent_evaluation": (
-                None
-                if self_consistent_evaluation_config is None
-                else {
-                    "chi": self_consistent_evaluation_config.chi,
-                    "Nd": self_consistent_evaluation_config.Nd,
-                    "p0": self_consistent_evaluation_config.p0,
-                    "volume_m3": self_consistent_evaluation_config.volume_m3,
-                    "iters": self_consistent_evaluation_config.iters,
-                    "omega": self_consistent_evaluation_config.omega,
-                    "source": "run",
-                }
+            "self_consistent_evaluation": _self_consistent_metadata(
+                self_consistent_evaluation_config,
+                source="run",
             ),
         },
     )

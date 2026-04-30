@@ -4,10 +4,11 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
+from halbach.angles_runtime import u_rkn_from_run
 from halbach.assembly.field_eval import (
     compute_field_metrics,
     evaluate_fixed_placement,
@@ -29,9 +30,11 @@ from halbach.assembly.types import (
     VirtualMagnet,
 )
 from halbach.constants import FACTOR, m0 as nominal_moment_m0, mu0
+from halbach.magnetization_runtime import compute_p_flat_self_consistent_from_u_jax
 from halbach.physics import compute_B_and_B0_from_m_flat
+from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
 from halbach.run_types import RunBundle
-from halbach.types import FloatArray
+from halbach.types import FloatArray, Geometry
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,12 @@ class SelfConsistentConfig:
     factor: float = FACTOR
     max_linear_candidates: int = 8
     min_b0_norm: float = 1.0e-18
+    backend: Literal["python", "jax"] = "python"
+    raw_sc_cfg: dict[str, Any] | None = None
+    geom: Geometry | None = None
+    dense_r0_flat: FloatArray | None = None
+    dense_u_flat: FloatArray | None = None
+    active_flat: FloatArray | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +115,35 @@ def _validate_config(config: SelfConsistentConfig) -> None:
         raise ValueError("max_linear_candidates must be positive")
     if not math.isfinite(config.min_b0_norm) or config.min_b0_norm < 0.0:
         raise ValueError("min_b0_norm must be finite and >= 0")
+    if config.backend not in ("python", "jax"):
+        raise ValueError("backend must be 'python' or 'jax'")
+    if config.backend == "jax":
+        if config.raw_sc_cfg is None:
+            raise ValueError("jax backend requires raw_sc_cfg")
+        if not isinstance(config.raw_sc_cfg, dict):
+            raise ValueError("raw_sc_cfg must be a dict")
+        if config.geom is None:
+            raise ValueError("jax backend requires geom")
+        geom = config.geom
+        expected_m = int(geom.R) * int(geom.K) * int(geom.N)
+        for label, value in (
+            ("dense_r0_flat", config.dense_r0_flat),
+            ("dense_u_flat", config.dense_u_flat),
+        ):
+            if value is None:
+                raise ValueError(f"jax backend requires {label}")
+            arr = np.asarray(value, dtype=np.float64)
+            if arr.shape != (expected_m, 3):
+                raise ValueError(f"{label} must have shape ({expected_m}, 3)")
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{label} must contain finite values")
+        if config.active_flat is None:
+            raise ValueError("jax backend requires active_flat")
+        active = np.asarray(config.active_flat, dtype=np.float64).reshape(-1)
+        if active.shape != (expected_m,):
+            raise ValueError(f"active_flat must have shape ({expected_m},)")
+        if not np.all(np.isfinite(active)):
+            raise ValueError("active_flat must contain finite values")
 
 
 def _run_self_consistent_meta(run: RunBundle, *, require: bool) -> Mapping[str, Any] | None:
@@ -176,6 +214,30 @@ def self_consistent_config_from_run(
     else:
         volume_m3 = _float_meta(sc, "volume_mm3", base.volume_m3 / 1.0e-9) * 1.0e-9
 
+    geom = run.geometry
+    R = int(geom.R)
+    K = int(geom.K)
+    N = int(geom.N)
+    r_bases = np.asarray(run.results.r_bases, dtype=np.float64).reshape(-1)
+    if r_bases.shape != (K,):
+        raise ValueError(f"r_bases shape {r_bases.shape} does not match expected {(K,)}")
+    rho = r_bases[None, :, None] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None, None]
+    x = rho * np.asarray(geom.cth, dtype=np.float64)[None, None, :]
+    y = rho * np.asarray(geom.sth, dtype=np.float64)[None, None, :]
+    z = np.broadcast_to(
+        np.asarray(geom.z_layers, dtype=np.float64)[None, :, None],
+        (R, K, N),
+    )
+    dense_r0_flat = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+    dense_u_flat = u_rkn_from_run(run).reshape(-1, 3)
+    active_flat = flatten_ring_active_mask(
+        radial_profile_from_run(run).ring_active_mask,
+        N,
+    ).astype(np.float64)
+
+    raw_sc_cfg = dict(sc)
+    raw_sc_cfg.setdefault("volume_mm3", volume_m3 / 1.0e-9)
+
     config = replace(
         base,
         chi=_float_meta(sc, "chi", base.chi),
@@ -186,6 +248,12 @@ def self_consistent_config_from_run(
         omega=_float_meta(sc, "omega", base.omega),
         factor=float(factor),
         max_linear_candidates=int(max_linear_candidates),
+        backend="jax",
+        raw_sc_cfg=raw_sc_cfg,
+        geom=geom,
+        dense_r0_flat=np.ascontiguousarray(dense_r0_flat, dtype=np.float64),
+        dense_u_flat=np.ascontiguousarray(dense_u_flat, dtype=np.float64),
+        active_flat=np.ascontiguousarray(active_flat, dtype=np.float64),
     )
     _validate_config(config)
     return config
@@ -234,7 +302,7 @@ def _model_arrays_for_candidate(
     candidate: LinearCandidate | None,
     *,
     use_measured_errors: bool,
-) -> tuple[FloatArray, FloatArray]:
+) -> tuple[FloatArray, FloatArray, tuple[int, ...]]:
     ordered_slots = _slot_order(slots)
     placed_by_slot = _placement_by_slot(placed_placements)
     slot_ids = {slot.slot_flat_id for slot in ordered_slots}
@@ -273,6 +341,7 @@ def _model_arrays_for_candidate(
     return (
         np.ascontiguousarray(r0_flat, dtype=np.float64),
         np.ascontiguousarray(m_flat, dtype=np.float64),
+        tuple(slot.slot_flat_id for slot in ordered_slots),
     )
 
 
@@ -331,6 +400,83 @@ def _solve_easy_axis_p_full(
     return np.ascontiguousarray(p, dtype=np.float64)
 
 
+def _evaluate_self_consistent_arrays_jax(
+    r0_flat: FloatArray,
+    m_fixed: FloatArray,
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    slot_flat_ids: Sequence[int],
+    p0_flat_override: FloatArray | None,
+) -> FieldEvaluation:
+    if config.geom is None:
+        raise ValueError("jax backend requires geom")
+    if config.raw_sc_cfg is None:
+        raise ValueError("jax backend requires raw_sc_cfg")
+    if config.dense_r0_flat is None or config.dense_u_flat is None or config.active_flat is None:
+        raise ValueError("jax backend requires dense arrays")
+
+    slot_ids = np.asarray(slot_flat_ids, dtype=np.int64).reshape(-1)
+    if slot_ids.shape != (r0_flat.shape[0],):
+        raise ValueError("slot_flat_ids length must match r0_flat rows")
+    if len(set(int(item) for item in slot_ids.tolist())) != slot_ids.size:
+        raise ValueError("slot_flat_ids contain duplicates")
+    dense_r0 = np.asarray(config.dense_r0_flat, dtype=np.float64)
+    dense_u = np.asarray(config.dense_u_flat, dtype=np.float64).copy()
+    dense_p0 = np.full((dense_r0.shape[0],), float(config.p0), dtype=np.float64)
+    active_flat = np.asarray(config.active_flat, dtype=np.float64).reshape(-1)
+    if np.any(slot_ids < 0) or np.any(slot_ids >= dense_r0.shape[0]):
+        raise ValueError("slot_flat_ids contain out-of-range values")
+    if np.any(active_flat[slot_ids] <= 0.0):
+        raise ValueError("slot_flat_ids include inactive optimization slots")
+    if not np.allclose(dense_r0[slot_ids], r0_flat, rtol=0.0, atol=1e-12):
+        raise ValueError("slot center positions do not match run geometry")
+
+    base_p0 = np.linalg.norm(m_fixed, axis=1)
+    if np.any(base_p0 <= 0.0):
+        raise ValueError("all fixed moment vectors must be non-zero")
+    u_active = np.ascontiguousarray(m_fixed / base_p0[:, None], dtype=np.float64)
+    p0_scale = float(config.p0) / float(nominal_moment_m0)
+    p0_active = (
+        np.asarray(p0_flat_override, dtype=np.float64).reshape(-1)
+        if p0_flat_override is not None
+        else np.ascontiguousarray(base_p0 * p0_scale, dtype=np.float64)
+    )
+    if p0_active.shape != (slot_ids.size,):
+        raise ValueError(f"p0_flat_override must have shape ({slot_ids.size},)")
+    if not np.all(np.isfinite(p0_active)) or np.any(p0_active <= 0.0):
+        raise ValueError("p0 values must be finite and positive")
+
+    dense_u[slot_ids, :] = u_active
+    dense_p0[slot_ids] = p0_active
+    p = compute_p_flat_self_consistent_from_u_jax(
+        np.ascontiguousarray(dense_u, dtype=np.float64),
+        np.ascontiguousarray(dense_r0, dtype=np.float64),
+        np.ascontiguousarray(dense_p0, dtype=np.float64),
+        config.geom,
+        config.raw_sc_cfg,
+        active_flat=np.ascontiguousarray(active_flat, dtype=np.float64),
+    )
+    m_sc = np.ascontiguousarray(p[:, None] * dense_u, dtype=np.float64)
+    origin = np.zeros(3, dtype=np.float64)
+    B, B0 = compute_B_and_B0_from_m_flat(
+        np.ascontiguousarray(pts, dtype=np.float64),
+        np.ascontiguousarray(dense_r0, dtype=np.float64),
+        m_sc,
+        float(config.factor),
+        origin,
+    )
+    B_arr = np.ascontiguousarray(B, dtype=np.float64)
+    B0_arr = np.ascontiguousarray(B0, dtype=np.float64)
+    metrics = compute_field_metrics(B_arr, B0_arr, min_B0_norm=config.min_b0_norm)
+    return FieldEvaluation(
+        pts=np.ascontiguousarray(pts, dtype=np.float64),
+        B=B_arr,
+        B0=B0_arr,
+        metrics=metrics,
+    )
+
+
 def evaluate_self_consistent_arrays(
     r0_flat: FloatArray,
     m_fixed: FloatArray,
@@ -338,6 +484,7 @@ def evaluate_self_consistent_arrays(
     config: SelfConsistentConfig,
     *,
     p0_flat_override: FloatArray | None = None,
+    slot_flat_ids: Sequence[int] | None = None,
 ) -> FieldEvaluation:
     """Evaluate a fixed-axis self-consistent model from full candidate arrays."""
     _validate_config(config)
@@ -350,6 +497,26 @@ def evaluate_self_consistent_arrays(
         raise ValueError("m_fixed must have the same shape as r0_flat")
     if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] == 0:
         raise ValueError("pts must have shape (P, 3) with P >= 1")
+
+    if config.backend == "jax":
+        ids: Sequence[int]
+        if slot_flat_ids is None:
+            if config.dense_r0_flat is None:
+                raise ValueError("slot_flat_ids are required for jax backend")
+            if r0.shape[0] != np.asarray(config.dense_r0_flat).shape[0]:
+                raise ValueError("slot_flat_ids are required for active-slot jax evaluation")
+            ids = tuple(range(r0.shape[0]))
+        else:
+            ids = slot_flat_ids
+        override = _validate_p0_flat_override(p0_flat_override, expected_size=r0.shape[0])
+        return _evaluate_self_consistent_arrays_jax(
+            np.ascontiguousarray(r0, dtype=np.float64),
+            np.ascontiguousarray(m0, dtype=np.float64),
+            np.ascontiguousarray(points, dtype=np.float64),
+            config,
+            slot_flat_ids=ids,
+            p0_flat_override=override,
+        )
 
     base_p0 = np.linalg.norm(m0, axis=1)
     if np.any(base_p0 <= 0.0):
@@ -409,7 +576,8 @@ def evaluate_self_consistent_placement(
             f"placement slot coverage mismatch; unknown={unknown_slots}, missing={missing_slots}"
         )
     if (
-        config.chi == 0.0
+        config.backend == "python"
+        and config.chi == 0.0
         and config.p0 == float(nominal_moment_m0)
         and p0_flat_override is None
         and not use_measured_errors
@@ -423,7 +591,7 @@ def evaluate_self_consistent_placement(
             min_B0_norm=config.min_b0_norm,
         )
     magnet_by_id = _magnet_map(magnets)
-    r0_flat, m_flat = _model_arrays_for_candidate(
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
         slots,
         placements,
         magnet_by_id,
@@ -437,6 +605,7 @@ def evaluate_self_consistent_placement(
         pts,
         config,
         p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
     )
 
 
@@ -452,7 +621,7 @@ def evaluate_self_consistent_candidate(
     p0_flat_override: FloatArray | None = None,
 ) -> FieldEvaluation:
     """Evaluate a provisional placement with unfilled slots kept nominal."""
-    r0_flat, m_flat = _model_arrays_for_candidate(
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
         slots,
         placed_placements,
         placed_magnets,
@@ -466,6 +635,7 @@ def evaluate_self_consistent_candidate(
         pts,
         config,
         p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
     )
 
 
