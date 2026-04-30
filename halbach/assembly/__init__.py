@@ -139,7 +139,11 @@ from halbach.assembly.ui_payload import (
     build_summary_ui_payload,
 )
 from halbach.assembly.variation import generate_virtual_magnets
-from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
+from halbach.assembly.work_units import (
+    assign_work_unit_ids,
+    build_work_units,
+    outer_to_inner_layer_order,
+)
 
 __all__ = [
     "AssemblySlot",
@@ -234,6 +238,7 @@ __all__ = [
     "load_latest_session_snapshot",
     "load_sensitivity_table",
     "measured_magnet_from_direction",
+    "outer_to_inner_layer_order",
     "parse_serial_measurement_line",
     "planned_cluster_counts",
     "plan_c_config_from_dict",

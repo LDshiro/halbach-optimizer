@@ -7,7 +7,14 @@ from typing import Literal, cast
 
 from halbach.geom import RoiMode
 
-WorkUnitConfigMode = Literal["all_slots", "single_physical_ring", "ring_group", "auto"]
+WorkUnitConfigMode = Literal[
+    "all_slots",
+    "single_physical_ring",
+    "ring_group",
+    "ring_by_ring_outer_to_inner",
+    "mirror_ring_pair",
+    "auto",
+]
 
 
 @dataclass(frozen=True)

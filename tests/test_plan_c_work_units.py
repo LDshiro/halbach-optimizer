@@ -3,7 +3,11 @@ from pathlib import Path
 import pytest
 
 from halbach.assembly.slots import build_assembly_slots
-from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
+from halbach.assembly.work_units import (
+    assign_work_unit_ids,
+    build_work_units,
+    outer_to_inner_layer_order,
+)
 from halbach.generate import generate_halbach_initial, write_run
 from halbach.run_io import load_run
 from halbach.run_types import RunBundle
@@ -74,6 +78,131 @@ def test_single_physical_ring_groups_by_layer_and_ring(tmp_path: Path) -> None:
     )
 
 
+def test_outer_to_inner_layer_order_even_and_odd() -> None:
+    assert outer_to_inner_layer_order(8) == (0, 7, 1, 6, 2, 5, 3, 4)
+    assert outer_to_inner_layer_order(7) == (0, 6, 1, 5, 2, 4, 3)
+    with pytest.raises(ValueError):
+        outer_to_inner_layer_order(0)
+
+
+def test_ring_by_ring_outer_to_inner_even_layers(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=8)
+    slots = build_assembly_slots(run)
+    units = build_work_units(slots, "ring_by_ring_outer_to_inner")
+
+    assert [unit.mode for unit in units] == ["ring_by_ring_outer_to_inner"] * 8
+    assert [unit.work_unit_id for unit in units] == [
+        "W_K000_R000",
+        "W_K007_R000",
+        "W_K001_R000",
+        "W_K006_R000",
+        "W_K002_R000",
+        "W_K005_R000",
+        "W_K003_R000",
+        "W_K004_R000",
+    ]
+    assert [unit.label for unit in units][0] == "outer-to-inner layer 0, ring 0"
+    _assert_unit_coverage(
+        {slot.slot_flat_id for slot in slots},
+        [slot_id for unit in units for slot_id in unit.slot_flat_ids],
+    )
+
+
+def test_ring_by_ring_outer_to_inner_odd_layers(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=7)
+    units = build_work_units(build_assembly_slots(run), "ring_by_ring_outer_to_inner")
+
+    assert [unit.work_unit_id for unit in units] == [
+        "W_K000_R000",
+        "W_K006_R000",
+        "W_K001_R000",
+        "W_K005_R000",
+        "W_K002_R000",
+        "W_K004_R000",
+        "W_K003_R000",
+    ]
+
+
+def test_ring_by_ring_outer_to_inner_orders_rings_within_layer(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=2, K=4)
+    units = build_work_units(build_assembly_slots(run), "ring_by_ring_outer_to_inner")
+
+    assert [unit.work_unit_id for unit in units] == [
+        "W_K000_R000",
+        "W_K000_R001",
+        "W_K003_R000",
+        "W_K003_R001",
+        "W_K001_R000",
+        "W_K001_R001",
+        "W_K002_R000",
+        "W_K002_R001",
+    ]
+
+
+def test_mirror_ring_pair_even_layers(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=6)
+    slots = build_assembly_slots(run)
+    units = build_work_units(slots, "mirror_ring_pair")
+
+    assert [unit.mode for unit in units] == ["mirror_ring_pair"] * 3
+    assert [unit.work_unit_id for unit in units] == [
+        "W_PAIR000_R000",
+        "W_PAIR001_R000",
+        "W_PAIR002_R000",
+    ]
+    assert [len(unit.slot_flat_ids) for unit in units] == [8, 8, 8]
+    unit_layer_sets = []
+    for unit in units:
+        layer_ids = sorted(
+            {
+                slot.layer_id
+                for slot in slots
+                if slot.slot_flat_id in set(unit.slot_flat_ids)
+            }
+        )
+        unit_layer_sets.append(tuple(layer_ids))
+    assert unit_layer_sets == [(0, 5), (1, 4), (2, 3)]
+    _assert_unit_coverage(
+        {slot.slot_flat_id for slot in slots},
+        [slot_id for unit in units for slot_id in unit.slot_flat_ids],
+    )
+
+
+def test_mirror_ring_pair_odd_layers_has_center_unit(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=5)
+    slots = build_assembly_slots(run)
+    units = build_work_units(slots, "mirror_ring_pair")
+
+    assert [unit.work_unit_id for unit in units] == [
+        "W_PAIR000_R000",
+        "W_PAIR001_R000",
+        "W_PAIR002_R000",
+    ]
+    assert [len(unit.slot_flat_ids) for unit in units] == [8, 8, 4]
+    assert "center layer 2" in units[-1].label
+    unit_layer_sets = []
+    for unit in units:
+        layer_ids = sorted(
+            {
+                slot.layer_id
+                for slot in slots
+                if slot.slot_flat_id in set(unit.slot_flat_ids)
+            }
+        )
+        unit_layer_sets.append(tuple(layer_ids))
+    assert unit_layer_sets == [(0, 4), (1, 3), (2,)]
+
+
+def test_assign_work_unit_ids_accepts_new_modes(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=1, K=5)
+    slots = build_assembly_slots(run)
+
+    for mode in ("ring_by_ring_outer_to_inner", "mirror_ring_pair"):
+        assigned = assign_work_unit_ids(slots, build_work_units(slots, mode))
+        assert all(slot.work_unit_id for slot in assigned)
+        assert all(slot.work_unit_id == "" for slot in slots)
+
+
 def test_ring_group_chunks_physical_rings_in_layer_ring_order(tmp_path: Path) -> None:
     run = _write_generated_run(tmp_path, N=4, R=1, K=6)
     slots = build_assembly_slots(run)
@@ -96,10 +225,16 @@ def test_ring_group_chunks_physical_rings_in_layer_ring_order(tmp_path: Path) ->
     )
 
 
-def test_auto_mode_selects_single_all_or_ring_group(tmp_path: Path) -> None:
+def test_auto_mode_selects_outer_to_inner_all_or_ring_group(tmp_path: Path) -> None:
     run_large_ring = _write_generated_run(tmp_path, N=60, R=1, K=4)
     units_large = build_work_units(build_assembly_slots(run_large_ring), "auto")
-    assert {unit.mode for unit in units_large} == {"single_physical_ring"}
+    assert {unit.mode for unit in units_large} == {"ring_by_ring_outer_to_inner"}
+    assert [unit.work_unit_id for unit in units_large] == [
+        "W_K000_R000",
+        "W_K003_R000",
+        "W_K001_R000",
+        "W_K002_R000",
+    ]
 
     run_small_total = _write_generated_run(tmp_path, N=8, R=1, K=4)
     units_small = build_work_units(build_assembly_slots(run_small_total), "auto")

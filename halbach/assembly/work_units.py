@@ -8,6 +8,30 @@ from halbach.assembly.types import AssemblySlot, BuildWorkUnitMode, WorkUnit, Wo
 PhysicalRingKey = tuple[int, int]  # layer_id, ring_id
 
 
+def outer_to_inner_layer_order(K: int) -> tuple[int, ...]:
+    """Return layer ids in outer-to-inner stack order: 0, K-1, 1, K-2, ..."""
+    if K <= 0:
+        raise ValueError("K must be positive")
+    order: list[int] = []
+    left = 0
+    right = int(K) - 1
+    while left <= right:
+        order.append(left)
+        if left != right:
+            order.append(right)
+        left += 1
+        right -= 1
+    return tuple(order)
+
+
+def _outer_to_inner_layers_from_slots(slots: list[AssemblySlot]) -> list[int]:
+    layers = sorted({slot.layer_id for slot in slots})
+    if not layers:
+        raise ValueError("slots must not be empty")
+    order_indices = outer_to_inner_layer_order(len(layers))
+    return [layers[idx] for idx in order_indices]
+
+
 def _slot_ids(slots: list[AssemblySlot]) -> tuple[int, ...]:
     return tuple(slot.slot_flat_id for slot in slots)
 
@@ -52,6 +76,63 @@ def _build_single_physical_ring(slots: list[AssemblySlot]) -> list[WorkUnit]:
     return units
 
 
+def _build_ring_by_ring_outer_to_inner(slots: list[AssemblySlot]) -> list[WorkUnit]:
+    groups = _group_by_physical_ring(slots)
+    units: list[WorkUnit] = []
+    for layer_id in _outer_to_inner_layers_from_slots(slots):
+        ring_ids = sorted(ring_id for group_layer, ring_id in groups if group_layer == layer_id)
+        for ring_id in ring_ids:
+            unit_slots = groups[(layer_id, ring_id)]
+            units.append(
+                WorkUnit(
+                    work_unit_id=f"W_K{layer_id:03d}_R{ring_id:03d}",
+                    mode="ring_by_ring_outer_to_inner",
+                    slot_flat_ids=_slot_ids(unit_slots),
+                    label=f"outer-to-inner layer {layer_id}, ring {ring_id}",
+                )
+            )
+    return units
+
+
+def _build_mirror_ring_pair(slots: list[AssemblySlot]) -> list[WorkUnit]:
+    groups = _group_by_physical_ring(slots)
+    layers = _outer_to_inner_layers_from_slots(slots)
+    ring_ids = sorted({slot.ring_id for slot in slots})
+    pair_layers = [
+        tuple(layers[idx : idx + 2])
+        for idx in range(0, len(layers), 2)
+    ]
+    units: list[WorkUnit] = []
+    for pair_index, layer_pair in enumerate(pair_layers):
+        for ring_id in ring_ids:
+            chunk_slots: list[AssemblySlot] = []
+            present_layers: list[int] = []
+            for layer_id in layer_pair:
+                ring_key = (layer_id, ring_id)
+                if ring_key not in groups:
+                    continue
+                present_layers.append(layer_id)
+                chunk_slots.extend(groups[ring_key])
+            if not chunk_slots:
+                continue
+            if len(present_layers) == 1:
+                label = f"mirror pair {pair_index}: center layer {present_layers[0]}, ring {ring_id}"
+            else:
+                label = (
+                    f"mirror pair {pair_index}: layers {present_layers[0]}"
+                    f" and {present_layers[1]}, ring {ring_id}"
+                )
+            units.append(
+                WorkUnit(
+                    work_unit_id=f"W_PAIR{pair_index:03d}_R{ring_id:03d}",
+                    mode="mirror_ring_pair",
+                    slot_flat_ids=_slot_ids(chunk_slots),
+                    label=label,
+                )
+            )
+    return units
+
+
 def _build_ring_group(slots: list[AssemblySlot], ring_group_size: int) -> list[WorkUnit]:
     if ring_group_size <= 0:
         raise ValueError("ring_group_size must be positive")
@@ -90,7 +171,7 @@ def _resolve_auto_mode(
     magnets_per_physical_ring = max(len(group_slots) for group_slots in groups.values())
     total_magnets = len(slots)
     if magnets_per_physical_ring >= large_ring_threshold:
-        return "single_physical_ring"
+        return "ring_by_ring_outer_to_inner"
     if total_magnets <= small_total_threshold:
         return "all_slots"
     return "ring_group"
@@ -126,6 +207,10 @@ def build_work_units(
         return _build_all_slots(slots)
     if resolved_mode == "single_physical_ring":
         return _build_single_physical_ring(slots)
+    if resolved_mode == "ring_by_ring_outer_to_inner":
+        return _build_ring_by_ring_outer_to_inner(slots)
+    if resolved_mode == "mirror_ring_pair":
+        return _build_mirror_ring_pair(slots)
     if resolved_mode == "ring_group":
         return _build_ring_group(slots, ring_group_size)
     raise ValueError(f"Unsupported work unit mode: {resolved_mode}")
@@ -149,4 +234,4 @@ def assign_work_unit_ids(slots: list[AssemblySlot], work_units: list[WorkUnit]) 
     return [replace(slot, work_unit_id=slot_to_unit[slot.slot_flat_id]) for slot in slots]
 
 
-__all__ = ["assign_work_unit_ids", "build_work_units"]
+__all__ = ["assign_work_unit_ids", "build_work_units", "outer_to_inner_layer_order"]

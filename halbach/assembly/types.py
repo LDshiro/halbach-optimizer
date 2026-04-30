@@ -8,8 +8,21 @@ from numpy.typing import NDArray
 
 from halbach.types import FloatArray
 
-WorkUnitMode = Literal["all_slots", "single_physical_ring", "ring_group"]
-BuildWorkUnitMode = Literal["all_slots", "single_physical_ring", "ring_group", "auto"]
+WorkUnitMode = Literal[
+    "all_slots",
+    "single_physical_ring",
+    "ring_group",
+    "ring_by_ring_outer_to_inner",
+    "mirror_ring_pair",
+]
+BuildWorkUnitMode = Literal[
+    "all_slots",
+    "single_physical_ring",
+    "ring_group",
+    "ring_by_ring_outer_to_inner",
+    "mirror_ring_pair",
+    "auto",
+]
 PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
 EvaluationModel = Literal["fixed", "self_consistent"]
 QuarantineReason = Literal[
