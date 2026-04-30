@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import numpy as np
+
+from halbach.assembly.field_eval import evaluate_fixed_placement
+from halbach.assembly.online_assignment import run_linear_sensitivity_assignment
+from halbach.assembly.orientations import default_orientations
+from halbach.assembly.types import (
+    AssemblySlot,
+    ClusterAssignment,
+    ClusterInventory,
+    LinearSimulationResult,
+    Placement,
+    PlacementOrientationMode,
+    RandomBaselineResult,
+    SensitivityTable,
+    SimulationComparisonResult,
+    VirtualMagnet,
+)
+from halbach.constants import FACTOR
+from halbach.types import FloatArray
+
+
+def _validate_random_inputs(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+) -> None:
+    if not slots:
+        raise ValueError("slots must be non-empty")
+    if not magnets:
+        raise ValueError("magnets must be non-empty")
+    if len(slots) != len(magnets):
+        raise ValueError("random baseline requires the same number of slots and magnets")
+    slot_ids = [slot.slot_flat_id for slot in slots]
+    if len(slot_ids) != len(set(slot_ids)):
+        raise ValueError("slots contain duplicate slot_flat_id values")
+    magnet_ids = [magnet.magnet_id for magnet in magnets]
+    if len(magnet_ids) != len(set(magnet_ids)):
+        raise ValueError("magnets contain duplicate magnet_id values")
+
+
+def build_random_placements(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    *,
+    seed: int,
+    orientation_mode: PlacementOrientationMode = "fixed_o0",
+) -> list[Placement]:
+    """
+    Build a reproducible random one-to-one placement baseline.
+
+    fixed_o0 keeps all magnets at O0. random_discrete4 samples O0/O90/O180/O270
+    independently for each placed magnet.
+    """
+    _validate_random_inputs(slots, magnets)
+    if orientation_mode not in ("fixed_o0", "random_discrete4"):
+        raise ValueError(f"unsupported orientation_mode: {orientation_mode}")
+
+    rng = np.random.default_rng(int(seed))
+    magnet_ids = np.asarray([magnet.magnet_id for magnet in magnets], dtype=np.int64)
+    shuffled_magnet_ids = rng.permutation(magnet_ids)
+
+    if orientation_mode == "fixed_o0":
+        orientation_ids = ["O0"] * len(slots)
+    else:
+        candidates = default_orientations()
+        indices = rng.integers(0, len(candidates), size=len(slots))
+        orientation_ids = [candidates[int(idx)].id for idx in indices]
+
+    placements: list[Placement] = []
+    for insert_order, (slot, magnet_id, orientation_id) in enumerate(
+        zip(slots, shuffled_magnet_ids, orientation_ids, strict=True)
+    ):
+        placements.append(
+            Placement(
+                slot_flat_id=slot.slot_flat_id,
+                magnet_id=int(magnet_id),
+                orientation_id=orientation_id,
+                cluster_requested=None,
+                insert_order=insert_order,
+                decision_engine="random_baseline",
+            )
+        )
+    return placements
+
+
+def run_random_baseline(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    pts: FloatArray,
+    *,
+    seed: int,
+    orientation_mode: PlacementOrientationMode = "fixed_o0",
+    factor: float = FACTOR,
+    min_B0_norm: float = 1e-18,
+) -> RandomBaselineResult:
+    """Generate a random placement baseline and evaluate its fixed-model ROI field."""
+    placements = build_random_placements(
+        slots,
+        magnets,
+        seed=seed,
+        orientation_mode=orientation_mode,
+    )
+    evaluation = evaluate_fixed_placement(
+        slots,
+        magnets,
+        placements,
+        pts,
+        factor=float(factor),
+        min_B0_norm=min_B0_norm,
+    )
+    return RandomBaselineResult(placements=tuple(placements), evaluation=evaluation)
+
+
+def _validate_slot_table_coverage(
+    slots: Sequence[AssemblySlot],
+    table: SensitivityTable,
+) -> None:
+    slot_ids = [slot.slot_flat_id for slot in slots]
+    if len(slot_ids) != len(set(slot_ids)):
+        raise ValueError("slots contain duplicate slot_flat_id values")
+    table_slot_ids = [int(slot_id) for slot_id in table.slot_flat_id.tolist()]
+    if set(slot_ids) != set(table_slot_ids):
+        missing_in_table = sorted(set(slot_ids) - set(table_slot_ids))
+        missing_in_slots = sorted(set(table_slot_ids) - set(slot_ids))
+        raise ValueError(
+            "slot/table coverage mismatch; "
+            f"missing_in_table={missing_in_table}, missing_in_slots={missing_in_slots}"
+        )
+
+
+def run_linear_sensitivity_baseline(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    sensitivity_table: SensitivityTable,
+    pts: FloatArray,
+    *,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+    factor: float = FACTOR,
+    min_B0_norm: float = 1e-18,
+) -> LinearSimulationResult:
+    """Run the Step 5 greedy Plan C linear sensitivity placement and evaluate it."""
+    _validate_slot_table_coverage(slots, sensitivity_table)
+    assignment = run_linear_sensitivity_assignment(
+        sensitivity_table,
+        magnets,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        magnet_order=magnet_order,
+    )
+    evaluation = evaluate_fixed_placement(
+        slots,
+        magnets,
+        assignment.placements,
+        pts,
+        factor=float(factor),
+        min_B0_norm=min_B0_norm,
+    )
+    return LinearSimulationResult(assignment=assignment, evaluation=evaluation)
+
+
+def run_simulation_trial(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    sensitivity_table: SensitivityTable,
+    pts: FloatArray,
+    *,
+    trial_id: int,
+    seed: int,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    random_orientation_mode: PlacementOrientationMode = "random_discrete4",
+    allowed_orientation_ids: Sequence[str] | None = None,
+    factor: float = FACTOR,
+    min_B0_norm: float = 1e-18,
+) -> SimulationComparisonResult:
+    """Compare random placement with greedy Plan C linear sensitivity for one trial."""
+    random_result = run_random_baseline(
+        slots,
+        magnets,
+        pts,
+        seed=seed,
+        orientation_mode=random_orientation_mode,
+        factor=float(factor),
+        min_B0_norm=min_B0_norm,
+    )
+    linear_result = run_linear_sensitivity_baseline(
+        slots,
+        magnets,
+        sensitivity_table,
+        pts,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        factor=float(factor),
+        min_B0_norm=min_B0_norm,
+    )
+
+    random_rms = random_result.evaluation.metrics.rms_homogeneity_ppm
+    random_j = random_result.evaluation.metrics.J_vector
+    linear_rms = linear_result.evaluation.metrics.rms_homogeneity_ppm
+    linear_j = linear_result.evaluation.metrics.J_vector
+    rms_ratio = float("inf") if random_rms <= 0.0 else float(linear_rms / random_rms)
+    j_ratio = float("inf") if random_j <= 0.0 else float(linear_j / random_j)
+    return SimulationComparisonResult(
+        trial_id=int(trial_id),
+        random_baseline=random_result,
+        linear=linear_result,
+        rms_ratio_linear_over_random=rms_ratio,
+        j_ratio_linear_over_random=j_ratio,
+    )
+
+
+def summarize_comparison_results(
+    results: Sequence[SimulationComparisonResult],
+) -> dict[str, object]:
+    """Return compact aggregate metrics for Plan C simulation comparisons."""
+    if not results:
+        raise ValueError("results must be non-empty")
+    random_rms = np.array(
+        [
+            result.random_baseline.evaluation.metrics.rms_homogeneity_ppm
+            for result in results
+        ],
+        dtype=np.float64,
+    )
+    linear_rms = np.array(
+        [result.linear.evaluation.metrics.rms_homogeneity_ppm for result in results],
+        dtype=np.float64,
+    )
+    ratios = np.array(
+        [result.rms_ratio_linear_over_random for result in results],
+        dtype=np.float64,
+    )
+    return {
+        "trials": len(results),
+        "random_rms_ppm_mean": float(np.mean(random_rms)),
+        "linear_rms_ppm_mean": float(np.mean(linear_rms)),
+        "rms_ratio_mean": float(np.mean(ratios)),
+        "rms_ratio_median": float(np.median(ratios)),
+        "linear_improved_count": int(np.sum(linear_rms < random_rms)),
+    }
+
+
+__all__ = [
+    "build_random_placements",
+    "run_linear_sensitivity_baseline",
+    "run_random_baseline",
+    "run_simulation_trial",
+    "summarize_comparison_results",
+]
