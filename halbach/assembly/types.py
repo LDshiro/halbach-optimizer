@@ -105,6 +105,86 @@ class WorkUnit:
     label: str
 
 
+@dataclass(frozen=True, order=True)
+class RingKey:
+    """Physical ring identifier used by ring-by-ring assembly summaries."""
+
+    layer_id: int
+    ring_id: int
+
+
+@dataclass(frozen=True)
+class RingSummary:
+    """
+    Aggregate magnet-error statistics for one physical ring.
+
+    mean_true_error and mean_measured_error: shape (3,), components
+    [epsilon_parallel, delta_perp_1, delta_perp_2].
+    Field metric fields are optional until per-ring evaluation is available.
+    """
+
+    ring_key: RingKey
+    layer_id: int
+    ring_id: int
+    count: int
+    mean_epsilon: float
+    std_epsilon: float
+    min_epsilon: float
+    max_epsilon: float
+    mean_angle_error: float
+    std_angle_error: float
+    cluster_counts: dict[str, int]
+    mean_true_error: FloatArray
+    mean_measured_error: FloatArray
+    B0_norm_after_ring: float | None = None
+    rms_homogeneity_ppm_after_ring: float | None = None
+    J_vector_after_ring: float | None = None
+
+
+@dataclass(frozen=True)
+class RingPairSummary:
+    """Left/right mirror-pair summary for one ring_id and layer pair."""
+
+    pair_id: str
+    pair_index: int
+    ring_id: int
+    lower_ring: RingKey
+    upper_ring: RingKey | None
+    lower_count: int
+    upper_count: int
+    mean_epsilon_difference: float | None
+    mean_angle_error_difference: float | None
+
+
+@dataclass(frozen=True)
+class AssemblyTimelineEvent:
+    """One replayable ring assembly event for visualization and later JSONL output."""
+
+    step: int
+    event: str
+    result_label: str
+    work_unit_id: str
+    layer_id: int
+    ring_id: int
+    theta_id: int
+    slot_flat_id: int
+    physical_slot_number: int
+    magnet_id: int
+    cluster_requested: str | None
+    epsilon_parallel: float
+    angle_error: float
+    orientation_id: str
+    insert_order: int
+    decision_engine: str
+    ring_count_so_far: int
+    ring_mean_epsilon_so_far: float
+    ring_mean_angle_error_so_far: float
+    residual_norm: float | None = None
+    B0_norm: float | None = None
+    rms_homogeneity_ppm: float | None = None
+    J_vector: float | None = None
+
+
 @dataclass(frozen=True)
 class Placement:
     """
@@ -286,6 +366,7 @@ class SensitivityTable:
 
 __all__ = [
     "AssemblySlot",
+    "AssemblyTimelineEvent",
     "BuildWorkUnitMode",
     "ClusterAssignment",
     "ClusterInventory",
@@ -304,6 +385,9 @@ __all__ = [
     "PlacementOrientationMode",
     "QuarantineReason",
     "RandomBaselineResult",
+    "RingKey",
+    "RingPairSummary",
+    "RingSummary",
     "SensitivityTable",
     "SelfConsistentSimulationResult",
     "SimulationComparisonResult",

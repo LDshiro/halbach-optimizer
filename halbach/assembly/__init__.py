@@ -51,8 +51,8 @@ from halbach.assembly.measurement import (
     CsvMeasurementProvider,
     FakeSerialMeasurementProvider,
     ManualMeasurementProvider,
-    MeasurementProvider,
     MeasurementParseError,
+    MeasurementProvider,
     MeasurementProviderError,
     MeasurementQualityError,
     MeasurementTimeoutError,
@@ -71,6 +71,24 @@ from halbach.assembly.online_assignment import (
     score_linear_candidates,
 )
 from halbach.assembly.orientations import default_orientations, rotate_error_for_orientation
+from halbach.assembly.ring_summary import (
+    ring_pair_summary_from_ring_summaries,
+    ring_summary_from_placements,
+    timeline_from_placements,
+    timeline_from_simulation_result,
+)
+from halbach.assembly.self_consistent_assignment import (
+    SelfConsistentAssignmentResult,
+    SelfConsistentCandidateEvaluation,
+    SelfConsistentConfig,
+    SelfConsistentDecision,
+    choose_self_consistent_candidate,
+    evaluate_self_consistent_arrays,
+    evaluate_self_consistent_candidate,
+    evaluate_self_consistent_placement,
+    run_self_consistent_assignment,
+    self_consistent_config_from_run,
+)
 from halbach.assembly.sensitivity import (
     SENSITIVITY_SCHEMA_VERSION,
     compute_sensitivity_table,
@@ -88,18 +106,6 @@ from halbach.assembly.session import (
     load_latest_session_snapshot,
     run_session_to_completion,
 )
-from halbach.assembly.self_consistent_assignment import (
-    SelfConsistentAssignmentResult,
-    SelfConsistentCandidateEvaluation,
-    SelfConsistentConfig,
-    SelfConsistentDecision,
-    choose_self_consistent_candidate,
-    evaluate_self_consistent_arrays,
-    evaluate_self_consistent_candidate,
-    evaluate_self_consistent_placement,
-    run_self_consistent_assignment,
-    self_consistent_config_from_run,
-)
 from halbach.assembly.simulation import (
     build_random_placements,
     run_linear_sensitivity_baseline,
@@ -111,6 +117,7 @@ from halbach.assembly.simulation import (
 from halbach.assembly.slots import build_assembly_slots, flatten_slot_id
 from halbach.assembly.types import (
     AssemblySlot,
+    AssemblyTimelineEvent,
     ClusterAssignment,
     ClusterInventory,
     ClusterStats,
@@ -127,8 +134,11 @@ from halbach.assembly.types import (
     PlacementOrientationMode,
     QuarantineReason,
     RandomBaselineResult,
-    SensitivityTable,
+    RingKey,
+    RingPairSummary,
+    RingSummary,
     SelfConsistentSimulationResult,
+    SensitivityTable,
     SimulationComparisonResult,
     VirtualMagnet,
     WorkUnit,
@@ -147,6 +157,7 @@ from halbach.assembly.work_units import (
 
 __all__ = [
     "AssemblySlot",
+    "AssemblyTimelineEvent",
     "ClusterAssignment",
     "ClusterInventory",
     "ClusterStats",
@@ -181,6 +192,9 @@ __all__ = [
     "QuarantineReason",
     "SCHEMA_VERSION",
     "RandomBaselineResult",
+    "RingKey",
+    "RingPairSummary",
+    "RingSummary",
     "SENSITIVITY_SCHEMA_VERSION",
     "SelfConsistentAssignmentResult",
     "SelfConsistentCandidateEvaluation",
@@ -244,6 +258,8 @@ __all__ = [
     "plan_c_config_from_dict",
     "plan_c_config_to_dict",
     "read_csv_dicts",
+    "ring_pair_summary_from_ring_summaries",
+    "ring_summary_from_placements",
     "rotate_error_for_orientation",
     "run_linear_sensitivity_baseline",
     "run_linear_sensitivity_assignment",
@@ -259,6 +275,8 @@ __all__ = [
     "simulation_trial_row",
     "score_linear_candidates",
     "summarize_comparison_results",
+    "timeline_from_placements",
+    "timeline_from_simulation_result",
     "validate_final_placement_csv",
     "virtual_magnet_from_mapping",
     "write_cluster_usage_csv",
