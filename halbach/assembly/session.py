@@ -9,8 +9,13 @@ from typing import Literal, cast
 import numpy as np
 
 from halbach.assembly.inventory import decrement_cluster
-from halbach.assembly.measurement import MeasurementProvider
+from halbach.assembly.measurement import (
+    MeasurementProvider,
+    MeasurementProviderError,
+    MeasurementQualityError,
+)
 from halbach.assembly.online_assignment import choose_best_linear_candidate
+from halbach.assembly.sensitivity import sensitivity_contribution
 from halbach.assembly.types import (
     ClusterAssignment,
     ClusterInventory,
@@ -42,6 +47,10 @@ SessionSubState = Literal[
     "WAIT_FOR_INSERT_CONFIRMATION",
     "UPDATE_STATE",
 ]
+
+
+class SessionLogError(ValueError):
+    """Session JSONL log is malformed or does not contain a valid snapshot."""
 
 
 @dataclass(frozen=True)
@@ -192,14 +201,23 @@ def _snapshot_from_dict(data: dict[str, object]) -> SessionSnapshot:
     pending_magnet_raw = data.get("pending_magnet")
     pending_candidate_raw = data.get("pending_candidate")
     residual = np.asarray(cast(list[float], data["residual"]), dtype=np.float64)
+    if residual.ndim != 1:
+        raise ValueError("snapshot residual must be 1-D")
+    remaining = tuple(
+        int(item) for item in cast(list[int], data["remaining_slot_flat_ids"])
+    )
+    if len(remaining) != len(set(remaining)):
+        raise ValueError("snapshot remaining_slot_flat_ids contains duplicates")
+    placements = tuple(_placement_from_dict(item) for item in placements_raw)
+    placement_slot_ids = [placement.slot_flat_id for placement in placements]
+    if len(placement_slot_ids) != len(set(placement_slot_ids)):
+        raise ValueError("snapshot placements contain duplicate slot_flat_id values")
     return SessionSnapshot(
         state=cast(SessionState, str(data["state"])),
         sub_state=cast(SessionSubState, str(data["sub_state"])),
         residual=np.ascontiguousarray(residual, dtype=np.float64),
-        remaining_slot_flat_ids=tuple(
-            int(item) for item in cast(list[int], data["remaining_slot_flat_ids"])
-        ),
-        placements=tuple(_placement_from_dict(item) for item in placements_raw),
+        remaining_slot_flat_ids=remaining,
+        placements=placements,
         measurement_index=_int_value(data["measurement_index"]),
         pending_magnet=(
             None
@@ -214,15 +232,61 @@ def _snapshot_from_dict(data: dict[str, object]) -> SessionSnapshot:
     )
 
 
-def _cluster_map(assignments: Sequence[ClusterAssignment] | None) -> dict[int, str | None]:
+def _slot_ids_from_table(table: SensitivityTable) -> tuple[int, ...]:
+    slot_ids = tuple(int(item) for item in table.slot_flat_id.tolist())
+    if not slot_ids:
+        raise ValueError("sensitivity table must contain at least one slot")
+    if len(slot_ids) != len(set(slot_ids)):
+        raise ValueError("sensitivity table contains duplicate slot ids")
+    if table.C.ndim != 4 or table.C.shape[2] <= 0:
+        raise ValueError("sensitivity table C must have shape (S, O, residual_dim, 3)")
+    if table.C.shape[0] != len(slot_ids):
+        raise ValueError("sensitivity table slot ids and C shape mismatch")
+    return slot_ids
+
+
+def _cluster_map(
+    assignments: Sequence[ClusterAssignment] | None,
+    inventory: ClusterInventory | None,
+) -> dict[int, str | None]:
     if assignments is None:
         return {}
     mapping: dict[int, str | None] = {}
+    counts_by_cluster: dict[str, int] = {}
     for assignment in assignments:
+        if assignment.magnet_id in mapping:
+            raise ValueError(f"duplicate cluster assignment for magnet {assignment.magnet_id}")
         if assignment.quarantine_id is not None:
             raise ValueError("Plan C Step 7 session does not install quarantined magnets")
+        if assignment.cluster_id is None:
+            raise ValueError("normal cluster assignment must include cluster_id")
         mapping[assignment.magnet_id] = assignment.cluster_id
+        counts_by_cluster[assignment.cluster_id] = counts_by_cluster.get(assignment.cluster_id, 0) + 1
+    if inventory is not None:
+        for cluster_id, requested_count in counts_by_cluster.items():
+            if cluster_id not in inventory.clusters:
+                raise ValueError(f"inventory is missing assigned cluster {cluster_id}")
+            available_count = inventory.clusters[cluster_id].count
+            if requested_count > available_count:
+                raise ValueError(
+                    f"inventory cluster {cluster_id} has {available_count} items for {requested_count} assignments"
+                )
     return mapping
+
+
+def _measurement_reject_event(exc: MeasurementProviderError) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "event": "measurement_rejected",
+        "error_type": exc.__class__.__name__,
+        "reason": exc.reason,
+        "message": str(exc),
+    }
+    if exc.quarantine_id is not None:
+        payload["quarantine_id"] = exc.quarantine_id
+    if isinstance(exc, MeasurementQualityError):
+        payload["quality"] = exc.quality
+        payload["quality_threshold"] = exc.quality_threshold
+    return payload
 
 
 def _inventory_after_placements(
@@ -254,9 +318,10 @@ class PlanCSession:
         reset_log: bool = True,
     ) -> None:
         self.sensitivity_table = sensitivity_table
+        self._table_slot_ids = _slot_ids_from_table(sensitivity_table)
         self.provider = provider
         self.assignments = tuple(assignments or ())
-        self._cluster_by_magnet = _cluster_map(assignments)
+        self._cluster_by_magnet = _cluster_map(assignments, inventory)
         self._initial_inventory = inventory
         self.current_inventory = inventory
         self.allowed_orientation_ids = (
@@ -266,7 +331,7 @@ class PlanCSession:
         self.state: SessionState = "PREPARE_SESSION"
         self.sub_state: SessionSubState = "IDLE"
         self.residual = np.zeros(sensitivity_table.C.shape[2], dtype=np.float64)
-        self.remaining_slot_flat_ids = tuple(int(item) for item in sensitivity_table.slot_flat_id.tolist())
+        self.remaining_slot_flat_ids = self._table_slot_ids
         self.placements: tuple[Placement, ...] = ()
         self.pending_magnet: VirtualMagnet | None = None
         self.pending_candidate: LinearCandidate | None = None
@@ -344,7 +409,15 @@ class PlanCSession:
 
     def _step_build_work_unit(self) -> None:
         if self.sub_state == "WAIT_FOR_MAGNET_MEASUREMENT":
-            self.pending_magnet = self.provider.next_magnet()
+            try:
+                self.pending_magnet = self.provider.next_magnet()
+            except MeasurementProviderError as exc:
+                self.pending_magnet = None
+                self.pending_candidate = None
+                self.state = "BUILD_WORK_UNIT"
+                self.sub_state = "WAIT_FOR_MAGNET_MEASUREMENT"
+                self._append_event(_measurement_reject_event(exc))
+                return
             self.sub_state = "VALIDATE_MEASUREMENT"
             self._append_event(
                 {
@@ -383,14 +456,99 @@ class PlanCSession:
             return
         raise RuntimeError(f"unsupported BUILD_WORK_UNIT sub_state: {self.sub_state}")
 
+    def _validate_slot_state(self) -> None:
+        table_slots = set(self._table_slot_ids)
+        remaining = list(self.remaining_slot_flat_ids)
+        if len(remaining) != len(set(remaining)):
+            raise ValueError("remaining slot state contains duplicate slot ids")
+        remaining_set = set(remaining)
+        placed_slot_ids = [placement.slot_flat_id for placement in self.placements]
+        if len(placed_slot_ids) != len(set(placed_slot_ids)):
+            raise ValueError("placements contain duplicate slot ids")
+        placed_set = set(placed_slot_ids)
+        unknown = sorted((remaining_set | placed_set) - table_slots)
+        overlap = sorted(remaining_set & placed_set)
+        missing = sorted(table_slots - (remaining_set | placed_set))
+        if unknown or overlap or missing:
+            raise ValueError(
+                f"slot state mismatch; unknown={unknown}, overlap={overlap}, missing={missing}"
+            )
+        expected_residual_shape = (self.sensitivity_table.C.shape[2],)
+        if self.residual.shape != expected_residual_shape:
+            raise ValueError(f"residual must have shape {expected_residual_shape}")
+
+    def _validate_confirm_ready(self) -> None:
+        self._validate_slot_state()
+        if self.pending_magnet is None or self.pending_candidate is None:
+            raise RuntimeError("no pending placement to confirm")
+        if self.pending_candidate.slot_flat_id not in self.remaining_slot_flat_ids:
+            raise ValueError(
+                f"pending slot {self.pending_candidate.slot_flat_id} is not available in remaining slots"
+            )
+        if self.pending_candidate.orientation_id not in self.sensitivity_table.orientation_id:
+            raise ValueError(f"unknown orientation_id: {self.pending_candidate.orientation_id}")
+        expected_residual_shape = (self.sensitivity_table.C.shape[2],)
+        if self.pending_candidate.contribution.shape != expected_residual_shape:
+            raise ValueError(f"pending candidate contribution must have shape {expected_residual_shape}")
+
+    def override_pending_candidate(
+        self,
+        slot_flat_id: int,
+        orientation_id: str,
+        *,
+        reason: str,
+        operator: str | None = None,
+    ) -> SessionSnapshot:
+        """Replace the solved pending candidate and log a manual override event."""
+        if self.pending_magnet is None or self.pending_candidate is None:
+            raise RuntimeError("manual override requires a pending placement")
+        override_reason = str(reason).strip()
+        if not override_reason:
+            raise ValueError("manual override reason must be non-empty")
+        slot_id = int(slot_flat_id)
+        if slot_id not in self.remaining_slot_flat_ids:
+            raise ValueError(f"override slot {slot_id} is not available in remaining slots")
+        if orientation_id not in self.sensitivity_table.orientation_id:
+            raise ValueError(f"unknown orientation_id: {orientation_id}")
+        old_candidate = self.pending_candidate
+        contribution = sensitivity_contribution(
+            self.sensitivity_table,
+            slot_id,
+            orientation_id,
+            self.pending_magnet.measured_error,
+        )
+        updated = self.residual + contribution
+        score = float(np.dot(updated, updated))
+        self.pending_candidate = LinearCandidate(
+            slot_flat_id=slot_id,
+            orientation_id=orientation_id,
+            score=score,
+            contribution=contribution,
+        )
+        self._append_event(
+            {
+                "event": "manual_override",
+                "old_slot_flat_id": old_candidate.slot_flat_id,
+                "old_orientation_id": old_candidate.orientation_id,
+                "slot_flat_id": slot_id,
+                "orientation_id": orientation_id,
+                "score": score,
+                "reason": override_reason,
+                "operator": operator,
+            }
+        )
+        self._log_snapshot()
+        return self.snapshot()
+
     def confirm_insert(self) -> SessionSnapshot:
         """Confirm insertion of the solved slot/orientation candidate."""
         if self.state != "INSTALL_OR_CONFIRM_PAIR":
             raise RuntimeError("insert can only be confirmed in INSTALL_OR_CONFIRM_PAIR")
-        if self.pending_magnet is None or self.pending_candidate is None:
-            raise RuntimeError("no pending placement to confirm")
+        self._validate_confirm_ready()
         self._undo_snapshot = self.snapshot()
 
+        assert self.pending_magnet is not None
+        assert self.pending_candidate is not None
         cluster_id = self._cluster_by_magnet.get(self.pending_magnet.magnet_id)
         if self.current_inventory is not None and cluster_id is not None:
             self.current_inventory = decrement_cluster(self.current_inventory, cluster_id)
@@ -458,6 +616,7 @@ class PlanCSession:
         self.pending_candidate = snapshot.pending_candidate
         self.provider.set_position(snapshot.measurement_index)
         self.current_inventory = _inventory_after_placements(self._initial_inventory, self.placements)
+        self._validate_slot_state()
 
     @classmethod
     def resume_from_log(
@@ -489,19 +648,29 @@ class PlanCSession:
 
 def load_latest_session_snapshot(path: str | Path) -> SessionSnapshot:
     """Load the latest state_snapshot event from a session JSONL log."""
-    latest: dict[str, object] | None = None
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    latest: SessionSnapshot | None = None
+    log_path = Path(path)
+    for line_no, line in enumerate(log_path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
-        raw = json.loads(line)
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise SessionLogError(f"{log_path}:{line_no}: invalid JSON line") from exc
         if not isinstance(raw, dict):
-            continue
+            raise SessionLogError(f"{log_path}:{line_no}: session log event must be an object")
         event = cast(dict[str, object], raw)
         if event.get("event") == "state_snapshot":
-            latest = cast(dict[str, object], event["snapshot"])
+            snapshot_raw = event.get("snapshot")
+            if not isinstance(snapshot_raw, dict):
+                raise SessionLogError(f"{log_path}:{line_no}: state_snapshot missing object snapshot")
+            try:
+                latest = _snapshot_from_dict(cast(dict[str, object], snapshot_raw))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SessionLogError(f"{log_path}:{line_no}: invalid state_snapshot payload") from exc
     if latest is None:
-        raise ValueError("session log does not contain a state_snapshot event")
-    return _snapshot_from_dict(latest)
+        raise SessionLogError("session log does not contain a state_snapshot event")
+    return latest
 
 
 def run_session_to_completion(session: PlanCSession) -> SessionSnapshot:
@@ -519,6 +688,7 @@ __all__ = [
     "SessionSnapshot",
     "SessionState",
     "SessionSubState",
+    "SessionLogError",
     "load_latest_session_snapshot",
     "run_session_to_completion",
 ]
