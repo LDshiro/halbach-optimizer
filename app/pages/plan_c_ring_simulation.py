@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
 
@@ -63,6 +64,7 @@ def _run_ring_simulation(
     roi_samples: int,
     strength_sigma: float,
     direction_sigma: float,
+    trial_workers: int,
 ) -> None:
     run = load_run(Path(run_path))
     raw_slots = build_assembly_slots(run)
@@ -98,8 +100,7 @@ def _run_ring_simulation(
         else None
     )
 
-    artifacts: list[SimulationTrialArtifacts] = []
-    for trial_id in range(int(trials)):
+    def run_one_trial(trial_id: int) -> SimulationTrialArtifacts:
         trial_seed = int(seed) + trial_id
         magnets = generate_virtual_magnets(
             count=len(slots),
@@ -139,16 +140,23 @@ def _run_ring_simulation(
             self_consistent_evaluation_config=sc_eval_config,
             factor=FACTOR,
         )
-        artifacts.append(
-            SimulationTrialArtifacts(
-                trial_id=trial_id,
-                seed=trial_seed,
-                result=result,
-                magnets=tuple(magnets),
-                assignments=tuple(assignments),
-                quota_plans=quota_plans,
-            )
+        return SimulationTrialArtifacts(
+            trial_id=trial_id,
+            seed=trial_seed,
+            result=result,
+            magnets=tuple(magnets),
+            assignments=tuple(assignments),
+            quota_plans=quota_plans,
         )
+
+    trial_count = int(trials)
+    worker_count = min(max(1, int(trial_workers)), trial_count)
+    if worker_count == 1:
+        artifacts = [run_one_trial(trial_id) for trial_id in range(trial_count)]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            artifacts = list(executor.map(run_one_trial, range(trial_count)))
+        artifacts.sort(key=lambda artifact: artifact.trial_id)
 
     summary = summarize_comparison_results([artifact.result for artifact in artifacts])
     write_simulation_outputs(
@@ -167,6 +175,7 @@ def _run_ring_simulation(
             "sensitivity_cache_hit": sensitivity_cache.cache_hit,
             "sensitivity_cache_key": sensitivity_cache.cache_key,
             "sensitivity_cache_path": str(sensitivity_cache.cache_path),
+            "trial_workers": worker_count,
         },
     )
 
@@ -245,6 +254,13 @@ with st.sidebar:
         index=0,
     )
     trials = st.number_input("Trials", min_value=1, max_value=50, value=1, step=1)
+    trial_workers = st.number_input(
+        "Trial workers",
+        min_value=1,
+        max_value=max(1, int(trials)),
+        value=min(4, max(1, int(trials))),
+        step=1,
+    )
     seed = st.number_input("Seed", min_value=0, value=1234, step=1)
     roi_r = st.number_input("ROI radius [m]", min_value=0.001, value=0.05, step=0.01)
     roi_samples = st.number_input("ROI samples", min_value=1, value=100, step=10)
@@ -290,6 +306,7 @@ if run_clicked:
                 roi_samples=int(roi_samples),
                 strength_sigma=float(strength_sigma),
                 direction_sigma=float(direction_sigma),
+                trial_workers=int(trial_workers),
             )
         st.success("Ring simulation completed")
     except Exception as exc:  # pragma: no cover - UI safety net

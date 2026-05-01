@@ -185,6 +185,29 @@ class _MirrorPairTracker:
         return tuple(summaries)
 
 
+@dataclass(frozen=True)
+class _TableLookup:
+    table: SensitivityTable
+    slot_to_idx: dict[int, int]
+    orientation_to_idx: dict[str, int]
+    orientation_order: dict[str, int]
+    gram: FloatArray
+
+
+def _table_lookup(table: SensitivityTable) -> _TableLookup:
+    _validate_table(table)
+    C = np.asarray(table.C, dtype=np.float64)
+    return _TableLookup(
+        table=table,
+        slot_to_idx=_slot_index(table),
+        orientation_to_idx=_orientation_index(table),
+        orientation_order={
+            orientation_id: idx for idx, orientation_id in enumerate(table.orientation_id)
+        },
+        gram=np.ascontiguousarray(np.einsum("sodc,sode->soce", C, C), dtype=np.float64),
+    )
+
+
 def _assignment_cluster_map(
     assignments: Sequence[ClusterAssignment] | None,
     magnets: Sequence[VirtualMagnet],
@@ -256,8 +279,25 @@ def _validate_cluster_mpc_config(config: ClusterMPCConfig) -> None:
             raise ValueError(f"{name} must be finite and >= 0")
 
 
-def score_linear_candidates(
-    table: SensitivityTable,
+def _allowed_orientation_ids(
+    lookup: _TableLookup,
+    allowed_orientation_ids: Sequence[str] | None,
+) -> tuple[str, ...]:
+    orientation_ids = (
+        tuple(lookup.table.orientation_id)
+        if allowed_orientation_ids is None
+        else tuple(allowed_orientation_ids)
+    )
+    if not orientation_ids:
+        raise ValueError("allowed_orientation_ids must be non-empty")
+    for orientation_id in orientation_ids:
+        if orientation_id not in lookup.orientation_to_idx:
+            raise KeyError(f"unknown orientation_id: {orientation_id}")
+    return orientation_ids
+
+
+def _score_linear_candidates_cached(
+    lookup: _TableLookup,
     residual: FloatArray,
     remaining_slot_flat_ids: Sequence[int],
     error: MagnetError,
@@ -269,38 +309,26 @@ def score_linear_candidates(
 
     score = ||residual + C[s,o] @ x||^2 where x is the measured magnet error.
     """
-    _validate_table(table)
     residual_arr = np.asarray(residual, dtype=np.float64)
-    if residual_arr.shape != (table.C.shape[2],):
-        raise ValueError(f"residual must have shape ({table.C.shape[2]},)")
+    if residual_arr.shape != (lookup.table.C.shape[2],):
+        raise ValueError(f"residual must have shape ({lookup.table.C.shape[2]},)")
     if not np.all(np.isfinite(residual_arr)):
         raise ValueError("residual must contain finite values")
     if not remaining_slot_flat_ids:
         raise ValueError("remaining_slot_flat_ids must be non-empty")
 
-    slot_to_idx = _slot_index(table)
-    orientation_to_idx = _orientation_index(table)
-    orientation_ids = (
-        tuple(table.orientation_id)
-        if allowed_orientation_ids is None
-        else tuple(allowed_orientation_ids)
-    )
-    if not orientation_ids:
-        raise ValueError("allowed_orientation_ids must be non-empty")
-
+    orientation_ids = _allowed_orientation_ids(lookup, allowed_orientation_ids)
     x = _error_vector(error)
     candidates: list[LinearCandidate] = []
     for slot_flat_id in remaining_slot_flat_ids:
         slot_key = int(slot_flat_id)
-        if slot_key not in slot_to_idx:
+        if slot_key not in lookup.slot_to_idx:
             raise KeyError(f"unknown slot_flat_id: {slot_key}")
-        slot_idx = slot_to_idx[slot_key]
+        slot_idx = lookup.slot_to_idx[slot_key]
         for orientation_id in orientation_ids:
-            if orientation_id not in orientation_to_idx:
-                raise KeyError(f"unknown orientation_id: {orientation_id}")
-            orientation_idx = orientation_to_idx[orientation_id]
+            orientation_idx = lookup.orientation_to_idx[orientation_id]
             contribution = np.ascontiguousarray(
-                table.C[slot_idx, orientation_idx, :, :] @ x,
+                lookup.table.C[slot_idx, orientation_idx, :, :] @ x,
                 dtype=np.float64,
             )
             updated = residual_arr + contribution
@@ -317,10 +345,32 @@ def score_linear_candidates(
         key=lambda candidate: (
             candidate.score,
             candidate.slot_flat_id,
-            table.orientation_id.index(candidate.orientation_id),
+            lookup.orientation_order[candidate.orientation_id],
         )
     )
     return candidates
+
+
+def score_linear_candidates(
+    table: SensitivityTable,
+    residual: FloatArray,
+    remaining_slot_flat_ids: Sequence[int],
+    error: MagnetError,
+    *,
+    allowed_orientation_ids: Sequence[str] | None = None,
+) -> list[LinearCandidate]:
+    """
+    Score all remaining slot/orientation candidates.
+
+    score = ||residual + C[s,o] @ x||^2 where x is the measured magnet error.
+    """
+    return _score_linear_candidates_cached(
+        _table_lookup(table),
+        residual,
+        remaining_slot_flat_ids,
+        error,
+        allowed_orientation_ids=allowed_orientation_ids,
+    )
 
 
 def choose_best_linear_candidate(
@@ -341,8 +391,25 @@ def choose_best_linear_candidate(
     )[0]
 
 
-def score_cluster_for_current_ring(
-    table: SensitivityTable,
+def _choose_best_linear_candidate_cached(
+    lookup: _TableLookup,
+    residual: FloatArray,
+    remaining_slot_flat_ids: Sequence[int],
+    error: MagnetError,
+    *,
+    allowed_orientation_ids: Sequence[str] | None = None,
+) -> LinearCandidate:
+    return _score_linear_candidates_cached(
+        lookup,
+        residual,
+        remaining_slot_flat_ids,
+        error,
+        allowed_orientation_ids=allowed_orientation_ids,
+    )[0]
+
+
+def _score_cluster_for_current_ring_cached(
+    lookup: _TableLookup,
     residual: FloatArray,
     remaining_slot_flat_ids: Sequence[int],
     cluster_stats: ClusterStats,
@@ -358,12 +425,11 @@ def score_cluster_for_current_ring(
     mirror_mean_epsilon: float | None = None,
 ) -> ClusterMPCDecision:
     """Score one cluster as the next pickup candidate for the current ring."""
-    _validate_table(table)
     _validate_cluster_stats(cluster_stats)
     _validate_cluster_mpc_config(config)
     residual_arr = np.asarray(residual, dtype=np.float64)
-    if residual_arr.shape != (table.C.shape[2],):
-        raise ValueError(f"residual must have shape ({table.C.shape[2]},)")
+    if residual_arr.shape != (lookup.table.C.shape[2],):
+        raise ValueError(f"residual must have shape ({lookup.table.C.shape[2]},)")
     if not np.all(np.isfinite(residual_arr)):
         raise ValueError("residual must contain finite values")
     if current_ring_count < 0:
@@ -375,16 +441,7 @@ def score_cluster_for_current_ring(
     if remaining_cluster_counts.get(cluster_stats.cluster_id, 0) <= 0:
         raise ValueError(f"cluster {cluster_stats.cluster_id} has no remaining magnets")
 
-    slot_to_idx = _slot_index(table)
-    orientation_to_idx = _orientation_index(table)
-    orientation_ids = (
-        tuple(table.orientation_id)
-        if allowed_orientation_ids is None
-        else tuple(allowed_orientation_ids)
-    )
-    if not orientation_ids:
-        raise ValueError("allowed_orientation_ids must be non-empty")
-
+    orientation_ids = _allowed_orientation_ids(lookup, allowed_orientation_ids)
     mean = np.asarray(cluster_stats.mean, dtype=np.float64)
     cov = np.asarray(cluster_stats.cov, dtype=np.float64)
     best_field_cost = math.inf
@@ -392,16 +449,14 @@ def score_cluster_for_current_ring(
     best_orientation_id = orientation_ids[0]
     for slot_flat_id in remaining_slot_flat_ids:
         slot_key = int(slot_flat_id)
-        if slot_key not in slot_to_idx:
+        if slot_key not in lookup.slot_to_idx:
             raise KeyError(f"unknown slot_flat_id: {slot_key}")
-        slot_idx = slot_to_idx[slot_key]
+        slot_idx = lookup.slot_to_idx[slot_key]
         for orientation_id in orientation_ids:
-            if orientation_id not in orientation_to_idx:
-                raise KeyError(f"unknown orientation_id: {orientation_id}")
-            orientation_idx = orientation_to_idx[orientation_id]
-            C_j = np.asarray(table.C[slot_idx, orientation_idx, :, :], dtype=np.float64)
+            orientation_idx = lookup.orientation_to_idx[orientation_id]
+            C_j = np.asarray(lookup.table.C[slot_idx, orientation_idx, :, :], dtype=np.float64)
             expected = residual_arr + C_j @ mean
-            trace_term = float(np.trace((C_j.T @ C_j) @ cov))
+            trace_term = float(np.einsum("ij,ji->", lookup.gram[slot_idx, orientation_idx], cov))
             field_cost = float(np.dot(expected, expected) + trace_term)
             if field_cost < best_field_cost:
                 best_field_cost = field_cost
@@ -455,6 +510,40 @@ def score_cluster_for_current_ring(
     )
 
 
+def score_cluster_for_current_ring(
+    table: SensitivityTable,
+    residual: FloatArray,
+    remaining_slot_flat_ids: Sequence[int],
+    cluster_stats: ClusterStats,
+    quota_plan: RingQuotaPlan,
+    current_ring_cluster_usage: dict[str, int],
+    current_ring_epsilon_sum: float,
+    current_ring_count: int,
+    remaining_cluster_counts: dict[str, int],
+    future_cluster_demand: dict[str, int],
+    config: ClusterMPCConfig,
+    *,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    mirror_mean_epsilon: float | None = None,
+) -> ClusterMPCDecision:
+    """Score one cluster as the next pickup candidate for the current ring."""
+    return _score_cluster_for_current_ring_cached(
+        _table_lookup(table),
+        residual,
+        remaining_slot_flat_ids,
+        cluster_stats,
+        quota_plan,
+        current_ring_cluster_usage,
+        current_ring_epsilon_sum,
+        current_ring_count,
+        remaining_cluster_counts,
+        future_cluster_demand,
+        config,
+        allowed_orientation_ids=allowed_orientation_ids,
+        mirror_mean_epsilon=mirror_mean_epsilon,
+    )
+
+
 def run_linear_sensitivity_assignment(
     table: SensitivityTable,
     magnets: Sequence[VirtualMagnet],
@@ -470,7 +559,7 @@ def run_linear_sensitivity_assignment(
     Decisions use measured_error, while downstream fixed-field evaluation should still
     use true_error through the resulting Placement records.
     """
-    _validate_table(table)
+    lookup = _table_lookup(table)
     if len(magnets) != table.slot_flat_id.shape[0]:
         raise ValueError("magnets count must match sensitivity slot count")
     magnet_by_id = {magnet.magnet_id: magnet for magnet in magnets}
@@ -496,8 +585,8 @@ def run_linear_sensitivity_assignment(
     current_inventory = inventory
 
     for insert_order, magnet in enumerate(ordered_magnets):
-        candidate = choose_best_linear_candidate(
-            table,
+        candidate = _choose_best_linear_candidate_cached(
+            lookup,
             residual,
             remaining_slot_ids,
             magnet.measured_error,
@@ -679,7 +768,7 @@ def run_ring_constrained_linear_assignment(
     the current work unit. Once that unit is full, assignment advances to the next unit.
     A single all-slot work unit delegates to the existing global implementation.
     """
-    _validate_table(table)
+    lookup = _table_lookup(table)
     ordered_unit_slots = _ordered_unit_slot_ids(table, work_units)
     if len(ordered_unit_slots) == 1:
         return run_linear_sensitivity_assignment(
@@ -717,8 +806,8 @@ def run_ring_constrained_linear_assignment(
         remaining_unit_slot_ids = list(unit_slots)
         while remaining_unit_slot_ids:
             magnet = ordered_magnets[magnet_index]
-            candidate = choose_best_linear_candidate(
-                table,
+            candidate = _choose_best_linear_candidate_cached(
+                lookup,
                 residual,
                 remaining_unit_slot_ids,
                 magnet.measured_error,
@@ -802,7 +891,7 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
     seed: int = 0,
 ) -> LinearAssignmentResult:
     """Run Step R6 cluster-level MPC pickup with ring-constrained placement."""
-    _validate_table(table)
+    lookup = _table_lookup(table)
     mpc_config = ClusterMPCConfig() if config is None else config
     _validate_cluster_mpc_config(mpc_config)
     ordered_unit_slots = _ordered_unit_slot_ids(table, work_units)
@@ -840,8 +929,8 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
             for cluster_id in sorted(remaining_counts):
                 if cluster_id not in current_inventory.clusters:
                     raise ValueError(f"cluster {cluster_id} is missing from inventory")
-                decision = score_cluster_for_current_ring(
-                    table,
+                decision = _score_cluster_for_current_ring_cached(
+                    lookup,
                     residual,
                     remaining_unit_slot_ids,
                     current_inventory.clusters[cluster_id],
@@ -866,8 +955,8 @@ def run_cluster_mpc_ring_constrained_linear_assignment(
                 )
             magnet_id = pool.pop(0)
             magnet = magnet_by_id[magnet_id]
-            candidate = choose_best_linear_candidate(
-                table,
+            candidate = _choose_best_linear_candidate_cached(
+                lookup,
                 residual,
                 remaining_unit_slot_ids,
                 magnet.measured_error,
