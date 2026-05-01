@@ -239,4 +239,88 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
     assert list(labels.text).count("1") == 2
     assert max(completed[0].x) - min(completed[0].x) > max(completed[0].y) - min(completed[0].y)
     assert np.asarray(stack.data[0].z).tolist() == [[2.0, 2.0]]
-    assert fig.layout.title.text == "Active Layer 0 Rings"
+    assert fig.layout.title.text.startswith("Active Layer 0 Rings")
+
+
+def test_active_layer_view_uses_real_geometry_dimensions_and_orientation_labels(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {
+            "insert_order": "0",
+            "layer_id": "0",
+            "ring_id": "0",
+            "theta_id": "0",
+            "slot_flat_id": "10",
+            "physical_slot_number": "1",
+            "center_x_m": "0.5",
+            "center_y_m": "0.0",
+            "nominal_phi_rad": str(np.pi / 2.0),
+            "magnet_id": "1",
+            "cluster_requested": "S00_A00",
+            "epsilon_parallel": "0.001",
+            "measured_epsilon_parallel": "0.0011",
+            "delta_perp_1": "0.0",
+            "delta_perp_2": "0.0",
+            "orientation_id": "O180",
+        },
+        {
+            "insert_order": "1",
+            "layer_id": "0",
+            "ring_id": "0",
+            "theta_id": "1",
+            "slot_flat_id": "11",
+            "physical_slot_number": "2",
+            "center_x_m": "0.0",
+            "center_y_m": "0.5",
+            "nominal_phi_rad": "0.0",
+            "magnet_id": "2",
+            "cluster_requested": "S00_A00",
+            "epsilon_parallel": "-0.001",
+            "measured_epsilon_parallel": "-0.0009",
+            "delta_perp_1": "0.0",
+            "delta_perp_2": "0.0",
+            "orientation_id": "O90",
+        },
+    ]
+    bundle = RingTrialBundle(
+        out_dir=tmp_path,
+        trial_id=0,
+        summary={
+            "metadata": {
+                "visualization_geometry": {
+                    "magnet_dimensions_m": [0.2, 0.08, 0.04],
+                    "magnet_dimensions_source": "test_dimensions",
+                }
+            }
+        },
+        ring_summary=[{"layer_id": "0", "ring_id": "0", "mean_epsilon": "0.0"}],
+        ring_pair_summary=[],
+        timeline=[
+            {
+                **rows[0],
+                "event": "insert_confirmed",
+                "work_unit_id": "W_K000_R000",
+                "step": 0,
+            }
+        ],
+        quota_plan=[],
+        pickup_log=rows,
+    )
+    state = playback_state_at_step(bundle, 0)
+
+    fig = plot_active_ring_polar_view(bundle, state)
+    completed = next(trace for trace in fig.data if trace.name == "completed")
+    orientation = next(trace for trace in fig.data if trace.name == "orientation_patterns")
+    frame_numbers = next(trace for trace in fig.data if trace.name == "frame_numbers")
+
+    center_x = 0.5 * (max(completed.x) + min(completed.x))
+    center_y = 0.5 * (max(completed.y) + min(completed.y))
+
+    assert np.isclose(center_x, 0.5)
+    assert np.isclose(center_y, 0.0)
+    assert np.isclose(max(completed.x) - min(completed.x), 0.08)
+    assert np.isclose(max(completed.y) - min(completed.y), 0.2)
+    assert list(orientation.text) == ["3"]
+    assert list(frame_numbers.text) == ["1", "2"]
+    assert "real center geometry" in fig.layout.title.text

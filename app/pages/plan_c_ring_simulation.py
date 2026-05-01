@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -46,6 +47,62 @@ from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
 from halbach.constants import FACTOR
 from halbach.geom import build_roi_points
 from halbach.run_io import load_run
+
+
+def _float_list(value: object) -> list[float]:
+    return [float(item) for item in np.asarray(value, dtype=np.float64).reshape(-1)]
+
+
+def _sc_volume_mm3_from_meta(meta: dict[str, Any]) -> float | None:
+    magnetization = meta.get("magnetization")
+    if not isinstance(magnetization, dict):
+        return None
+    sc_cfg = magnetization.get("self_consistent")
+    if not isinstance(sc_cfg, dict):
+        return None
+    raw = sc_cfg.get("volume_mm3")
+    if raw is None:
+        return None
+    value = float(raw)
+    if not np.isfinite(value) or value <= 0.0:
+        return None
+    return value
+
+
+def _magnet_dimensions_from_run(run: Any) -> tuple[list[float] | None, str]:
+    extras = run.results.extras
+    if "magnet_dimensions_m" in extras:
+        dims_m = _float_list(extras["magnet_dimensions_m"])
+        if len(dims_m) == 3 and all(value > 0.0 for value in dims_m):
+            return dims_m, "run_results_magnet_dimensions_m"
+    if "magnet_dimensions_mm" in extras:
+        dims_m = [value * 1.0e-3 for value in _float_list(extras["magnet_dimensions_mm"])]
+        if len(dims_m) == 3 and all(value > 0.0 for value in dims_m):
+            return dims_m, "run_results_magnet_dimensions_mm"
+    volume_mm3 = _sc_volume_mm3_from_meta(run.meta)
+    if volume_mm3 is None:
+        return None, ""
+    edge_m = (volume_mm3 * 1.0e-9) ** (1.0 / 3.0)
+    return [edge_m, edge_m, edge_m], "self_consistent_volume_mm3"
+
+
+def _visualization_geometry_metadata(run: Any) -> dict[str, object]:
+    dims_m, dims_source = _magnet_dimensions_from_run(run)
+    metadata: dict[str, object] = {
+        "N": int(run.geometry.N),
+        "K": int(run.geometry.K),
+        "R": int(run.geometry.R),
+        "r_bases_m": _float_list(run.results.r_bases),
+        "ring_offsets_m": _float_list(run.geometry.ring_offsets),
+        "z_layers_m": _float_list(run.geometry.z_layers),
+    }
+    if dims_m is not None:
+        metadata["magnet_dimensions_m"] = dims_m
+        metadata["magnet_dimensions_source"] = dims_source
+    volume_mm3 = _sc_volume_mm3_from_meta(run.meta)
+    if volume_mm3 is not None:
+        metadata["sc_volume_mm3"] = volume_mm3
+    return metadata
 
 
 def _run_ring_simulation(
@@ -182,6 +239,7 @@ def _run_ring_simulation(
             "measurement_strength_sigma": float(measurement_strength_sigma),
             "measurement_direction_sigma_1": float(measurement_direction_sigma_1),
             "measurement_direction_sigma_2": float(measurement_direction_sigma_2),
+            "visualization_geometry": _visualization_geometry_metadata(run),
             "sensitivity_cache_hit": sensitivity_cache.cache_hit,
             "sensitivity_cache_key": sensitivity_cache.cache_key,
             "sensitivity_cache_path": str(sensitivity_cache.cache_path),
@@ -417,9 +475,8 @@ with playback_tab:
         "Residual",
         "n/a" if state.residual_norm is None else f"{state.residual_norm:.4g}",
     )
-    plot_cols = st.columns(2)
-    plot_cols[0].plotly_chart(plot_side_stack_view(bundle, state), use_container_width=True)
-    plot_cols[1].plotly_chart(plot_active_ring_polar_view(bundle, state), use_container_width=True)
+    st.plotly_chart(plot_active_ring_polar_view(bundle, state), use_container_width=True)
+    st.plotly_chart(plot_side_stack_view(bundle, state), use_container_width=True)
     if state.current_event is not None:
         st.dataframe(pd.DataFrame([state.current_event]), use_container_width=True, hide_index=True)
 

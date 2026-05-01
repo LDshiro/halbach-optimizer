@@ -20,6 +20,12 @@ _STRENGTH_COLORSCALE = [
     (1.0, "#b2182b"),
 ]
 _STRENGTH_COLOR_VALUES = [color for _position, color in _STRENGTH_COLORSCALE]
+_ORIENTATION_PATTERN_LABELS = {
+    "O0": "1",
+    "O90": "2",
+    "O180": "3",
+    "O270": "4",
+}
 
 ClusterMatrixMode = Literal["initial", "used", "remaining", "planned"]
 
@@ -97,6 +103,51 @@ def _finite_or_none(value: object) -> float | None:
     if not math.isfinite(result):
         return None
     return result
+
+
+def _float_tuple(value: object, expected_len: int) -> tuple[float, ...] | None:
+    if not isinstance(value, list | tuple):
+        return None
+    if len(value) != expected_len:
+        return None
+    result = tuple(float(item) for item in value)
+    if not all(math.isfinite(item) and item > 0.0 for item in result):
+        return None
+    return result
+
+
+def _metadata(bundle: RingTrialBundle) -> dict[str, Any]:
+    raw = bundle.summary.get("metadata")
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def _visualization_geometry(bundle: RingTrialBundle) -> dict[str, Any]:
+    raw = _metadata(bundle).get("visualization_geometry")
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def _magnet_dimensions_m(bundle: RingTrialBundle) -> tuple[float, float, float] | None:
+    geometry = _visualization_geometry(bundle)
+    dimensions = _float_tuple(geometry.get("magnet_dimensions_m"), 3)
+    if dimensions is not None:
+        return dimensions
+
+    volume_mm3 = geometry.get("sc_volume_mm3")
+    if volume_mm3 is None:
+        return None
+    volume_m3 = float(volume_mm3) * 1.0e-9
+    if not math.isfinite(volume_m3) or volume_m3 <= 0.0:
+        return None
+    edge_m = volume_m3 ** (1.0 / 3.0)
+    return (edge_m, edge_m, edge_m)
+
+
+def _orientation_pattern_label(orientation_id: object) -> str:
+    return _ORIENTATION_PATTERN_LABELS.get(str(orientation_id or ""), "")
 
 
 def _json_dict(value: str) -> dict[str, int]:
@@ -322,12 +373,12 @@ def plot_active_ring_polar_view(
     bundle: RingTrialBundle,
     state: PlaybackState,
 ) -> go.Figure:
-    """Plot active-layer magnet frames as Halbach-angle rectangles."""
+    """Plot active-layer magnet frames using run-derived coordinates when available."""
     if state.active_layer_id is None:
         fig = go.Figure()
         fig.update_layout(
             title="Active Layer Rings",
-            height=420,
+            height=680,
             margin={"l": 30, "r": 30, "b": 30, "t": 45},
         )
         return fig
@@ -338,7 +389,6 @@ def plot_active_ring_polar_view(
     completed_rows = [row for row in layer_rows if _to_int(row.get("insert_order")) <= state.step]
     pending_rows = [row for row in layer_rows if _to_int(row.get("insert_order")) > state.step]
     ring_ids = tuple(sorted({_to_int(row.get("ring_id")) for row in layer_rows}))
-    ring_to_radius = {ring_id: index + 1 for index, ring_id in enumerate(ring_ids)}
     count_hint_by_ring = {
         ring_id: max(
             1,
@@ -352,19 +402,79 @@ def plot_active_ring_polar_view(
         for ring_id in ring_ids
     }
 
+    def row_has_real_position(row: dict[str, str]) -> bool:
+        return (
+            _finite_or_none(row.get("center_x_m")) is not None
+            and _finite_or_none(row.get("center_y_m")) is not None
+        )
+
+    use_real_positions = bool(layer_rows) and all(row_has_real_position(row) for row in layer_rows)
+    fallback_ring_to_radius = {ring_id: index + 1 for index, ring_id in enumerate(ring_ids)}
+
     def row_position(row: dict[str, str]) -> tuple[float, float]:
+        if use_real_positions:
+            x_m = _finite_or_none(row.get("center_x_m"))
+            y_m = _finite_or_none(row.get("center_y_m"))
+            if x_m is not None and y_m is not None:
+                return x_m, y_m
         ring_id = _to_int(row.get("ring_id"))
         theta_rad = 2.0 * math.pi * _to_int(row.get("theta_id")) / count_hint_by_ring[ring_id]
-        radius = float(ring_to_radius[ring_id])
+        radius = float(fallback_ring_to_radius[ring_id])
         return radius * math.cos(theta_rad), radius * math.sin(theta_rad)
+
+    def row_theta_rad(row: dict[str, str]) -> float:
+        x0, y0 = row_position(row)
+        if use_real_positions and (x0 != 0.0 or y0 != 0.0):
+            return math.atan2(y0, x0)
+        ring_id = _to_int(row.get("ring_id"))
+        return 2.0 * math.pi * _to_int(row.get("theta_id")) / count_hint_by_ring[ring_id]
 
     def row_phi(row: dict[str, str]) -> float:
         raw = row.get("nominal_phi_rad")
         if raw not in (None, ""):
             return _to_float(raw)
+        return row_theta_rad(row) + 0.5 * math.pi
+
+    ring_to_radius = {
+        ring_id: float(
+            np.mean(
+                [
+                    math.hypot(*row_position(row))
+                    for row in layer_rows
+                    if _to_int(row.get("ring_id")) == ring_id
+                ]
+            )
+        )
+        for ring_id in ring_ids
+    }
+
+    def ring_pitch(row: dict[str, str]) -> float:
         ring_id = _to_int(row.get("ring_id"))
-        theta_rad = 2.0 * math.pi * _to_int(row.get("theta_id")) / count_hint_by_ring[ring_id]
-        return theta_rad + 0.5 * math.pi
+        radius = max(ring_to_radius[ring_id], 1.0e-12)
+        return 2.0 * math.pi * radius / count_hint_by_ring[ring_id]
+
+    pitch_values = [ring_pitch(row) for row in layer_rows] or [1.0]
+    min_pitch = max(1.0e-12, min(pitch_values))
+    radius_values = sorted(set(ring_to_radius.values()))
+    radial_gaps = [
+        abs(upper - lower)
+        for lower, upper in zip(radius_values, radius_values[1:], strict=False)
+        if abs(upper - lower) > 1.0e-12
+    ]
+    min_radial_gap = min(radial_gaps) if radial_gaps else min_pitch
+    dimensions_m = _magnet_dimensions_m(bundle)
+
+    if use_real_positions and dimensions_m is not None:
+        magnet_long = float(dimensions_m[0])
+        magnet_short = float(dimensions_m[1])
+    else:
+        magnet_long = min(0.72 * min_pitch, 0.82 * min_radial_gap)
+        magnet_short = min(0.42 * min_pitch, 0.46 * min_radial_gap)
+        if magnet_short >= magnet_long:
+            magnet_short = 0.58 * magnet_long
+    magnet_long = max(magnet_long, 1.0e-9)
+    magnet_short = max(magnet_short, 1.0e-9)
+    label_offset = max(0.60 * magnet_short, 0.035 * max(radius_values or [1.0]))
 
     max_abs_epsilon = max(
         [abs(_to_float(row.get("epsilon_parallel"))) for row in completed_rows] + [1.0e-12]
@@ -375,17 +485,17 @@ def plot_active_ring_polar_view(
         normalized = 0.5 + 0.5 * max(-1.0, min(1.0, epsilon / max_abs_epsilon))
         return str(sample_colorscale(_STRENGTH_COLOR_VALUES, [normalized])[0])
 
-    def rectangle_xy(row: dict[str, str]) -> tuple[list[float], list[float]]:
-        x0, y0 = row_position(row)
+    def local_axes(row: dict[str, str]) -> tuple[float, float, float, float]:
         phi = row_phi(row)
-        ring_id = _to_int(row.get("ring_id"))
-        spacing = (
-            2.0 * math.pi * max(1.0, float(ring_to_radius[ring_id])) / count_hint_by_ring[ring_id]
-        )
-        half_long = max(0.045, min(0.18, 0.32 * spacing))
-        half_short = 0.45 * half_long
         ux, uy = math.cos(phi), math.sin(phi)
         vx, vy = -uy, ux
+        return ux, uy, vx, vy
+
+    def rectangle_xy(row: dict[str, str]) -> tuple[list[float], list[float]]:
+        x0, y0 = row_position(row)
+        ux, uy, vx, vy = local_axes(row)
+        half_long = 0.5 * magnet_long
+        half_short = 0.5 * magnet_short
         corners = [
             (half_long, half_short),
             (-half_long, half_short),
@@ -397,21 +507,40 @@ def plot_active_ring_polar_view(
         ys = [y0 + a * uy + b * vy for a, b in corners]
         return xs, ys
 
+    rectangle_by_slot = {_to_int(row.get("slot_flat_id")): rectangle_xy(row) for row in layer_rows}
+
+    def frame_label_position(row: dict[str, str]) -> tuple[float, float]:
+        x0, y0 = row_position(row)
+        _ux, _uy, vx, vy = local_axes(row)
+        return x0 - label_offset * vx, y0 - label_offset * vy
+
+    def orientation_label_position(row: dict[str, str]) -> tuple[float, float]:
+        x0, y0 = row_position(row)
+        _ux, _uy, vx, vy = local_axes(row)
+        return x0 + label_offset * vx, y0 + label_offset * vy
+
     def hover_text(row: dict[str, str], *, pending: bool) -> str:
+        x0, y0 = row_position(row)
+        phi_deg = math.degrees(row_phi(row))
+        radius = math.hypot(x0, y0)
         if pending:
             return (
                 f"pending<br>ring {row.get('ring_id')}<br>"
                 f"frame {row.get('physical_slot_number')}<br>"
-                f"phi {row.get('nominal_phi_rad', '')}"
+                f"nominal phi {phi_deg:.3f} deg<br>"
+                f"center radius {radius:.6g}"
             )
         return (
             f"magnet {row.get('magnet_id')}<br>"
             f"ring {row.get('ring_id')}<br>"
             f"cluster {row.get('cluster_requested')}<br>"
             f"frame {row.get('physical_slot_number')}<br>"
-            f"orientation {row.get('orientation_id')}<br>"
+            f"orientation {row.get('orientation_id')} "
+            f"({_orientation_pattern_label(row.get('orientation_id'))})<br>"
             f"epsilon {row.get('epsilon_parallel')}<br>"
-            f"phi {row.get('nominal_phi_rad', '')}"
+            f"measured epsilon {row.get('measured_epsilon_parallel', '')}<br>"
+            f"nominal phi {phi_deg:.3f} deg<br>"
+            f"center radius {radius:.6g}"
         )
 
     fig = go.Figure()
@@ -425,14 +554,14 @@ def plot_active_ring_polar_view(
                 y=radius * np.sin(theta),
                 mode="lines",
                 name=f"R{ring_id}",
-                line={"color": "rgba(148, 163, 184, 0.25)", "width": 1},
+                line={"color": "rgba(100, 116, 139, 0.24)", "width": 1},
                 hoverinfo="skip",
                 showlegend=False,
             )
         )
 
     for idx, row in enumerate(pending_rows):
-        xs, ys = rectangle_xy(row)
+        xs, ys = rectangle_by_slot[_to_int(row.get("slot_flat_id"))]
         fig.add_trace(
             go.Scatter(
                 x=xs,
@@ -449,7 +578,7 @@ def plot_active_ring_polar_view(
         )
 
     for idx, row in enumerate(completed_rows):
-        xs, ys = rectangle_xy(row)
+        xs, ys = rectangle_by_slot[_to_int(row.get("slot_flat_id"))]
         is_current = state.current_slot_flat_id == _to_int(row.get("slot_flat_id"))
         fig.add_trace(
             go.Scatter(
@@ -488,26 +617,78 @@ def plot_active_ring_polar_view(
         )
 
     label_rows = layer_rows
-    label_positions = [row_position(row) for row in label_rows]
+    frame_label_positions = [frame_label_position(row) for row in label_rows]
     fig.add_trace(
         go.Scatter(
-            x=[position[0] for position in label_positions],
-            y=[position[1] - 0.09 for position in label_positions],
+            x=[position[0] for position in frame_label_positions],
+            y=[position[1] for position in frame_label_positions],
             mode="text",
             text=[str(row.get("physical_slot_number") or "") for row in label_rows],
-            textfont={"size": 9, "color": "#111827"},
+            textfont={"size": 10, "color": "#111827"},
             hoverinfo="skip",
             showlegend=False,
             name="frame_numbers",
         )
     )
+    orientation_label_rows = [
+        row for row in completed_rows if _orientation_pattern_label(row.get("orientation_id"))
+    ]
+    orientation_label_positions = [
+        orientation_label_position(row) for row in orientation_label_rows
+    ]
+    if orientation_label_rows:
+        fig.add_trace(
+            go.Scatter(
+                x=[position[0] for position in orientation_label_positions],
+                y=[position[1] for position in orientation_label_positions],
+                mode="text",
+                text=[
+                    _orientation_pattern_label(row.get("orientation_id"))
+                    for row in orientation_label_rows
+                ],
+                textfont={"size": 11, "color": "#0f172a"},
+                hoverinfo="skip",
+                showlegend=False,
+                name="orientation_patterns",
+            )
+        )
+
+    bound_x: list[float] = []
+    bound_y: list[float] = []
+    for xs, ys in rectangle_by_slot.values():
+        bound_x.extend(xs)
+        bound_y.extend(ys)
+    bound_x.extend(position[0] for position in frame_label_positions + orientation_label_positions)
+    bound_y.extend(position[1] for position in frame_label_positions + orientation_label_positions)
+    if bound_x and bound_y:
+        x_min = min(bound_x)
+        x_max = max(bound_x)
+        y_min = min(bound_y)
+        y_max = max(bound_y)
+        span = max(x_max - x_min, y_max - y_min, 1.0e-12)
+        pad = 0.05 * span
+        x_range = [x_min - pad, x_max + pad]
+        y_range = [y_min - pad, y_max + pad]
+    else:
+        x_range = None
+        y_range = None
+
+    dimension_source = _visualization_geometry(bundle).get("magnet_dimensions_source", "")
+    subtitle = "real center geometry" if use_real_positions else "fallback geometry"
+    if dimension_source:
+        subtitle = f"{subtitle}, dimensions: {dimension_source}"
     fig.update_layout(
-        title=f"Active Layer {state.active_layer_id} Rings",
-        xaxis={"visible": False, "scaleanchor": "y", "scaleratio": 1},
-        yaxis={"visible": False},
+        title=f"Active Layer {state.active_layer_id} Rings ({subtitle})",
+        xaxis={
+            "visible": False,
+            "scaleanchor": "y",
+            "scaleratio": 1,
+            **({} if x_range is None else {"range": x_range}),
+        },
+        yaxis={"visible": False, **({} if y_range is None else {"range": y_range})},
         showlegend=True,
-        height=420,
-        margin={"l": 30, "r": 30, "b": 30, "t": 45},
+        height=680,
+        margin={"l": 12, "r": 12, "b": 12, "t": 58},
     )
     return fig
 
