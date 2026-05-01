@@ -188,6 +188,7 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
                 "theta_id": str(theta_id),
                 "slot_flat_id": str(100 + insert_order),
                 "physical_slot_number": str(theta_id + 1),
+                "nominal_phi_rad": "0.0",
                 "magnet_id": str(insert_order),
                 "cluster_requested": "S00_A00",
                 "epsilon_parallel": "0.001",
@@ -229,10 +230,13 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
 
     fig = plot_active_ring_polar_view(bundle, state)
     stack = plot_side_stack_view(bundle, state)
-    completed = next(trace for trace in fig.data if trace.name == "completed")
-    pending = next(trace for trace in fig.data if trace.name == "pending")
+    completed = [trace for trace in fig.data if trace.name == "completed"]
+    pending = [trace for trace in fig.data if trace.name == "pending"]
+    labels = next(trace for trace in fig.data if trace.name == "frame_numbers")
 
-    assert list(completed.r) == [1, 1, 1, 1, 2]
-    assert set(pending.r) == {2}
+    assert len(completed) == 5
+    assert len(pending) == 3
+    assert list(labels.text).count("1") == 2
+    assert max(completed[0].x) - min(completed[0].x) > max(completed[0].y) - min(completed[0].y)
     assert np.asarray(stack.data[0].z).tolist() == [[2.0, 2.0]]
     assert fig.layout.title.text == "Active Layer 0 Rings"

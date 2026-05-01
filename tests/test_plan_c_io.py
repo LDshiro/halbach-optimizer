@@ -201,6 +201,8 @@ def test_visualization_outputs_match_placement_counts_and_replay(tmp_path: Path)
     pickup_rows = read_csv_dicts(out_dir / "cluster_pickup_log_trial_000.csv")
     assert list(pickup_rows[0]) == CLUSTER_PICKUP_LOG_COLUMNS
     assert len(pickup_rows) == len(placements)
+    assert "nominal_phi_rad" in pickup_rows[0]
+    assert "center_x_m" in pickup_rows[0]
     assert {int(row["magnet_id"]) for row in pickup_rows} == {
         placement.magnet_id for placement in placements
     }

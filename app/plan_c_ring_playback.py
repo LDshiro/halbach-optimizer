@@ -10,9 +10,16 @@ from typing import Any, Literal
 
 import numpy as np
 import plotly.graph_objects as go
+from plotly.colors import sample_colorscale
 
 _TRIAL_RE = re.compile(r"assembly_timeline_trial_(?P<trial>\d+)\.jsonl$")
 _CLUSTER_RE = re.compile(r"^S(?P<strength>\d+)_A(?P<angle>\d+)$")
+_STRENGTH_COLORSCALE = [
+    (0.0, "#2166ac"),
+    (0.5, "#f7f7f7"),
+    (1.0, "#b2182b"),
+]
+_STRENGTH_COLOR_VALUES = [color for _position, color in _STRENGTH_COLORSCALE]
 
 ClusterMatrixMode = Literal["initial", "used", "remaining", "planned"]
 
@@ -315,7 +322,7 @@ def plot_active_ring_polar_view(
     bundle: RingTrialBundle,
     state: PlaybackState,
 ) -> go.Figure:
-    """Plot all physical rings in the active layer as a polar scatter."""
+    """Plot active-layer magnet frames as Halbach-angle rectangles."""
     if state.active_layer_id is None:
         fig = go.Figure()
         fig.update_layout(
@@ -332,116 +339,172 @@ def plot_active_ring_polar_view(
     pending_rows = [row for row in layer_rows if _to_int(row.get("insert_order")) > state.step]
     ring_ids = tuple(sorted({_to_int(row.get("ring_id")) for row in layer_rows}))
     ring_to_radius = {ring_id: index + 1 for index, ring_id in enumerate(ring_ids)}
-    all_theta = np.asarray(
-        [_to_int(row.get("theta_id")) for row in layer_rows],
-        dtype=np.float64,
-    )
-    count_hint = max(1, int(np.nanmax(all_theta)) + 1) if all_theta.size else 1
+    count_hint_by_ring = {
+        ring_id: max(
+            1,
+            1
+            + max(
+                _to_int(row.get("theta_id"))
+                for row in layer_rows
+                if _to_int(row.get("ring_id")) == ring_id
+            ),
+        )
+        for ring_id in ring_ids
+    }
 
-    def row_theta_deg(rows: list[dict[str, str]]) -> np.ndarray:
-        theta = np.asarray([_to_int(row.get("theta_id")) for row in rows], dtype=np.float64)
-        return theta / count_hint * 360.0 if theta.size else np.asarray([], dtype=np.float64)
+    def row_position(row: dict[str, str]) -> tuple[float, float]:
+        ring_id = _to_int(row.get("ring_id"))
+        theta_rad = 2.0 * math.pi * _to_int(row.get("theta_id")) / count_hint_by_ring[ring_id]
+        radius = float(ring_to_radius[ring_id])
+        return radius * math.cos(theta_rad), radius * math.sin(theta_rad)
 
-    pending_theta = row_theta_deg(pending_rows)
-    pending_r = np.asarray(
-        [ring_to_radius[_to_int(row.get("ring_id"))] for row in pending_rows],
-        dtype=np.float64,
+    def row_phi(row: dict[str, str]) -> float:
+        raw = row.get("nominal_phi_rad")
+        if raw not in (None, ""):
+            return _to_float(raw)
+        ring_id = _to_int(row.get("ring_id"))
+        theta_rad = 2.0 * math.pi * _to_int(row.get("theta_id")) / count_hint_by_ring[ring_id]
+        return theta_rad + 0.5 * math.pi
+
+    max_abs_epsilon = max(
+        [abs(_to_float(row.get("epsilon_parallel"))) for row in completed_rows] + [1.0e-12]
     )
-    completed_theta = row_theta_deg(completed_rows)
-    completed_r = np.asarray(
-        [ring_to_radius[_to_int(row.get("ring_id"))] for row in completed_rows],
-        dtype=np.float64,
-    )
-    angle_error = np.asarray(
-        [
-            math.hypot(_to_float(row.get("delta_perp_1")), _to_float(row.get("delta_perp_2")))
-            for row in completed_rows
-        ],
-        dtype=np.float64,
-    )
-    marker_size = 10.0 + 3000.0 * np.nan_to_num(angle_error, nan=0.0)
-    hover = [
-        (
+
+    def strength_color(row: dict[str, str]) -> str:
+        epsilon = _to_float(row.get("epsilon_parallel"))
+        normalized = 0.5 + 0.5 * max(-1.0, min(1.0, epsilon / max_abs_epsilon))
+        return str(sample_colorscale(_STRENGTH_COLOR_VALUES, [normalized])[0])
+
+    def rectangle_xy(row: dict[str, str]) -> tuple[list[float], list[float]]:
+        x0, y0 = row_position(row)
+        phi = row_phi(row)
+        ring_id = _to_int(row.get("ring_id"))
+        spacing = (
+            2.0 * math.pi * max(1.0, float(ring_to_radius[ring_id])) / count_hint_by_ring[ring_id]
+        )
+        half_long = max(0.045, min(0.18, 0.32 * spacing))
+        half_short = 0.45 * half_long
+        ux, uy = math.cos(phi), math.sin(phi)
+        vx, vy = -uy, ux
+        corners = [
+            (half_long, half_short),
+            (-half_long, half_short),
+            (-half_long, -half_short),
+            (half_long, -half_short),
+            (half_long, half_short),
+        ]
+        xs = [x0 + a * ux + b * vx for a, b in corners]
+        ys = [y0 + a * uy + b * vy for a, b in corners]
+        return xs, ys
+
+    def hover_text(row: dict[str, str], *, pending: bool) -> str:
+        if pending:
+            return (
+                f"pending<br>ring {row.get('ring_id')}<br>"
+                f"frame {row.get('physical_slot_number')}<br>"
+                f"phi {row.get('nominal_phi_rad', '')}"
+            )
+        return (
             f"magnet {row.get('magnet_id')}<br>"
             f"ring {row.get('ring_id')}<br>"
             f"cluster {row.get('cluster_requested')}<br>"
-            f"slot {row.get('physical_slot_number')}<br>"
+            f"frame {row.get('physical_slot_number')}<br>"
             f"orientation {row.get('orientation_id')}<br>"
-            f"epsilon {row.get('epsilon_parallel')}"
+            f"epsilon {row.get('epsilon_parallel')}<br>"
+            f"phi {row.get('nominal_phi_rad', '')}"
         )
-        for row in completed_rows
-    ]
-    pending_hover = [
-        (f"pending<br>" f"ring {row.get('ring_id')}<br>" f"slot {row.get('physical_slot_number')}")
-        for row in pending_rows
-    ]
+
     fig = go.Figure()
-    if pending_rows:
+
+    for ring_id in ring_ids:
+        radius = float(ring_to_radius[ring_id])
+        theta = np.linspace(0.0, 2.0 * math.pi, 160)
         fig.add_trace(
-            go.Scatterpolar(
-                r=pending_r,
-                theta=pending_theta,
-                mode="markers",
-                name="pending",
-                text=pending_hover,
-                hoverinfo="text",
-                marker={
-                    "color": "rgba(148, 163, 184, 0.30)",
-                    "size": 6,
-                    "line": {"color": "rgba(148, 163, 184, 0.55)", "width": 1},
-                },
+            go.Scatter(
+                x=radius * np.cos(theta),
+                y=radius * np.sin(theta),
+                mode="lines",
+                name=f"R{ring_id}",
+                line={"color": "rgba(148, 163, 184, 0.25)", "width": 1},
+                hoverinfo="skip",
+                showlegend=False,
             )
         )
+
+    for idx, row in enumerate(pending_rows):
+        xs, ys = rectangle_xy(row)
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                fill="toself",
+                name="pending",
+                text=hover_text(row, pending=True),
+                hoverinfo="text",
+                fillcolor="rgba(148, 163, 184, 0.24)",
+                line={"color": "rgba(148, 163, 184, 0.65)", "width": 1},
+                showlegend=idx == 0,
+            )
+        )
+
+    for idx, row in enumerate(completed_rows):
+        xs, ys = rectangle_xy(row)
+        is_current = state.current_slot_flat_id == _to_int(row.get("slot_flat_id"))
+        fig.add_trace(
+            go.Scatter(
+                x=xs,
+                y=ys,
+                mode="lines",
+                fill="toself",
+                name="completed",
+                text=hover_text(row, pending=False),
+                hoverinfo="text",
+                fillcolor=strength_color(row),
+                line={"color": "black", "width": 3 if is_current else 1},
+                showlegend=idx == 0,
+            )
+        )
+
+    if completed_rows:
+        positions = [row_position(row) for row in completed_rows]
+        fig.add_trace(
+            go.Scatter(
+                x=[position[0] for position in positions],
+                y=[position[1] for position in positions],
+                mode="markers",
+                marker={
+                    "color": [_to_float(row.get("epsilon_parallel")) for row in completed_rows],
+                    "colorscale": _STRENGTH_COLORSCALE,
+                    "cmin": -max_abs_epsilon,
+                    "cmax": max_abs_epsilon,
+                    "size": 0.1,
+                    "opacity": 0.0,
+                    "colorbar": {"title": "epsilon"},
+                },
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+    label_rows = layer_rows
+    label_positions = [row_position(row) for row in label_rows]
     fig.add_trace(
-        go.Scatterpolar(
-            r=completed_r,
-            theta=completed_theta,
-            mode="markers",
-            name="completed",
-            text=hover,
-            hoverinfo="text",
-            marker={
-                "color": [_to_float(row.get("epsilon_parallel")) for row in completed_rows],
-                "colorscale": "RdBu",
-                "reversescale": True,
-                "size": marker_size,
-                "sizemode": "diameter",
-                "line": {"color": "black", "width": 1},
-                "colorbar": {"title": "epsilon"},
-            },
+        go.Scatter(
+            x=[position[0] for position in label_positions],
+            y=[position[1] - 0.09 for position in label_positions],
+            mode="text",
+            text=[str(row.get("physical_slot_number") or "") for row in label_rows],
+            textfont={"size": 9, "color": "#111827"},
+            hoverinfo="skip",
+            showlegend=False,
+            name="frame_numbers",
         )
     )
-    if state.current_event is not None and state.current_slot_flat_id is not None:
-        current_ring_id = _to_int(state.current_event.get("ring_id"))
-        if current_ring_id in ring_to_radius:
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=np.asarray([ring_to_radius[current_ring_id]], dtype=np.float64),
-                    theta=np.asarray(
-                        [_to_int(state.current_event.get("theta_id")) / count_hint * 360.0],
-                        dtype=np.float64,
-                    ),
-                    mode="markers",
-                    name="current",
-                    hoverinfo="skip",
-                    marker={
-                        "symbol": "circle-open",
-                        "size": 20,
-                        "color": "black",
-                        "line": {"color": "black", "width": 3},
-                    },
-                )
-            )
     fig.update_layout(
         title=f"Active Layer {state.active_layer_id} Rings",
-        polar={
-            "radialaxis": {
-                "tickmode": "array",
-                "tickvals": [ring_to_radius[ring_id] for ring_id in ring_ids],
-                "ticktext": [f"R{ring_id}" for ring_id in ring_ids],
-                "range": [0, max(ring_to_radius.values(), default=1) + 0.6],
-            }
-        },
+        xaxis={"visible": False, "scaleanchor": "y", "scaleratio": 1},
+        yaxis={"visible": False},
         showlegend=True,
         height=420,
         margin={"l": 30, "r": 30, "b": 30, "t": 45},
