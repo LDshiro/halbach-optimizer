@@ -64,6 +64,9 @@ def _run_ring_simulation(
     roi_samples: int,
     strength_sigma: float,
     direction_sigma: float,
+    measurement_strength_sigma: float,
+    measurement_direction_sigma_1: float,
+    measurement_direction_sigma_2: float,
     trial_workers: int,
 ) -> None:
     run = load_run(Path(run_path))
@@ -112,7 +115,11 @@ def _run_ring_simulation(
             },
             direction_sigma_1=float(direction_sigma),
             direction_sigma_2=float(direction_sigma),
-            measurement_noise=None,
+            measurement_noise={
+                "strength_sigma": float(measurement_strength_sigma),
+                "transverse_component_1_sigma": float(measurement_direction_sigma_1),
+                "transverse_component_2_sigma": float(measurement_direction_sigma_2),
+            },
         )
         assignments = assign_quantile_clusters(
             magnets,
@@ -172,6 +179,9 @@ def _run_ring_simulation(
             "cluster_pickup_policy": cluster_pickup_policy,
             "strength_count": int(strength_count),
             "angle_count": int(angle_count),
+            "measurement_strength_sigma": float(measurement_strength_sigma),
+            "measurement_direction_sigma_1": float(measurement_direction_sigma_1),
+            "measurement_direction_sigma_2": float(measurement_direction_sigma_2),
             "sensitivity_cache_hit": sensitivity_cache.cache_hit,
             "sensitivity_cache_key": sensitivity_cache.cache_key,
             "sensitivity_cache_path": str(sensitivity_cache.cache_path),
@@ -272,6 +282,28 @@ with st.sidebar:
         step=0.0001,
         format="%.5f",
     )
+    st.markdown("**Measurement noise**")
+    measurement_strength_sigma = st.number_input(
+        "Measurement strength sigma",
+        min_value=0.0,
+        value=0.0,
+        step=0.0001,
+        format="%.6f",
+    )
+    measurement_direction_sigma_1 = st.number_input(
+        "Measurement d1 sigma",
+        min_value=0.0,
+        value=0.0,
+        step=0.0001,
+        format="%.6f",
+    )
+    measurement_direction_sigma_2 = st.number_input(
+        "Measurement d2 sigma",
+        min_value=0.0,
+        value=0.0,
+        step=0.0001,
+        format="%.6f",
+    )
     st.markdown("**MPC weights**")
     lambda_field = st.number_input("lambda field", min_value=0.0, value=1.0, step=0.1)
     lambda_quota = st.number_input("lambda quota", min_value=0.0, value=1.0, step=0.1)
@@ -306,6 +338,9 @@ if run_clicked:
                 roi_samples=int(roi_samples),
                 strength_sigma=float(strength_sigma),
                 direction_sigma=float(direction_sigma),
+                measurement_strength_sigma=float(measurement_strength_sigma),
+                measurement_direction_sigma_1=float(measurement_direction_sigma_1),
+                measurement_direction_sigma_2=float(measurement_direction_sigma_2),
                 trial_workers=int(trial_workers),
             )
         st.success("Ring simulation completed")
