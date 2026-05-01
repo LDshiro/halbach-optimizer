@@ -125,6 +125,13 @@ from halbach.assembly.sensitivity import (
     save_sensitivity_table,
     sensitivity_contribution,
 )
+from halbach.assembly.sensitivity_cache import (
+    SENSITIVITY_CACHE_VERSION,
+    CachedSensitivityTable,
+    load_or_compute_sensitivity_table,
+    sensitivity_cache_key,
+    sensitivity_cache_path,
+)
 from halbach.assembly.session import (
     PlanCSession,
     SessionLogError,
@@ -197,6 +204,7 @@ __all__ = [
     "ClusterMPCDecision",
     "ClusterPickupPolicy",
     "ClusterStats",
+    "CachedSensitivityTable",
     "CsvMeasurementProvider",
     "EvaluationModel",
     "FakeSerialMeasurementProvider",
@@ -233,6 +241,7 @@ __all__ = [
     "RingQuotaPlan",
     "RingQuotaPlannerConfig",
     "RingSummary",
+    "SENSITIVITY_CACHE_VERSION",
     "SENSITIVITY_SCHEMA_VERSION",
     "SelfConsistentAssignmentResult",
     "SelfConsistentCandidateEvaluation",
@@ -299,6 +308,7 @@ __all__ = [
     "load_plan_c_config",
     "load_plan_c_config_json",
     "load_latest_session_snapshot",
+    "load_or_compute_sensitivity_table",
     "load_sensitivity_table",
     "measured_magnet_from_direction",
     "outer_to_inner_layer_order",
@@ -328,6 +338,8 @@ __all__ = [
     "run_simulation_trial",
     "save_plan_c_config_json",
     "save_sensitivity_table",
+    "sensitivity_cache_key",
+    "sensitivity_cache_path",
     "sensitivity_contribution",
     "self_consistent_config_from_run",
     "simulation_trial_row",

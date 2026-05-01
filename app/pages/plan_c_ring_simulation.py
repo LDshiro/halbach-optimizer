@@ -30,7 +30,7 @@ from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import SimulationTrialArtifacts, write_simulation_outputs
 from halbach.assembly.ring_quota import plan_work_unit_cluster_quotas
 from halbach.assembly.self_consistent_assignment import self_consistent_config_from_run
-from halbach.assembly.sensitivity import compute_sensitivity_table
+from halbach.assembly.sensitivity_cache import load_or_compute_sensitivity_table
 from halbach.assembly.simulation import run_simulation_trial, summarize_comparison_results
 from halbach.assembly.slots import build_assembly_slots
 from halbach.assembly.types import (
@@ -75,7 +75,8 @@ def _run_ring_simulation(
         n_samples=int(roi_samples),
         seed=int(seed),
     )
-    sensitivity_table = compute_sensitivity_table(
+    sensitivity_cache = load_or_compute_sensitivity_table(
+        Path(out_dir) / "sensitivity_cache",
         slots,
         roi_points,
         finite_difference_step=1.0e-6,
@@ -87,6 +88,7 @@ def _run_ring_simulation(
             "roi_mode": "surface-fibonacci",
         },
     )
+    sensitivity_table = sensitivity_cache.table
     evaluation_model: EvaluationModel = (
         "self_consistent" if evaluation_model_label == "self_consistent_from_run" else "fixed"
     )
@@ -162,6 +164,9 @@ def _run_ring_simulation(
             "cluster_pickup_policy": cluster_pickup_policy,
             "strength_count": int(strength_count),
             "angle_count": int(angle_count),
+            "sensitivity_cache_hit": sensitivity_cache.cache_hit,
+            "sensitivity_cache_key": sensitivity_cache.cache_key,
+            "sensitivity_cache_path": str(sensitivity_cache.cache_path),
         },
     )
 
