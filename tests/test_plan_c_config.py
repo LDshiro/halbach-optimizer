@@ -25,6 +25,7 @@ def test_default_plan_c_config_matches_step6_baseline() -> None:
     assert config.clusters.strength_sigma_step == 0.5
     assert config.clusters.angle_sigma_step == 0.5
     assert config.reject.max_fraction == 0.10
+    assert config.reject.surplus_fraction == 0.05
     assert config.measurement_noise.strength_sigma == 0.001
 
 
@@ -56,6 +57,7 @@ def test_plan_c_config_json_roundtrip(tmp_path) -> None:
                 "strength_sigma_step": 0.25,
                 "angle_sigma_step": 0.75,
             },
+            "reject": {"surplus_fraction": 0.08},
         }
     )
     path = tmp_path / "plan_c_config.json"
@@ -67,6 +69,7 @@ def test_plan_c_config_json_roundtrip(tmp_path) -> None:
     data = plan_c_config_to_dict(loaded)
     assert data["schema_version"] == 1
     assert data["run_dir"] == "runs/demo_opt"
+    assert data["reject"]["surplus_fraction"] == 0.08
 
 
 def test_plan_c_config_accepts_ring_by_ring_work_unit_modes() -> None:

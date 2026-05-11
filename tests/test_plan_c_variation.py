@@ -1,6 +1,11 @@
 import pytest
 
-from halbach.assembly.variation import generate_virtual_magnets
+from halbach.assembly.types import MagnetError, VirtualMagnet
+from halbach.assembly.variation import (
+    generate_virtual_magnets,
+    magnet_error_norm,
+    reject_largest_error_magnets,
+)
 
 
 def _error_rows(magnets):
@@ -16,6 +21,16 @@ def _error_rows(magnets):
         )
         for magnet in magnets
     ]
+
+
+def _magnet(magnet_id: int, eps: float, d1: float = 0.0, d2: float = 0.0) -> VirtualMagnet:
+    error = MagnetError(epsilon_parallel=eps, delta_perp_1=d1, delta_perp_2=d2)
+    return VirtualMagnet(
+        magnet_id=magnet_id,
+        true_error=error,
+        measured_error=error,
+        quality=1.0,
+    )
 
 
 def test_generate_virtual_magnets_is_seed_reproducible() -> None:
@@ -37,6 +52,48 @@ def test_generate_virtual_magnets_is_seed_reproducible() -> None:
     assert len(magnets_a) == 5
     assert _error_rows(magnets_a) == _error_rows(magnets_b)
     assert [magnet.magnet_id for magnet in magnets_a] == list(range(5))
+
+
+def test_reject_largest_error_magnets_trims_to_target_count_stably() -> None:
+    magnets = [
+        _magnet(0, 0.01),
+        _magnet(1, -0.10),
+        _magnet(2, 0.02),
+        _magnet(3, 0.00, d1=0.20),
+        _magnet(4, 0.03),
+    ]
+
+    kept, rejected = reject_largest_error_magnets(magnets, target_count=3)
+
+    assert [magnet.magnet_id for magnet in rejected] == [3, 1]
+    assert [magnet.magnet_id for magnet in kept] == [0, 2, 4]
+    assert [magnet_error_norm(magnet) for magnet in rejected] == pytest.approx([0.20, 0.10])
+
+
+def test_reject_largest_error_magnets_can_use_true_error() -> None:
+    magnets = [
+        VirtualMagnet(
+            magnet_id=0,
+            true_error=MagnetError(0.50, 0.0, 0.0),
+            measured_error=MagnetError(0.01, 0.0, 0.0),
+            quality=1.0,
+        ),
+        VirtualMagnet(
+            magnet_id=1,
+            true_error=MagnetError(0.01, 0.0, 0.0),
+            measured_error=MagnetError(0.50, 0.0, 0.0),
+            quality=1.0,
+        ),
+    ]
+
+    kept, rejected = reject_largest_error_magnets(
+        magnets,
+        target_count=1,
+        use_measured_error=False,
+    )
+
+    assert [magnet.magnet_id for magnet in rejected] == [0]
+    assert [magnet.magnet_id for magnet in kept] == [1]
 
 
 def test_iid_zero_strength_and_zero_noise_keeps_true_and_measured_equal() -> None:
@@ -133,3 +190,12 @@ def test_generate_virtual_magnets_rejects_invalid_inputs(kwargs: dict[str, objec
     base.update(kwargs)
     with pytest.raises(ValueError):
         generate_virtual_magnets(**base)
+
+
+@pytest.mark.parametrize("target_count", [0, 3])
+def test_reject_largest_error_magnets_rejects_invalid_target_count(
+    target_count: int,
+) -> None:
+    magnets = [_magnet(0, 0.0), _magnet(1, 0.0)]
+    with pytest.raises(ValueError):
+        reject_largest_error_magnets(magnets, target_count=target_count)

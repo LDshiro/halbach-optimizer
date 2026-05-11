@@ -196,7 +196,11 @@ from halbach.assembly.ui_payload import (
     build_slot_display_rows,
     build_summary_ui_payload,
 )
-from halbach.assembly.variation import generate_virtual_magnets
+from halbach.assembly.variation import (
+    generate_virtual_magnets,
+    magnet_error_norm,
+    reject_largest_error_magnets,
+)
 from halbach.assembly.work_units import (
     assign_work_unit_ids,
     build_work_units,
@@ -317,6 +321,7 @@ __all__ = [
     "increment_cluster",
     "inventory_total_count",
     "isolate_outliers",
+    "magnet_error_norm",
     "load_json_dict",
     "load_plan_c_config",
     "load_plan_c_config_json",
@@ -333,6 +338,7 @@ __all__ = [
     "plan_c_config_to_dict",
     "read_csv_dicts",
     "read_jsonl_dicts",
+    "reject_largest_error_magnets",
     "ring_pair_summary_rows",
     "ring_pair_summary_from_ring_summaries",
     "ring_summary_rows",

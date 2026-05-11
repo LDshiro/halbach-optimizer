@@ -68,6 +68,7 @@ class PlanCClustersConfig:
 class PlanCRejectConfig:
     policy: str = "isolate_up_to_fraction"
     max_fraction: float = 0.10
+    surplus_fraction: float = 0.05
     prefer_direction_outliers: bool = True
 
 
@@ -138,6 +139,7 @@ def plan_c_config_to_dict(config: PlanCConfig) -> dict[str, object]:
         "reject": {
             "policy": config.reject.policy,
             "max_fraction": config.reject.max_fraction,
+            "surplus_fraction": config.reject.surplus_fraction,
             "prefer_direction_outliers": config.reject.prefer_direction_outliers,
         },
         "measurement_noise": {
@@ -280,6 +282,9 @@ def plan_c_config_from_dict(data: dict[str, object]) -> PlanCConfig:
         reject=PlanCRejectConfig(
             policy=_str_value(reject.get("policy", base.reject.policy)),
             max_fraction=_float_value(reject.get("max_fraction", base.reject.max_fraction)),
+            surplus_fraction=_float_value(
+                reject.get("surplus_fraction", base.reject.surplus_fraction)
+            ),
             prefer_direction_outliers=_bool_value(
                 reject.get("prefer_direction_outliers", base.reject.prefer_direction_outliers)
             ),

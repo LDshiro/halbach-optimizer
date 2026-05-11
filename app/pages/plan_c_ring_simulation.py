@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
@@ -44,7 +45,10 @@ from halbach.assembly.types import (
     EvaluationModel,
 )
 from halbach.assembly.ui_payload import build_summary_ui_payload
-from halbach.assembly.variation import generate_virtual_magnets
+from halbach.assembly.variation import (
+    generate_virtual_magnets,
+    reject_largest_error_magnets,
+)
 from halbach.assembly.work_units import assign_work_unit_ids, build_work_units
 from halbach.constants import FACTOR
 from halbach.geom import build_roi_points
@@ -130,6 +134,7 @@ def _run_ring_simulation(
     measurement_strength_sigma: float,
     measurement_direction_sigma_1: float,
     measurement_direction_sigma_2: float,
+    magnet_surplus_fraction: float,
     trial_workers: int,
 ) -> None:
     run = load_run(Path(run_path))
@@ -157,6 +162,13 @@ def _run_ring_simulation(
         },
     )
     sensitivity_table = sensitivity_cache.table
+    required_magnet_count = len(slots)
+    if not math.isfinite(magnet_surplus_fraction) or magnet_surplus_fraction < 0.0:
+        raise ValueError("magnet_surplus_fraction must be finite and >= 0")
+    generated_magnet_count = max(
+        required_magnet_count,
+        int(math.ceil(required_magnet_count * (1.0 + float(magnet_surplus_fraction)))),
+    )
     evaluation_model: EvaluationModel = (
         "self_consistent" if evaluation_model_label == "self_consistent_from_run" else "fixed"
     )
@@ -168,8 +180,8 @@ def _run_ring_simulation(
 
     def run_one_trial(trial_id: int) -> SimulationTrialArtifacts:
         trial_seed = int(seed) + trial_id
-        magnets = generate_virtual_magnets(
-            count=len(slots),
+        magnet_pool = generate_virtual_magnets(
+            count=generated_magnet_count,
             seed=trial_seed,
             strength_model={
                 "mode": "iid_normal",
@@ -183,6 +195,10 @@ def _run_ring_simulation(
                 "transverse_component_1_sigma": float(measurement_direction_sigma_1),
                 "transverse_component_2_sigma": float(measurement_direction_sigma_2),
             },
+        )
+        magnets, _rejected_magnets = reject_largest_error_magnets(
+            magnet_pool,
+            target_count=required_magnet_count,
         )
         assignments = assign_clusters(
             magnets,
@@ -257,6 +273,11 @@ def _run_ring_simulation(
             "measurement_strength_sigma": float(measurement_strength_sigma),
             "measurement_direction_sigma_1": float(measurement_direction_sigma_1),
             "measurement_direction_sigma_2": float(measurement_direction_sigma_2),
+            "magnet_surplus_fraction": float(magnet_surplus_fraction),
+            "magnet_required_count": required_magnet_count,
+            "magnet_generated_count": generated_magnet_count,
+            "magnet_rejected_count": generated_magnet_count - required_magnet_count,
+            "magnet_rejection_policy": "largest_measured_error_norm",
             "visualization_geometry": _visualization_geometry_metadata(run),
             "sensitivity_cache_hit": sensitivity_cache.cache_hit,
             "sensitivity_cache_key": sensitivity_cache.cache_key,
@@ -388,6 +409,14 @@ with st.sidebar:
         step=0.0001,
         format="%.5f",
     )
+    magnet_surplus_percent = st.number_input(
+        "Magnet surplus before outlier rejection [%]",
+        min_value=0.0,
+        max_value=100.0,
+        value=5.0,
+        step=1.0,
+        format="%.2f",
+    )
     st.markdown("**Measurement noise**")
     measurement_strength_sigma = st.number_input(
         "Measurement strength sigma",
@@ -469,6 +498,7 @@ if run_clicked:
                 measurement_strength_sigma=float(measurement_strength_sigma),
                 measurement_direction_sigma_1=float(measurement_direction_sigma_1),
                 measurement_direction_sigma_2=float(measurement_direction_sigma_2),
+                magnet_surplus_fraction=float(magnet_surplus_percent) / 100.0,
                 trial_workers=int(trial_workers),
             )
         st.success("Ring simulation completed")
@@ -503,6 +533,14 @@ with summary_tab:
         "n/a" if payload["rms_ratio_mean"] is None else f"{float(payload['rms_ratio_mean']):.4g}",
     )
     cols[4].metric("Linear Improved", payload["linear_improved_count"] or 0)
+    metadata = summary.get("metadata", {})
+    if isinstance(metadata, dict) and "magnet_generated_count" in metadata:
+        magnet_cols = st.columns(4)
+        magnet_cols[0].metric("Required Magnets", metadata.get("magnet_required_count", "-"))
+        magnet_cols[1].metric("Generated Magnets", metadata.get("magnet_generated_count", "-"))
+        magnet_cols[2].metric("Rejected Magnets", metadata.get("magnet_rejected_count", "-"))
+        surplus_percent = 100.0 * float(metadata.get("magnet_surplus_fraction", 0.0))
+        magnet_cols[3].metric("Surplus", f"{surplus_percent:.2f}%")
     if payload["trial_rows"]:
         st.dataframe(pd.DataFrame(payload["trial_rows"]), use_container_width=True, hide_index=True)
 

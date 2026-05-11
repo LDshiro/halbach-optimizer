@@ -126,9 +126,7 @@ def generate_virtual_magnets(
     d1 = np.asarray(rng.normal(loc=0.0, scale=sigma_d1, size=count), dtype=np.float64)
     d2 = np.asarray(rng.normal(loc=0.0, scale=sigma_d2, size=count), dtype=np.float64)
 
-    noise_eps_sigma, noise_d1_sigma, noise_d2_sigma = _measurement_noise_sigmas(
-        measurement_noise
-    )
+    noise_eps_sigma, noise_d1_sigma, noise_d2_sigma = _measurement_noise_sigmas(measurement_noise)
     measured_eps = eps + rng.normal(loc=0.0, scale=noise_eps_sigma, size=count)
     measured_d1 = d1 + rng.normal(loc=0.0, scale=noise_d1_sigma, size=count)
     measured_d2 = d2 + rng.normal(loc=0.0, scale=noise_d2_sigma, size=count)
@@ -155,4 +153,58 @@ def generate_virtual_magnets(
     return magnets
 
 
-__all__ = ["MeasurementNoise", "StrengthModel", "generate_virtual_magnets"]
+def magnet_error_norm(
+    magnet: VirtualMagnet,
+    *,
+    use_measured_error: bool = True,
+) -> float:
+    """Return the Euclidean norm of a magnet error vector."""
+    error = magnet.measured_error if use_measured_error else magnet.true_error
+    return math.sqrt(
+        error.epsilon_parallel * error.epsilon_parallel
+        + error.delta_perp_1 * error.delta_perp_1
+        + error.delta_perp_2 * error.delta_perp_2
+    )
+
+
+def reject_largest_error_magnets(
+    magnets: Sequence[VirtualMagnet],
+    *,
+    target_count: int,
+    use_measured_error: bool = True,
+) -> tuple[list[VirtualMagnet], list[VirtualMagnet]]:
+    """
+    Keep target_count magnets and reject the largest measured-error outliers.
+
+    Returned kept magnets preserve the input order. Rejected magnets are sorted by
+    descending error norm with magnet_id as a stable tie breaker.
+    """
+    if target_count <= 0:
+        raise ValueError("target_count must be positive")
+    if target_count > len(magnets):
+        raise ValueError("target_count must be <= len(magnets)")
+
+    reject_count = len(magnets) - target_count
+    if reject_count == 0:
+        return list(magnets), []
+
+    ordered = sorted(
+        magnets,
+        key=lambda magnet: (
+            -magnet_error_norm(magnet, use_measured_error=use_measured_error),
+            magnet.magnet_id,
+        ),
+    )
+    rejected = ordered[:reject_count]
+    rejected_ids = {magnet.magnet_id for magnet in rejected}
+    kept = [magnet for magnet in magnets if magnet.magnet_id not in rejected_ids]
+    return kept, rejected
+
+
+__all__ = [
+    "MeasurementNoise",
+    "StrengthModel",
+    "generate_virtual_magnets",
+    "magnet_error_norm",
+    "reject_largest_error_magnets",
+]
