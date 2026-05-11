@@ -3,7 +3,14 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from halbach.assembly.types import ClusterAssignment, QuarantineReason, VirtualMagnet
+import numpy as np
+
+from halbach.assembly.types import (
+    ClusterAssignment,
+    ClusterBinningMode,
+    QuarantineReason,
+    VirtualMagnet,
+)
 
 
 def _validate_magnets(magnets: list[VirtualMagnet]) -> None:
@@ -41,15 +48,14 @@ def _rank_bins(values: list[tuple[int, float]], count: int) -> dict[int, int]:
     return bins
 
 
-def assign_quantile_clusters(
+def _validate_cluster_inputs(
     magnets: list[VirtualMagnet],
     *,
-    strength_count: int = 10,
-    angle_count: int = 3,
-    transverse_2_weight: float = 1.0,
-    quarantine: Mapping[int, QuarantineReason] | None = None,
-) -> list[ClusterAssignment]:
-    """Assign measured magnets to strength/angle quantile clusters."""
+    strength_count: int,
+    angle_count: int,
+    transverse_2_weight: float,
+    quarantine: Mapping[int, QuarantineReason] | None,
+) -> tuple[dict[int, QuarantineReason], list[VirtualMagnet]]:
     _validate_magnets(magnets)
     if strength_count <= 0:
         raise ValueError("strength_count must be positive")
@@ -63,17 +69,16 @@ def assign_quantile_clusters(
     unknown_quarantine_ids = sorted(set(quarantine_map) - magnet_ids)
     if unknown_quarantine_ids:
         raise ValueError(f"quarantine contains unknown magnet ids: {unknown_quarantine_ids}")
+    return quarantine_map, [magnet for magnet in magnets if magnet.magnet_id not in quarantine_map]
 
-    active = [magnet for magnet in magnets if magnet.magnet_id not in quarantine_map]
-    strength_bins = _rank_bins(
-        [(magnet.magnet_id, magnet.measured_error.epsilon_parallel) for magnet in active],
-        strength_count,
-    )
-    angle_bins = _rank_bins(
-        [(magnet.magnet_id, _angle_score(magnet, transverse_2_weight)) for magnet in active],
-        angle_count,
-    )
 
+def _cluster_assignments_from_bins(
+    magnets: list[VirtualMagnet],
+    *,
+    strength_bins: Mapping[int, int],
+    angle_bins: Mapping[int, int],
+    quarantine_map: Mapping[int, QuarantineReason],
+) -> list[ClusterAssignment]:
     assignments: list[ClusterAssignment] = []
     for magnet in magnets:
         quarantine_id = quarantine_map.get(magnet.magnet_id)
@@ -97,6 +102,163 @@ def assign_quantile_clusters(
             )
         )
     return assignments
+
+
+def assign_quantile_clusters(
+    magnets: list[VirtualMagnet],
+    *,
+    strength_count: int = 10,
+    angle_count: int = 3,
+    transverse_2_weight: float = 1.0,
+    quarantine: Mapping[int, QuarantineReason] | None = None,
+) -> list[ClusterAssignment]:
+    """Assign measured magnets to strength/angle quantile clusters."""
+    quarantine_map, active = _validate_cluster_inputs(
+        magnets,
+        strength_count=strength_count,
+        angle_count=angle_count,
+        transverse_2_weight=transverse_2_weight,
+        quarantine=quarantine,
+    )
+    strength_bins = _rank_bins(
+        [(magnet.magnet_id, magnet.measured_error.epsilon_parallel) for magnet in active],
+        strength_count,
+    )
+    angle_bins = _rank_bins(
+        [(magnet.magnet_id, _angle_score(magnet, transverse_2_weight)) for magnet in active],
+        angle_count,
+    )
+    return _cluster_assignments_from_bins(
+        magnets,
+        strength_bins=strength_bins,
+        angle_bins=angle_bins,
+        quarantine_map=quarantine_map,
+    )
+
+
+def _sigma_strength_bin(z_score: float, count: int, step: float) -> int:
+    if count == 1:
+        return 0
+    lower_edge = -0.5 * float(step) * float(count - 2)
+    if z_score < lower_edge:
+        return 0
+    return max(0, min(count - 1, int(math.floor((z_score - lower_edge) / step)) + 1))
+
+
+def _sigma_angle_bin(normalized_score: float, count: int, step: float) -> int:
+    if count == 1:
+        return 0
+    return max(0, min(count - 1, int(math.floor(normalized_score / step))))
+
+
+def assign_sigma_band_clusters(
+    magnets: list[VirtualMagnet],
+    *,
+    strength_count: int = 10,
+    angle_count: int = 5,
+    transverse_2_weight: float = 1.0,
+    strength_sigma_step: float = 0.5,
+    angle_sigma_step: float = 0.5,
+    quarantine: Mapping[int, QuarantineReason] | None = None,
+) -> list[ClusterAssignment]:
+    """Assign measured magnets to fixed-width sigma bands."""
+    if not math.isfinite(strength_sigma_step) or strength_sigma_step <= 0.0:
+        raise ValueError("strength_sigma_step must be finite and > 0")
+    if not math.isfinite(angle_sigma_step) or angle_sigma_step <= 0.0:
+        raise ValueError("angle_sigma_step must be finite and > 0")
+    quarantine_map, active = _validate_cluster_inputs(
+        magnets,
+        strength_count=strength_count,
+        angle_count=angle_count,
+        transverse_2_weight=transverse_2_weight,
+        quarantine=quarantine,
+    )
+    if not active:
+        return _cluster_assignments_from_bins(
+            magnets,
+            strength_bins={},
+            angle_bins={},
+            quarantine_map=quarantine_map,
+        )
+
+    eps = np.asarray(
+        [magnet.measured_error.epsilon_parallel for magnet in active], dtype=np.float64
+    )
+    eps_mean = float(np.mean(eps))
+    eps_sigma = float(np.std(eps))
+    angle_scores = np.asarray(
+        [_angle_score(magnet, transverse_2_weight) for magnet in active], dtype=np.float64
+    )
+    angle_sigma = float(
+        math.sqrt(
+            np.mean(
+                [
+                    magnet.measured_error.delta_perp_1 * magnet.measured_error.delta_perp_1
+                    + transverse_2_weight
+                    * magnet.measured_error.delta_perp_2
+                    * magnet.measured_error.delta_perp_2
+                    for magnet in active
+                ]
+            )
+        )
+    )
+
+    central_strength_bin = strength_count // 2
+    strength_bins: dict[int, int] = {}
+    angle_bins: dict[int, int] = {}
+    for magnet, angle_score in zip(active, angle_scores, strict=True):
+        if eps_sigma <= 0.0:
+            strength_bins[magnet.magnet_id] = central_strength_bin
+        else:
+            z_score = (float(magnet.measured_error.epsilon_parallel) - eps_mean) / eps_sigma
+            strength_bins[magnet.magnet_id] = _sigma_strength_bin(
+                z_score, strength_count, strength_sigma_step
+            )
+        if angle_sigma <= 0.0:
+            angle_bins[magnet.magnet_id] = 0
+        else:
+            angle_bins[magnet.magnet_id] = _sigma_angle_bin(
+                float(angle_score) / angle_sigma, angle_count, angle_sigma_step
+            )
+    return _cluster_assignments_from_bins(
+        magnets,
+        strength_bins=strength_bins,
+        angle_bins=angle_bins,
+        quarantine_map=quarantine_map,
+    )
+
+
+def assign_clusters(
+    magnets: list[VirtualMagnet],
+    *,
+    binning: ClusterBinningMode = "quantile",
+    strength_count: int = 10,
+    angle_count: int = 3,
+    transverse_2_weight: float = 1.0,
+    strength_sigma_step: float = 0.5,
+    angle_sigma_step: float = 0.5,
+    quarantine: Mapping[int, QuarantineReason] | None = None,
+) -> list[ClusterAssignment]:
+    """Assign clusters using the selected binning strategy."""
+    if binning == "quantile":
+        return assign_quantile_clusters(
+            magnets,
+            strength_count=strength_count,
+            angle_count=angle_count,
+            transverse_2_weight=transverse_2_weight,
+            quarantine=quarantine,
+        )
+    if binning == "sigma_band":
+        return assign_sigma_band_clusters(
+            magnets,
+            strength_count=strength_count,
+            angle_count=angle_count,
+            transverse_2_weight=transverse_2_weight,
+            strength_sigma_step=strength_sigma_step,
+            angle_sigma_step=angle_sigma_step,
+            quarantine=quarantine,
+        )
+    raise ValueError(f"unsupported cluster binning mode: {binning}")
 
 
 def isolate_outliers(
@@ -134,8 +296,7 @@ def isolate_outliers(
 
     remaining = [magnet for magnet in magnets if magnet.magnet_id not in selected]
     direction_candidates = [
-        (magnet, _angle_score(magnet, direction_weight))
-        for magnet in remaining
+        (magnet, _angle_score(magnet, direction_weight)) for magnet in remaining
     ]
     direction_candidates = [
         (magnet, score) for magnet, score in direction_candidates if score > 0.0
@@ -148,12 +309,9 @@ def isolate_outliers(
 
     remaining = [magnet for magnet in magnets if magnet.magnet_id not in selected]
     strength_candidates = [
-        (magnet, abs(float(magnet.measured_error.epsilon_parallel)))
-        for magnet in remaining
+        (magnet, abs(float(magnet.measured_error.epsilon_parallel))) for magnet in remaining
     ]
-    strength_candidates = [
-        (magnet, score) for magnet, score in strength_candidates if score > 0.0
-    ]
+    strength_candidates = [(magnet, score) for magnet, score in strength_candidates if score > 0.0]
     strength_candidates.sort(key=lambda item: (-item[1], item[0].magnet_id))
     for magnet, _score in strength_candidates:
         if len(selected) >= limit:
@@ -163,4 +321,9 @@ def isolate_outliers(
     return selected
 
 
-__all__ = ["assign_quantile_clusters", "isolate_outliers"]
+__all__ = [
+    "assign_clusters",
+    "assign_quantile_clusters",
+    "assign_sigma_band_clusters",
+    "isolate_outliers",
+]

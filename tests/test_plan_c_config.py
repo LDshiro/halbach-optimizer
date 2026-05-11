@@ -19,8 +19,11 @@ def test_default_plan_c_config_matches_step6_baseline() -> None:
     assert config.online_assignment.decision_engine == "linear_sensitivity"
     assert config.sensitivity.dimension == 30
     assert config.sensitivity.finite_difference_step == 0.001
+    assert config.clusters.binning == "quantile"
     assert config.clusters.strength_count == 10
-    assert config.clusters.angle_count == 3
+    assert config.clusters.angle_count == 5
+    assert config.clusters.strength_sigma_step == 0.5
+    assert config.clusters.angle_sigma_step == 0.5
     assert config.reject.max_fraction == 0.10
     assert config.measurement_noise.strength_sigma == 0.001
 
@@ -46,7 +49,13 @@ def test_plan_c_config_json_roundtrip(tmp_path) -> None:
     config = plan_c_config_from_dict(
         {
             "run_dir": "runs/demo_opt",
-            "clusters": {"strength_count": 4, "angle_count": 2},
+            "clusters": {
+                "binning": "sigma_band",
+                "strength_count": 4,
+                "angle_count": 2,
+                "strength_sigma_step": 0.25,
+                "angle_sigma_step": 0.75,
+            },
         }
     )
     path = tmp_path / "plan_c_config.json"
@@ -62,6 +71,7 @@ def test_plan_c_config_json_roundtrip(tmp_path) -> None:
 
 def test_plan_c_config_accepts_ring_by_ring_work_unit_modes() -> None:
     for mode in (
+        "stack_by_stack_outer_to_inner",
         "layer_by_layer_outer_to_inner",
         "ring_by_ring_outer_to_inner",
         "mirror_ring_pair",

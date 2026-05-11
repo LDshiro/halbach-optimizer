@@ -1,6 +1,11 @@
 """Plan C assembly support primitives."""
 
-from halbach.assembly.clustering import assign_quantile_clusters, isolate_outliers
+from halbach.assembly.clustering import (
+    assign_clusters,
+    assign_quantile_clusters,
+    assign_sigma_band_clusters,
+    isolate_outliers,
+)
 from halbach.assembly.config import (
     PlanCClustersConfig,
     PlanCConfig,
@@ -93,6 +98,7 @@ from halbach.assembly.orientations import default_orientations, rotate_error_for
 from halbach.assembly.ring_quota import (
     compute_inventory_target_mean_epsilon,
     compute_ring_importance,
+    compute_ring_sensitivity_importance,
     plan_ring_cluster_quotas,
     plan_work_unit_cluster_quotas,
 )
@@ -154,6 +160,7 @@ from halbach.assembly.types import (
     AssemblySlot,
     AssemblyTimelineEvent,
     ClusterAssignment,
+    ClusterBinningMode,
     ClusterInventory,
     ClusterMPCConfig,
     ClusterMPCDecision,
@@ -199,6 +206,7 @@ __all__ = [
     "AssemblySlot",
     "AssemblyTimelineEvent",
     "ClusterAssignment",
+    "ClusterBinningMode",
     "ClusterInventory",
     "ClusterMPCConfig",
     "ClusterMPCDecision",
@@ -268,7 +276,9 @@ __all__ = [
     "VirtualMagnet",
     "WorkUnit",
     "assign_work_unit_ids",
+    "assign_clusters",
     "assign_quantile_clusters",
+    "assign_sigma_band_clusters",
     "build_assembly_slots",
     "build_cluster_inventory",
     "build_fixed_model_arrays",
@@ -286,6 +296,7 @@ __all__ = [
     "cluster_usage_from_placements",
     "compute_inventory_target_mean_epsilon",
     "compute_ring_importance",
+    "compute_ring_sensitivity_importance",
     "compute_sensitivity_table",
     "default_plan_c_config",
     "compute_field_metrics",

@@ -245,11 +245,80 @@ def _orientation_index(table: SensitivityTable) -> dict[str, int]:
 
 
 def _angle_bin_from_cluster_id(cluster_id: str) -> int:
+    return _cluster_bins(cluster_id)[1]
+
+
+def _cluster_bins(cluster_id: str) -> tuple[int, int]:
     try:
-        angle_part = cluster_id.split("_A", maxsplit=1)[1]
+        strength_part, angle_part = cluster_id.split("_A", maxsplit=1)
+        strength_part = strength_part.removeprefix("S")
     except IndexError as exc:
         raise ValueError(f"cluster_id must use Sxx_Ayy format: {cluster_id}") from exc
-    return int(angle_part)
+    return int(strength_part), int(angle_part)
+
+
+def _cluster_bin_distance(cluster_a: str, cluster_b: str) -> int:
+    strength_a, angle_a = _cluster_bins(cluster_a)
+    strength_b, angle_b = _cluster_bins(cluster_b)
+    return max(abs(strength_a - strength_b), abs(angle_a - angle_b))
+
+
+def _mean_angle_error(stats: ClusterStats) -> float:
+    return float(math.hypot(float(stats.mean[1]), float(stats.mean[2])))
+
+
+def _neighbor_shortage_cost(
+    cluster_id: str,
+    remaining_cluster_counts: dict[str, int],
+    future_cluster_demand: dict[str, int],
+    radius_bins: int,
+) -> float:
+    if radius_bins < 0:
+        raise ValueError("future_neighbor_radius_bins must be >= 0")
+    cluster_ids = set(remaining_cluster_counts) | set(future_cluster_demand)
+    neighborhood = {
+        item for item in cluster_ids if _cluster_bin_distance(cluster_id, item) <= radius_bins
+    }
+    future_demand = sum(int(future_cluster_demand.get(item, 0)) for item in neighborhood)
+    projected_supply = sum(int(remaining_cluster_counts.get(item, 0)) for item in neighborhood)
+    shortage = max(0, future_demand - projected_supply)
+    return float(shortage * shortage)
+
+
+def _central_strength_bins(max_strength_bin: int) -> set[int]:
+    if max_strength_bin >= 5:
+        return {4, 5}
+    center_low = max(0, max_strength_bin // 2)
+    center_high = max(0, (max_strength_bin + 1) // 2)
+    return {center_low, center_high}
+
+
+def _central_low_angle_cost(
+    remaining_cluster_counts: dict[str, int],
+    future_cluster_demand: dict[str, int],
+) -> float:
+    cluster_ids = set(remaining_cluster_counts) | set(future_cluster_demand)
+    if not cluster_ids:
+        return 0.0
+    max_strength_bin = max(_cluster_bins(cluster_id)[0] for cluster_id in cluster_ids)
+    central_strengths = _central_strength_bins(max_strength_bin)
+
+    def is_central_low_angle(cluster_id: str) -> bool:
+        strength_bin, angle_bin = _cluster_bins(cluster_id)
+        return strength_bin in central_strengths and angle_bin == 0
+
+    future_demand = sum(
+        int(count)
+        for cluster_id, count in future_cluster_demand.items()
+        if is_central_low_angle(cluster_id)
+    )
+    projected_supply = sum(
+        int(count)
+        for cluster_id, count in remaining_cluster_counts.items()
+        if is_central_low_angle(cluster_id)
+    )
+    shortage = max(0, future_demand - projected_supply)
+    return float(shortage * shortage)
 
 
 def _validate_cluster_stats(stats: ClusterStats) -> None:
@@ -273,10 +342,13 @@ def _validate_cluster_mpc_config(config: ClusterMPCConfig) -> None:
         "lambda_angle": config.lambda_angle,
         "lambda_future": config.lambda_future,
         "lambda_mirror": config.lambda_mirror,
+        "lambda_central_reserve": config.lambda_central_reserve,
     }
     for name, value in weights.items():
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"{name} must be finite and >= 0")
+    if config.future_neighbor_radius_bins < 0:
+        raise ValueError("future_neighbor_radius_bins must be >= 0")
 
 
 def _allowed_orientation_ids(
@@ -474,14 +546,18 @@ def _score_cluster_for_current_ring_cached(
     mean_delta = projected_mean - float(quota_plan.target_mean_epsilon)
     ring_mean_cost = float(mean_delta * mean_delta)
 
-    angle_delta = float(_angle_bin_from_cluster_id(cluster_id)) - float(
-        quota_plan.expected_mean_angle_bin
-    )
+    angle_delta = _mean_angle_error(cluster_stats) - float(quota_plan.expected_angle_error)
     angle_cost = float(angle_delta * angle_delta)
 
-    projected_remaining = int(remaining_cluster_counts.get(cluster_id, 0)) - 1
-    future_shortage = max(0, int(future_cluster_demand.get(cluster_id, 0)) - projected_remaining)
-    future_cost = float(future_shortage * future_shortage)
+    projected_counts = dict(remaining_cluster_counts)
+    projected_counts[cluster_id] = int(projected_counts.get(cluster_id, 0)) - 1
+    future_cost = _neighbor_shortage_cost(
+        cluster_id,
+        projected_counts,
+        future_cluster_demand,
+        int(config.future_neighbor_radius_bins),
+    )
+    central_reserve_cost = _central_low_angle_cost(projected_counts, future_cluster_demand)
 
     mirror_cost = 0.0
     if mirror_mean_epsilon is not None:
@@ -495,6 +571,7 @@ def _score_cluster_for_current_ring_cached(
         + config.lambda_angle * angle_cost
         + config.lambda_future * future_cost
         + config.lambda_mirror * mirror_cost
+        + config.lambda_central_reserve * central_reserve_cost
     )
     return ClusterMPCDecision(
         cluster_id=cluster_id,
@@ -505,6 +582,7 @@ def _score_cluster_for_current_ring_cached(
         angle_cost=angle_cost,
         future_cost=future_cost,
         mirror_cost=mirror_cost,
+        central_reserve_cost=central_reserve_cost,
         best_slot_flat_id=best_slot_id,
         best_orientation_id=best_orientation_id,
     )

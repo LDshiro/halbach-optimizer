@@ -2,7 +2,12 @@ import re
 
 import pytest
 
-from halbach.assembly.clustering import assign_quantile_clusters, isolate_outliers
+from halbach.assembly.clustering import (
+    assign_clusters,
+    assign_quantile_clusters,
+    assign_sigma_band_clusters,
+    isolate_outliers,
+)
 from halbach.assembly.types import MagnetError, VirtualMagnet
 
 
@@ -24,10 +29,7 @@ def _magnet(
 
 
 def test_assign_quantile_clusters_has_stable_cluster_id_format_and_limits() -> None:
-    magnets = [
-        _magnet(idx, eps=float(idx), d1=float(idx % 3), d2=0.0)
-        for idx in range(12)
-    ]
+    magnets = [_magnet(idx, eps=float(idx), d1=float(idx % 3), d2=0.0) for idx in range(12)]
 
     assignments = assign_quantile_clusters(magnets, strength_count=4, angle_count=3)
 
@@ -81,6 +83,77 @@ def test_transverse_2_weight_changes_angle_bin_ordering() -> None:
     assert bins_with[0] == "S00_A02"
 
 
+def test_assign_sigma_band_clusters_preserves_strength_tail_information() -> None:
+    magnets = [_magnet(idx, eps=0.0, d1=0.0, d2=0.0) for idx in range(20)]
+    magnets.extend(
+        [
+            _magnet(20, eps=-10.0, d1=0.0, d2=0.0),
+            _magnet(21, eps=10.0, d1=0.0, d2=0.0),
+        ]
+    )
+
+    assignments = assign_sigma_band_clusters(
+        magnets,
+        strength_count=10,
+        angle_count=5,
+        strength_sigma_step=0.5,
+        angle_sigma_step=0.5,
+    )
+
+    by_id = {assignment.magnet_id: assignment.cluster_id for assignment in assignments}
+    assert by_id[20] == "S00_A00"
+    assert by_id[21] == "S09_A00"
+    assert by_id[0] == "S05_A00"
+
+
+def test_assign_sigma_band_clusters_bands_angle_magnitude() -> None:
+    magnets = [_magnet(idx, eps=0.0, d1=0.0, d2=0.0) for idx in range(4)]
+    magnets.append(_magnet(4, eps=0.0, d1=10.0, d2=0.0))
+
+    assignments = assign_sigma_band_clusters(
+        magnets,
+        strength_count=10,
+        angle_count=5,
+        strength_sigma_step=0.5,
+        angle_sigma_step=0.5,
+    )
+
+    by_id = {assignment.magnet_id: assignment.cluster_id for assignment in assignments}
+    assert by_id[0] == "S05_A00"
+    assert by_id[4] == "S05_A04"
+
+
+def test_assign_sigma_band_clusters_handles_zero_sigma_and_quarantine() -> None:
+    magnets = [_magnet(idx, eps=0.0, d1=0.0, d2=0.0) for idx in range(3)]
+
+    assignments = assign_sigma_band_clusters(
+        magnets,
+        strength_count=10,
+        angle_count=5,
+        quarantine={1: "Q_STRENGTH_OUTLIER"},
+    )
+
+    by_id = {assignment.magnet_id: assignment for assignment in assignments}
+    assert by_id[0].cluster_id == "S05_A00"
+    assert by_id[1].cluster_id is None
+    assert by_id[1].quarantine_id == "Q_STRENGTH_OUTLIER"
+
+
+def test_assign_clusters_dispatches_binning_modes() -> None:
+    magnets = [_magnet(idx, eps=float(idx), d1=0.0, d2=0.0) for idx in range(4)]
+
+    quantile = assign_clusters(magnets, binning="quantile", strength_count=2, angle_count=1)
+    sigma = assign_clusters(
+        magnets,
+        binning="sigma_band",
+        strength_count=10,
+        angle_count=5,
+    )
+
+    assert {assignment.cluster_id for assignment in quantile} <= {"S00_A00", "S01_A00"}
+    assert all((assignment.cluster_id or "").startswith("S") for assignment in sigma)
+
+
 def test_isolate_outliers_respects_limit_and_quality_priority() -> None:
     magnets = [
         _magnet(0, eps=0.0, d1=10.0, d2=0.0, quality=1.0),
@@ -121,10 +194,7 @@ def test_isolate_outliers_uses_direction_before_strength_when_quality_is_ok() ->
 
 
 def test_isolate_outliers_falls_back_to_strength_when_no_direction_outlier() -> None:
-    magnets = [
-        _magnet(idx, eps=float(idx), d1=0.0, d2=0.0)
-        for idx in range(10)
-    ]
+    magnets = [_magnet(idx, eps=float(idx), d1=0.0, d2=0.0) for idx in range(10)]
 
     quarantine = isolate_outliers(magnets, max_fraction=0.10)
 
@@ -137,9 +207,14 @@ def test_isolate_outliers_falls_back_to_strength_when_no_direction_outlier() -> 
         {"strength_count": 0},
         {"angle_count": 0},
         {"transverse_2_weight": -1.0},
+        {"strength_sigma_step": 0.0},
+        {"angle_sigma_step": 0.0},
     ],
 )
-def test_assign_quantile_clusters_rejects_invalid_counts(kwargs: dict[str, object]) -> None:
+def test_cluster_assignment_rejects_invalid_counts(kwargs: dict[str, object]) -> None:
     magnets = [_magnet(0, eps=0.0, d1=0.0, d2=0.0)]
     with pytest.raises(ValueError):
-        assign_quantile_clusters(magnets, **kwargs)
+        if "sigma_step" in "".join(kwargs):
+            assign_sigma_band_clusters(magnets, **kwargs)
+        else:
+            assign_quantile_clusters(magnets, **kwargs)

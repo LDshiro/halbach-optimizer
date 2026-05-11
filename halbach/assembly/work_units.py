@@ -95,6 +95,14 @@ def _build_ring_by_ring_outer_to_inner(slots: list[AssemblySlot]) -> list[WorkUn
 
 
 def _build_layer_by_layer_outer_to_inner(slots: list[AssemblySlot]) -> list[WorkUnit]:
+    return _build_stack_by_stack_outer_to_inner(slots, mode="layer_by_layer_outer_to_inner")
+
+
+def _build_stack_by_stack_outer_to_inner(
+    slots: list[AssemblySlot],
+    *,
+    mode: WorkUnitMode = "stack_by_stack_outer_to_inner",
+) -> list[WorkUnit]:
     groups = _group_by_physical_ring(slots)
     units: list[WorkUnit] = []
     for layer_id in _outer_to_inner_layers_from_slots(slots):
@@ -105,9 +113,9 @@ def _build_layer_by_layer_outer_to_inner(slots: list[AssemblySlot]) -> list[Work
         units.append(
             WorkUnit(
                 work_unit_id=f"W_LAYER{layer_id:03d}",
-                mode="layer_by_layer_outer_to_inner",
+                mode=mode,
                 slot_flat_ids=_slot_ids(layer_slots),
-                label=f"outer-to-inner layer {layer_id}, all rings",
+                label=f"outer-to-inner stack {layer_id}, all R layers",
             )
         )
     return units
@@ -189,7 +197,7 @@ def _resolve_auto_mode(
     magnets_per_physical_ring = max(len(group_slots) for group_slots in groups.values())
     total_magnets = len(slots)
     if magnets_per_physical_ring >= large_ring_threshold:
-        return "layer_by_layer_outer_to_inner"
+        return "stack_by_stack_outer_to_inner"
     if total_magnets <= small_total_threshold:
         return "all_slots"
     return "ring_group"
@@ -227,6 +235,8 @@ def build_work_units(
         return _build_single_physical_ring(slots)
     if resolved_mode == "layer_by_layer_outer_to_inner":
         return _build_layer_by_layer_outer_to_inner(slots)
+    if resolved_mode == "stack_by_stack_outer_to_inner":
+        return _build_stack_by_stack_outer_to_inner(slots)
     if resolved_mode == "ring_by_ring_outer_to_inner":
         return _build_ring_by_ring_outer_to_inner(slots)
     if resolved_mode == "mirror_ring_pair":

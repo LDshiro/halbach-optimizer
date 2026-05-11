@@ -239,7 +239,7 @@ def test_active_layer_polar_view_shows_all_rings_in_layer(tmp_path: Path) -> Non
     assert list(labels.text).count("1") == 2
     assert max(completed[0].x) - min(completed[0].x) > max(completed[0].y) - min(completed[0].y)
     assert np.asarray(stack.data[0].z).tolist() == [[2.0, 2.0]]
-    assert fig.layout.title.text.startswith("Active Layer 0 Rings")
+    assert fig.layout.title.text.startswith("Active Stack 0 R Layers")
 
 
 def test_active_layer_view_uses_real_geometry_dimensions_and_orientation_labels(

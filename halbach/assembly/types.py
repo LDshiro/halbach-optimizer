@@ -12,6 +12,7 @@ WorkUnitMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "stack_by_stack_outer_to_inner",
     "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
@@ -20,6 +21,7 @@ BuildWorkUnitMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "stack_by_stack_outer_to_inner",
     "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
@@ -28,6 +30,7 @@ BuildWorkUnitMode = Literal[
 PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
 EvaluationModel = Literal["fixed", "self_consistent"]
 ClusterPickupPolicy = Literal["quota_ordered", "cluster_mpc"]
+ClusterBinningMode = Literal["quantile", "sigma_band"]
 QuarantineReason = Literal[
     "Q_MEASUREMENT_UNSTABLE",
     "Q_DIRECTION_OUTLIER",
@@ -300,6 +303,8 @@ class ClusterMPCConfig:
     lambda_angle: float = 1.0
     lambda_future: float = 1.0
     lambda_mirror: float = 1.0
+    lambda_central_reserve: float = 1.0
+    future_neighbor_radius_bins: int = 0
 
 
 @dataclass(frozen=True)
@@ -314,6 +319,7 @@ class ClusterMPCDecision:
     angle_cost: float
     future_cost: float
     mirror_cost: float
+    central_reserve_cost: float
     best_slot_flat_id: int
     best_orientation_id: str
 
@@ -442,6 +448,7 @@ __all__ = [
     "AssemblySlot",
     "AssemblyTimelineEvent",
     "BuildWorkUnitMode",
+    "ClusterBinningMode",
     "ClusterAssignment",
     "ClusterInventory",
     "ClusterMPCConfig",

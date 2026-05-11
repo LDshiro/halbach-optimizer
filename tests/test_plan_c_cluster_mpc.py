@@ -57,13 +57,21 @@ def _table(slots: list[AssemblySlot]) -> SensitivityTable:
     )
 
 
-def _stats(cluster_id: str, eps: float, *, cov_eps: float = 0.0, count: int = 1) -> ClusterStats:
+def _stats(
+    cluster_id: str,
+    eps: float,
+    *,
+    d1: float = 0.0,
+    d2: float = 0.0,
+    cov_eps: float = 0.0,
+    count: int = 1,
+) -> ClusterStats:
     cov = np.zeros((3, 3), dtype=np.float64)
     cov[0, 0] = cov_eps
     return ClusterStats(
         cluster_id=cluster_id,
         count=count,
-        mean=np.array([eps, 0.0, 0.0], dtype=np.float64),
+        mean=np.array([eps, d1, d2], dtype=np.float64),
         cov=cov,
     )
 
@@ -192,6 +200,152 @@ def test_score_cluster_penalizes_large_covariance() -> None:
     )
 
     assert high_cov.field_cost > low_cov.field_cost
+
+
+def test_score_cluster_angle_cost_uses_mean_angle_error_not_bin_number() -> None:
+    table = _table(_slots())
+    plan = _quota(
+        "W_K000_R000",
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        expected_angle_bin=0.0,
+    )
+    plan = RingQuotaPlan(
+        **{
+            **plan.__dict__,
+            "expected_angle_error": 0.1,
+        }
+    )
+    config = ClusterMPCConfig(
+        lambda_field=0.0,
+        lambda_quota=0.0,
+        lambda_ring_mean=0.0,
+        lambda_angle=1.0,
+        lambda_future=0.0,
+        lambda_mirror=0.0,
+        lambda_central_reserve=0.0,
+    )
+
+    matching = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S09_A09", 0.0, d1=0.1),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        {},
+        config,
+    )
+    mismatched = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S00_A00", 0.0, d1=1.0),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        {},
+        config,
+    )
+
+    assert matching.angle_cost < mismatched.angle_cost
+    assert matching.total_score < mismatched.total_score
+
+
+def test_central_reserve_penalizes_using_future_center_inventory() -> None:
+    table = _table(_slots())
+    plan = _quota("W_K000_R000", 0, {"S00_A04": 1, "S05_A00": 1})
+    config = ClusterMPCConfig(
+        lambda_field=0.0,
+        lambda_quota=0.0,
+        lambda_ring_mean=0.0,
+        lambda_angle=0.0,
+        lambda_future=0.0,
+        lambda_mirror=0.0,
+        lambda_central_reserve=1.0,
+    )
+
+    center = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S05_A00", 0.0),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A04": 1, "S05_A00": 1},
+        {"S05_A00": 1},
+        config,
+    )
+    tail = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S00_A04", 0.0),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A04": 1, "S05_A00": 1},
+        {"S05_A00": 1},
+        config,
+    )
+
+    assert center.central_reserve_cost > tail.central_reserve_cost
+    assert center.total_score > tail.total_score
+
+
+def test_future_neighbor_radius_treats_nearby_sigma_bins_as_reserve() -> None:
+    table = _table(_slots())
+    plan = _quota("W_K000_R000", 0, {"S04_A00": 1})
+    common = {
+        "table": table,
+        "residual": np.zeros(1, dtype=np.float64),
+        "remaining_slot_flat_ids": [10],
+        "cluster_stats": _stats("S04_A00", 0.0),
+        "quota_plan": plan,
+        "current_ring_cluster_usage": {},
+        "current_ring_epsilon_sum": 0.0,
+        "current_ring_count": 0,
+        "remaining_cluster_counts": {"S04_A00": 1, "S05_A00": 0},
+        "future_cluster_demand": {"S05_A00": 1},
+    }
+
+    exact = score_cluster_for_current_ring(
+        **common,
+        config=ClusterMPCConfig(
+            lambda_field=0.0,
+            lambda_quota=0.0,
+            lambda_ring_mean=0.0,
+            lambda_angle=0.0,
+            lambda_future=1.0,
+            lambda_mirror=0.0,
+            lambda_central_reserve=0.0,
+            future_neighbor_radius_bins=0,
+        ),
+    )
+    neighbor = score_cluster_for_current_ring(
+        **common,
+        config=ClusterMPCConfig(
+            lambda_field=0.0,
+            lambda_quota=0.0,
+            lambda_ring_mean=0.0,
+            lambda_angle=0.0,
+            lambda_future=1.0,
+            lambda_mirror=0.0,
+            lambda_central_reserve=0.0,
+            future_neighbor_radius_bins=1,
+        ),
+    )
+
+    assert exact.future_cost == 0.0
+    assert neighbor.future_cost > exact.future_cost
 
 
 def test_cluster_mpc_assignment_respects_work_unit_order() -> None:

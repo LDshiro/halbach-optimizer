@@ -377,7 +377,7 @@ def plot_active_ring_polar_view(
     if state.active_layer_id is None:
         fig = go.Figure()
         fig.update_layout(
-            title="Active Layer Rings",
+            title="Active Stack R Layers",
             height=680,
             margin={"l": 30, "r": 30, "b": 30, "t": 45},
         )
@@ -678,7 +678,7 @@ def plot_active_ring_polar_view(
     if dimension_source:
         subtitle = f"{subtitle}, dimensions: {dimension_source}"
     fig.update_layout(
-        title=f"Active Layer {state.active_layer_id} Rings ({subtitle})",
+        title=f"Active Stack {state.active_layer_id} R Layers ({subtitle})",
         xaxis={
             "visible": False,
             "scaleanchor": "y",

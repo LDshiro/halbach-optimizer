@@ -164,6 +164,25 @@ def test_layer_by_layer_outer_to_inner_uses_one_unit_per_layer(tmp_path: Path) -
     )
 
 
+def test_stack_by_stack_outer_to_inner_aliases_layer_units(tmp_path: Path) -> None:
+    run = _write_generated_run(tmp_path, N=4, R=2, K=4)
+    slots = build_assembly_slots(run)
+    old_units = build_work_units(slots, "layer_by_layer_outer_to_inner")
+    stack_units = build_work_units(slots, "stack_by_stack_outer_to_inner")
+
+    assert [unit.mode for unit in stack_units] == ["stack_by_stack_outer_to_inner"] * 4
+    assert [unit.work_unit_id for unit in stack_units] == [
+        "W_LAYER000",
+        "W_LAYER003",
+        "W_LAYER001",
+        "W_LAYER002",
+    ]
+    assert [unit.slot_flat_ids for unit in stack_units] == [
+        unit.slot_flat_ids for unit in old_units
+    ]
+    assert "stack 0" in stack_units[0].label
+
+
 def test_mirror_ring_pair_even_layers(tmp_path: Path) -> None:
     run = _write_generated_run(tmp_path, N=4, R=1, K=6)
     slots = build_assembly_slots(run)
@@ -215,6 +234,7 @@ def test_assign_work_unit_ids_accepts_new_modes(tmp_path: Path) -> None:
     slots = build_assembly_slots(run)
 
     for mode in (
+        "stack_by_stack_outer_to_inner",
         "layer_by_layer_outer_to_inner",
         "ring_by_ring_outer_to_inner",
         "mirror_ring_pair",
@@ -247,7 +267,7 @@ def test_ring_group_chunks_physical_rings_in_layer_ring_order(tmp_path: Path) ->
 def test_auto_mode_selects_outer_to_inner_all_or_ring_group(tmp_path: Path) -> None:
     run_large_ring = _write_generated_run(tmp_path, N=60, R=1, K=4)
     units_large = build_work_units(build_assembly_slots(run_large_ring), "auto")
-    assert {unit.mode for unit in units_large} == {"layer_by_layer_outer_to_inner"}
+    assert {unit.mode for unit in units_large} == {"stack_by_stack_outer_to_inner"}
     assert [unit.work_unit_id for unit in units_large] == [
         "W_LAYER000",
         "W_LAYER003",

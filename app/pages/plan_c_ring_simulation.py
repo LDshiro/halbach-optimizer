@@ -27,7 +27,7 @@ from app.plan_c_run_selector import (
     list_plan_c_run_result_choices,
     resolve_selected_run_path,
 )
-from halbach.assembly.clustering import assign_quantile_clusters
+from halbach.assembly.clustering import assign_clusters
 from halbach.assembly.inventory import build_cluster_inventory
 from halbach.assembly.io import SimulationTrialArtifacts, write_simulation_outputs
 from halbach.assembly.ring_quota import plan_work_unit_cluster_quotas
@@ -37,6 +37,7 @@ from halbach.assembly.simulation import run_simulation_trial, summarize_comparis
 from halbach.assembly.slots import build_assembly_slots
 from halbach.assembly.types import (
     BuildWorkUnitMode,
+    ClusterBinningMode,
     ClusterMPCConfig,
     ClusterPickupPolicy,
     EvaluationModel,
@@ -113,6 +114,9 @@ def _run_ring_simulation(
     cluster_pickup_policy: ClusterPickupPolicy,
     strength_count: int,
     angle_count: int,
+    cluster_binning: ClusterBinningMode,
+    strength_sigma_step: float,
+    angle_sigma_step: float,
     mpc_config: ClusterMPCConfig,
     evaluation_model_label: str,
     trials: int,
@@ -178,13 +182,21 @@ def _run_ring_simulation(
                 "transverse_component_2_sigma": float(measurement_direction_sigma_2),
             },
         )
-        assignments = assign_quantile_clusters(
+        assignments = assign_clusters(
             magnets,
+            binning=cluster_binning,
             strength_count=int(strength_count),
             angle_count=int(angle_count),
+            strength_sigma_step=float(strength_sigma_step),
+            angle_sigma_step=float(angle_sigma_step),
         )
         inventory = build_cluster_inventory(magnets, assignments)
-        quota_plans = plan_work_unit_cluster_quotas(slots, inventory, work_units)
+        quota_plans = plan_work_unit_cluster_quotas(
+            slots,
+            inventory,
+            work_units,
+            sensitivity_table=sensitivity_table,
+        )
 
         result = run_simulation_trial(
             slots,
@@ -234,8 +246,11 @@ def _run_ring_simulation(
             "run_path": run_path,
             "work_unit_mode": work_unit_mode,
             "cluster_pickup_policy": cluster_pickup_policy,
+            "cluster_binning": cluster_binning,
             "strength_count": int(strength_count),
             "angle_count": int(angle_count),
+            "strength_sigma_step": float(strength_sigma_step),
+            "angle_sigma_step": float(angle_sigma_step),
             "measurement_strength_sigma": float(measurement_strength_sigma),
             "measurement_direction_sigma_1": float(measurement_direction_sigma_1),
             "measurement_direction_sigma_2": float(measurement_direction_sigma_2),
@@ -299,11 +314,12 @@ with st.sidebar:
         st.selectbox(
             "Work unit mode",
             [
-                "layer_by_layer_outer_to_inner",
+                "stack_by_stack_outer_to_inner",
                 "auto",
                 "mirror_ring_pair",
                 "all_slots",
                 "ring_by_ring_outer_to_inner",
+                "layer_by_layer_outer_to_inner",
             ],
             index=0,
         ),
@@ -316,6 +332,26 @@ with st.sidebar:
         "Strength clusters", min_value=1, max_value=50, value=10, step=1
     )
     angle_count = st.number_input("Angle clusters", min_value=1, max_value=20, value=5, step=1)
+    cluster_binning = cast(
+        ClusterBinningMode,
+        st.selectbox("Cluster binning", ["sigma_band", "quantile"], index=0),
+    )
+    strength_sigma_step = st.number_input(
+        "Strength sigma band width",
+        min_value=0.01,
+        value=0.5,
+        step=0.1,
+        format="%.3f",
+        disabled=cluster_binning != "sigma_band",
+    )
+    angle_sigma_step = st.number_input(
+        "Angle sigma band width",
+        min_value=0.01,
+        value=0.5,
+        step=0.1,
+        format="%.3f",
+        disabled=cluster_binning != "sigma_band",
+    )
     evaluation_model_label = st.selectbox(
         "Final evaluation model",
         ["fixed", "self_consistent_from_run"],
@@ -369,6 +405,16 @@ with st.sidebar:
     lambda_angle = st.number_input("lambda angle", min_value=0.0, value=1.0, step=0.1)
     lambda_future = st.number_input("lambda future", min_value=0.0, value=1.0, step=0.1)
     lambda_mirror = st.number_input("lambda mirror", min_value=0.0, value=1.0, step=0.1)
+    lambda_central_reserve = st.number_input(
+        "lambda central reserve", min_value=0.0, value=1.0, step=0.1
+    )
+    future_neighbor_radius_bins = st.number_input(
+        "future neighbor radius bins",
+        min_value=0,
+        max_value=5,
+        value=1 if cluster_binning == "sigma_band" else 0,
+        step=1,
+    )
     run_clicked = st.button("Run Ring Simulation", type="primary")
 
 if run_clicked:
@@ -381,6 +427,9 @@ if run_clicked:
                 cluster_pickup_policy=cluster_pickup_policy,
                 strength_count=int(strength_count),
                 angle_count=int(angle_count),
+                cluster_binning=cluster_binning,
+                strength_sigma_step=float(strength_sigma_step),
+                angle_sigma_step=float(angle_sigma_step),
                 mpc_config=ClusterMPCConfig(
                     lambda_field=float(lambda_field),
                     lambda_quota=float(lambda_quota),
@@ -388,6 +437,8 @@ if run_clicked:
                     lambda_angle=float(lambda_angle),
                     lambda_future=float(lambda_future),
                     lambda_mirror=float(lambda_mirror),
+                    lambda_central_reserve=float(lambda_central_reserve),
+                    future_neighbor_radius_bins=int(future_neighbor_radius_bins),
                 ),
                 evaluation_model_label=str(evaluation_model_label),
                 trials=int(trials),
@@ -465,7 +516,7 @@ with playback_tab:
     state = playback_state_at_step(bundle, int(step))
     info_cols = st.columns(5)
     info_cols[0].metric("Placed", state.placed_count)
-    info_cols[1].metric("Layer", "-" if state.active_layer_id is None else state.active_layer_id)
+    info_cols[1].metric("Stack", "-" if state.active_layer_id is None else state.active_layer_id)
     info_cols[2].metric(
         "Current Ring",
         "-" if state.active_ring_id is None else state.active_ring_id,

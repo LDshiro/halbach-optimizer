@@ -4,6 +4,7 @@ import pytest
 from halbach.assembly.ring_quota import (
     compute_inventory_target_mean_epsilon,
     compute_ring_importance,
+    compute_ring_sensitivity_importance,
     plan_ring_cluster_quotas,
     plan_work_unit_cluster_quotas,
 )
@@ -13,6 +14,7 @@ from halbach.assembly.types import (
     ClusterStats,
     RingKey,
     RingQuotaPlannerConfig,
+    SensitivityTable,
 )
 from halbach.assembly.work_units import build_work_units
 
@@ -89,6 +91,32 @@ def test_compute_ring_importance_is_highest_at_stack_center() -> None:
     assert importance[RingKey(layer_id=2, ring_id=0)] == pytest.approx(1.0)
     assert importance[RingKey(layer_id=1, ring_id=0)] == pytest.approx(0.5)
     assert importance[RingKey(layer_id=3, ring_id=0)] == pytest.approx(0.5)
+
+
+def test_compute_ring_sensitivity_importance_reflects_r_layer_norms() -> None:
+    slots = _slots(K=1, N=2, R=2)
+    C = np.ones((len(slots), 1, 3, 3), dtype=np.float64)
+    for idx, slot in enumerate(slots):
+        if slot.ring_id == 1:
+            C[idx] *= 4.0
+    table = SensitivityTable(
+        slot_flat_id=np.array([slot.slot_flat_id for slot in slots], dtype=np.int_),
+        ring_id=np.array([slot.ring_id for slot in slots], dtype=np.int_),
+        layer_id=np.array([slot.layer_id for slot in slots], dtype=np.int_),
+        theta_id=np.array([slot.theta_id for slot in slots], dtype=np.int_),
+        centers_m=np.vstack([slot.center_m for slot in slots]),
+        nominal_u=np.vstack([slot.nominal_u for slot in slots]),
+        orientation_id=("O0",),
+        C=C,
+        roi_points=np.zeros((1, 3), dtype=np.float64),
+        normalization_b0=np.array([0.0, 1.0, 0.0], dtype=np.float64),
+        metadata={},
+    )
+
+    importance = compute_ring_sensitivity_importance(table)
+
+    assert importance[RingKey(layer_id=0, ring_id=1)] == pytest.approx(1.0)
+    assert importance[RingKey(layer_id=0, ring_id=0)] < importance[RingKey(layer_id=0, ring_id=1)]
 
 
 def test_inventory_target_mean_epsilon_uses_usable_weighted_mean() -> None:

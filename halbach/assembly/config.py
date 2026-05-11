@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from halbach.assembly.types import ClusterBinningMode
 from halbach.geom import RoiMode
 
 WorkUnitConfigMode = Literal[
     "all_slots",
     "single_physical_ring",
     "ring_group",
+    "stack_by_stack_outer_to_inner",
     "layer_by_layer_outer_to_inner",
     "ring_by_ring_outer_to_inner",
     "mirror_ring_pair",
@@ -54,9 +56,12 @@ class PlanCSensitivityConfig:
 
 @dataclass(frozen=True)
 class PlanCClustersConfig:
+    binning: ClusterBinningMode = "quantile"
     strength_count: int = 10
-    angle_count: int = 3
+    angle_count: int = 5
     transverse_2_weight: float = 1.0
+    strength_sigma_step: float = 0.5
+    angle_sigma_step: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -123,9 +128,12 @@ def plan_c_config_to_dict(config: PlanCConfig) -> dict[str, object]:
             "finite_difference_step": config.sensitivity.finite_difference_step,
         },
         "clusters": {
+            "binning": config.clusters.binning,
             "strength_count": config.clusters.strength_count,
             "angle_count": config.clusters.angle_count,
             "transverse_2_weight": config.clusters.transverse_2_weight,
+            "strength_sigma_step": config.clusters.strength_sigma_step,
+            "angle_sigma_step": config.clusters.angle_sigma_step,
         },
         "reject": {
             "policy": config.reject.policy,
@@ -253,10 +261,20 @@ def plan_c_config_from_dict(data: dict[str, object]) -> PlanCConfig:
             ),
         ),
         clusters=PlanCClustersConfig(
+            binning=cast(
+                ClusterBinningMode,
+                _str_value(clusters.get("binning", base.clusters.binning)),
+            ),
             strength_count=_int_value(clusters.get("strength_count", base.clusters.strength_count)),
             angle_count=_int_value(clusters.get("angle_count", base.clusters.angle_count)),
             transverse_2_weight=_float_value(
                 clusters.get("transverse_2_weight", base.clusters.transverse_2_weight)
+            ),
+            strength_sigma_step=_float_value(
+                clusters.get("strength_sigma_step", base.clusters.strength_sigma_step)
+            ),
+            angle_sigma_step=_float_value(
+                clusters.get("angle_sigma_step", base.clusters.angle_sigma_step)
             ),
         ),
         reject=PlanCRejectConfig(

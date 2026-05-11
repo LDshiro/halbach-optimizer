@@ -14,6 +14,7 @@ from halbach.assembly.types import (
     RingKey,
     RingQuotaPlan,
     RingQuotaPlannerConfig,
+    SensitivityTable,
     WorkUnit,
 )
 from halbach.assembly.work_units import outer_to_inner_layer_order
@@ -114,6 +115,59 @@ def compute_ring_importance(slots: Sequence[AssemblySlot]) -> dict[RingKey, floa
             importance = 1.0 - abs(z_value) / max_abs_z
         layer_importance[layer_id] = min(1.0, max(0.0, float(importance)))
     return {ring_key: layer_importance[ring_key.layer_id] for ring_key in rings}
+
+
+def _normalize_importance(values: Mapping[RingKey, float]) -> dict[RingKey, float]:
+    if not values:
+        raise ValueError("importance values must be non-empty")
+    finite = {key: float(value) for key, value in values.items()}
+    for key, value in finite.items():
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"ring importance for {key} must be finite and >= 0")
+    max_value = max(finite.values())
+    if max_value <= 0.0:
+        return {key: 1.0 for key in finite}
+    return {key: min(1.0, max(0.0, value / max_value)) for key, value in finite.items()}
+
+
+def compute_ring_sensitivity_importance(table: SensitivityTable) -> dict[RingKey, float]:
+    """Return ring importance from average sensitivity Frobenius norms."""
+    C = np.asarray(table.C, dtype=np.float64)
+    if C.ndim != 4:
+        raise ValueError(f"sensitivity C must have shape (S, O, D, 3), got {C.shape}")
+    slot_count = C.shape[0]
+    if table.layer_id.shape != (slot_count,) or table.ring_id.shape != (slot_count,):
+        raise ValueError("sensitivity table ring_id/layer_id shapes must match slot count")
+    per_slot = np.linalg.norm(C.reshape(slot_count, C.shape[1], -1), axis=2).mean(axis=1)
+    totals: dict[RingKey, list[float]] = {}
+    for idx, value in enumerate(per_slot):
+        key = RingKey(layer_id=int(table.layer_id[idx]), ring_id=int(table.ring_id[idx]))
+        totals.setdefault(key, []).append(float(value))
+    return _normalize_importance(
+        {
+            key: float(np.mean(np.asarray(values, dtype=np.float64)))
+            for key, values in totals.items()
+        }
+    )
+
+
+def _resolve_ring_importance(
+    slots: Sequence[AssemblySlot],
+    *,
+    sensitivity_table: SensitivityTable | None,
+    importance_by_ring: Mapping[RingKey, float] | None,
+) -> dict[RingKey, float]:
+    rings = _ring_slots(slots)
+    if importance_by_ring is not None:
+        importance = _normalize_importance(dict(importance_by_ring))
+    elif sensitivity_table is not None:
+        importance = compute_ring_sensitivity_importance(sensitivity_table)
+    else:
+        importance = compute_ring_importance(slots)
+    missing = sorted(set(rings) - set(importance), key=lambda key: (key.layer_id, key.ring_id))
+    if missing:
+        raise ValueError(f"ring importance is missing ring keys: {missing}")
+    return {ring_key: importance[ring_key] for ring_key in rings}
 
 
 def compute_inventory_target_mean_epsilon(inventory: ClusterInventory) -> float:
@@ -282,6 +336,9 @@ def plan_ring_cluster_quotas(
     slots: Sequence[AssemblySlot],
     inventory: ClusterInventory,
     config: RingQuotaPlannerConfig | None = None,
+    *,
+    sensitivity_table: SensitivityTable | None = None,
+    importance_by_ring: Mapping[RingKey, float] | None = None,
 ) -> tuple[RingQuotaPlan, ...]:
     """Plan Level 1 cluster quotas for each physical ring."""
     _validate_slots(slots)
@@ -301,7 +358,11 @@ def plan_ring_cluster_quotas(
         if planner_config.target_mean_epsilon is None
         else float(planner_config.target_mean_epsilon)
     )
-    importance_by_ring = compute_ring_importance(slots)
+    resolved_importance = _resolve_ring_importance(
+        slots,
+        sensitivity_table=sensitivity_table,
+        importance_by_ring=importance_by_ring,
+    )
     max_angle_bin = max(info.angle_bin for info in clusters.values())
     remaining = {cluster_id: info.count for cluster_id, info in clusters.items()}
     mirror_keys, mirror_pair_ids = _mirror_maps(slots)
@@ -312,7 +373,7 @@ def plan_ring_cluster_quotas(
         plan = _build_plan_for_ring(
             ring_key,
             target_count=len(rings[ring_key]),
-            ring_importance=importance_by_ring[ring_key],
+            ring_importance=resolved_importance[ring_key],
             target_mean_epsilon=target_mean_epsilon,
             clusters=clusters,
             remaining=remaining,
@@ -429,6 +490,9 @@ def plan_work_unit_cluster_quotas(
     inventory: ClusterInventory,
     work_units: Sequence[WorkUnit],
     config: RingQuotaPlannerConfig | None = None,
+    *,
+    sensitivity_table: SensitivityTable | None = None,
+    importance_by_ring: Mapping[RingKey, float] | None = None,
 ) -> tuple[RingQuotaPlan, ...]:
     """
     Return cluster quota plans aligned 1:1 with assembly work units.
@@ -440,7 +504,13 @@ def plan_work_unit_cluster_quotas(
     _validate_slots(slots)
     if not work_units:
         raise ValueError("work_units must be non-empty")
-    base_plans = plan_ring_cluster_quotas(slots, inventory, config)
+    base_plans = plan_ring_cluster_quotas(
+        slots,
+        inventory,
+        config,
+        sensitivity_table=sensitivity_table,
+        importance_by_ring=importance_by_ring,
+    )
     plan_by_ring = {plan.ring_key: plan for plan in base_plans}
     if len(plan_by_ring) != len(base_plans):
         raise ValueError("ring quota plans contain duplicate ring keys")
@@ -488,6 +558,7 @@ def plan_work_unit_cluster_quotas(
 __all__ = [
     "compute_inventory_target_mean_epsilon",
     "compute_ring_importance",
+    "compute_ring_sensitivity_importance",
     "plan_ring_cluster_quotas",
     "plan_work_unit_cluster_quotas",
 ]
