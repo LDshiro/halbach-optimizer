@@ -257,6 +257,63 @@ def test_score_cluster_angle_cost_uses_mean_angle_error_not_bin_number() -> None
     assert matching.total_score < mismatched.total_score
 
 
+def test_legacy_mpc_angle_cost_uses_angle_bin_number() -> None:
+    table = _table(_slots())
+    plan = _quota(
+        "W_K000_R000",
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        expected_angle_bin=0.0,
+    )
+    plan = RingQuotaPlan(
+        **{
+            **plan.__dict__,
+            "expected_angle_error": 0.1,
+        }
+    )
+    config = ClusterMPCConfig(
+        strategy="legacy",
+        lambda_field=0.0,
+        lambda_quota=0.0,
+        lambda_ring_mean=0.0,
+        lambda_angle=1.0,
+        lambda_future=0.0,
+        lambda_mirror=0.0,
+        lambda_central_reserve=1.0,
+        future_neighbor_radius_bins=1,
+    )
+
+    high_bin_good_angle = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S09_A09", 0.0, d1=0.1),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        {},
+        config,
+    )
+    low_bin_bad_angle = score_cluster_for_current_ring(
+        table,
+        np.zeros(1, dtype=np.float64),
+        [10],
+        _stats("S00_A00", 0.0, d1=1.0),
+        plan,
+        {},
+        0.0,
+        0,
+        {"S00_A00": 1, "S09_A09": 1},
+        {},
+        config,
+    )
+
+    assert high_bin_good_angle.angle_cost > low_bin_bad_angle.angle_cost
+    assert high_bin_good_angle.total_score > low_bin_bad_angle.total_score
+
+
 def test_central_reserve_penalizes_using_future_center_inventory() -> None:
     table = _table(_slots())
     plan = _quota("W_K000_R000", 0, {"S00_A04": 1, "S05_A00": 1})

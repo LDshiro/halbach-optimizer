@@ -335,6 +335,8 @@ def _validate_cluster_stats(stats: ClusterStats) -> None:
 
 
 def _validate_cluster_mpc_config(config: ClusterMPCConfig) -> None:
+    if config.strategy not in ("sigma_aware", "legacy"):
+        raise ValueError(f"unsupported cluster MPC strategy: {config.strategy}")
     weights = {
         "lambda_field": config.lambda_field,
         "lambda_quota": config.lambda_quota,
@@ -546,18 +548,30 @@ def _score_cluster_for_current_ring_cached(
     mean_delta = projected_mean - float(quota_plan.target_mean_epsilon)
     ring_mean_cost = float(mean_delta * mean_delta)
 
-    angle_delta = _mean_angle_error(cluster_stats) - float(quota_plan.expected_angle_error)
+    if config.strategy == "legacy":
+        angle_delta = float(_angle_bin_from_cluster_id(cluster_id)) - float(
+            quota_plan.expected_mean_angle_bin
+        )
+    else:
+        angle_delta = _mean_angle_error(cluster_stats) - float(quota_plan.expected_angle_error)
     angle_cost = float(angle_delta * angle_delta)
 
     projected_counts = dict(remaining_cluster_counts)
     projected_counts[cluster_id] = int(projected_counts.get(cluster_id, 0)) - 1
-    future_cost = _neighbor_shortage_cost(
-        cluster_id,
-        projected_counts,
-        future_cluster_demand,
-        int(config.future_neighbor_radius_bins),
-    )
-    central_reserve_cost = _central_low_angle_cost(projected_counts, future_cluster_demand)
+    if config.strategy == "legacy":
+        future_shortage = max(
+            0, int(future_cluster_demand.get(cluster_id, 0)) - projected_counts[cluster_id]
+        )
+        future_cost = float(future_shortage * future_shortage)
+        central_reserve_cost = 0.0
+    else:
+        future_cost = _neighbor_shortage_cost(
+            cluster_id,
+            projected_counts,
+            future_cluster_demand,
+            int(config.future_neighbor_radius_bins),
+        )
+        central_reserve_cost = _central_low_angle_cost(projected_counts, future_cluster_demand)
 
     mirror_cost = 0.0
     if mirror_mean_epsilon is not None:

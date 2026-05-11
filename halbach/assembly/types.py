@@ -31,6 +31,7 @@ PlacementOrientationMode = Literal["fixed_o0", "random_discrete4"]
 EvaluationModel = Literal["fixed", "self_consistent"]
 ClusterPickupPolicy = Literal["quota_ordered", "cluster_mpc"]
 ClusterBinningMode = Literal["quantile", "sigma_band"]
+ClusterMPCStrategy = Literal["sigma_aware", "legacy"]
 QuarantineReason = Literal[
     "Q_MEASUREMENT_UNSTABLE",
     "Q_DIRECTION_OUTLIER",
@@ -297,6 +298,7 @@ class ClusterInventory:
 class ClusterMPCConfig:
     """Weights for Step R6 cluster-level MPC scoring."""
 
+    strategy: ClusterMPCStrategy = "sigma_aware"
     lambda_field: float = 1.0
     lambda_quota: float = 1.0
     lambda_ring_mean: float = 1.0
@@ -449,6 +451,7 @@ __all__ = [
     "AssemblyTimelineEvent",
     "BuildWorkUnitMode",
     "ClusterBinningMode",
+    "ClusterMPCStrategy",
     "ClusterAssignment",
     "ClusterInventory",
     "ClusterMPCConfig",

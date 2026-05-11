@@ -39,6 +39,7 @@ from halbach.assembly.types import (
     BuildWorkUnitMode,
     ClusterBinningMode,
     ClusterMPCConfig,
+    ClusterMPCStrategy,
     ClusterPickupPolicy,
     EvaluationModel,
 )
@@ -117,6 +118,7 @@ def _run_ring_simulation(
     cluster_binning: ClusterBinningMode,
     strength_sigma_step: float,
     angle_sigma_step: float,
+    mpc_strategy: ClusterMPCStrategy,
     mpc_config: ClusterMPCConfig,
     evaluation_model_label: str,
     trials: int,
@@ -195,7 +197,7 @@ def _run_ring_simulation(
             slots,
             inventory,
             work_units,
-            sensitivity_table=sensitivity_table,
+            sensitivity_table=None if mpc_strategy == "legacy" else sensitivity_table,
         )
 
         result = run_simulation_trial(
@@ -247,6 +249,7 @@ def _run_ring_simulation(
             "work_unit_mode": work_unit_mode,
             "cluster_pickup_policy": cluster_pickup_policy,
             "cluster_binning": cluster_binning,
+            "cluster_mpc_strategy": mpc_strategy,
             "strength_count": int(strength_count),
             "angle_count": int(angle_count),
             "strength_sigma_step": float(strength_sigma_step),
@@ -328,6 +331,15 @@ with st.sidebar:
         ClusterPickupPolicy,
         st.selectbox("Cluster pickup policy", ["cluster_mpc", "quota_ordered"], index=0),
     )
+    mpc_strategy = cast(
+        ClusterMPCStrategy,
+        st.selectbox(
+            "MPC scoring model",
+            ["sigma_aware", "legacy"],
+            index=0,
+            disabled=cluster_pickup_policy != "cluster_mpc",
+        ),
+    )
     strength_count = st.number_input(
         "Strength clusters", min_value=1, max_value=50, value=10, step=1
     )
@@ -406,14 +418,19 @@ with st.sidebar:
     lambda_future = st.number_input("lambda future", min_value=0.0, value=1.0, step=0.1)
     lambda_mirror = st.number_input("lambda mirror", min_value=0.0, value=1.0, step=0.1)
     lambda_central_reserve = st.number_input(
-        "lambda central reserve", min_value=0.0, value=1.0, step=0.1
+        "lambda central reserve",
+        min_value=0.0,
+        value=1.0,
+        step=0.1,
+        disabled=mpc_strategy == "legacy",
     )
     future_neighbor_radius_bins = st.number_input(
         "future neighbor radius bins",
         min_value=0,
         max_value=5,
-        value=1 if cluster_binning == "sigma_band" else 0,
+        value=1 if cluster_binning == "sigma_band" and mpc_strategy != "legacy" else 0,
         step=1,
+        disabled=mpc_strategy == "legacy",
     )
     run_clicked = st.button("Run Ring Simulation", type="primary")
 
@@ -430,7 +447,9 @@ if run_clicked:
                 cluster_binning=cluster_binning,
                 strength_sigma_step=float(strength_sigma_step),
                 angle_sigma_step=float(angle_sigma_step),
+                mpc_strategy=mpc_strategy,
                 mpc_config=ClusterMPCConfig(
+                    strategy=mpc_strategy,
                     lambda_field=float(lambda_field),
                     lambda_quota=float(lambda_quota),
                     lambda_ring_mean=float(lambda_ring_mean),
