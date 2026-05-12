@@ -743,10 +743,14 @@ def write_field_metrics_json(path: str | Path, artifact: SimulationTrialArtifact
 def write_session_log_jsonl(
     path: str | Path,
     artifact: SimulationTrialArtifacts,
+    placements: Sequence[Placement] | None = None,
 ) -> None:
     """Write a minimal JSONL event log that later UI/session code can replay."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    primary_placements = (
+        artifact.result.linear.assignment.placements if placements is None else placements
+    )
     with out_path.open("w", encoding="utf-8") as handle:
         events: list[dict[str, object]] = [
             {
@@ -756,7 +760,7 @@ def write_session_log_jsonl(
                 "seed": artifact.seed,
             }
         ]
-        for placement in artifact.result.linear.assignment.placements:
+        for placement in primary_placements:
             events.append(
                 {
                     "schema_version": SCHEMA_VERSION,
@@ -773,7 +777,7 @@ def write_session_log_jsonl(
                 "schema_version": SCHEMA_VERSION,
                 "trial_id": artifact.trial_id,
                 "event": "session_completed",
-                "placements": len(artifact.result.linear.assignment.placements),
+                "placements": len(primary_placements),
             }
         )
         for event in events:
@@ -847,6 +851,19 @@ def build_simulation_summary_payload(
     }
 
 
+def _primary_placements_for_output(
+    artifact: SimulationTrialArtifacts,
+    metadata: dict[str, object] | None,
+) -> Sequence[Placement]:
+    if (
+        metadata is not None
+        and metadata.get("engine") == "sequential_self_consistent"
+        and artifact.result.self_consistent is not None
+    ):
+        return artifact.result.self_consistent.placements
+    return artifact.result.linear.assignment.placements
+
+
 def write_simulation_outputs(
     out_dir: str | Path,
     artifacts: Sequence[SimulationTrialArtifacts],
@@ -879,7 +896,7 @@ def write_simulation_outputs(
 
     for artifact in artifacts:
         suffix = f"trial_{artifact.trial_id:03d}"
-        placements = artifact.result.linear.assignment.placements
+        placements = _primary_placements_for_output(artifact, metadata)
         final_path = out_path / f"final_placement_{suffix}.csv"
         write_final_placement_csv(
             final_path,
@@ -921,7 +938,11 @@ def write_simulation_outputs(
             ring_pair_path,
             artifact.trial_id,
             ring_summaries,
-            pair_summaries=artifact.result.linear.assignment.mirror_pair_summaries,
+            pair_summaries=(
+                artifact.result.linear.assignment.mirror_pair_summaries
+                if placements is artifact.result.linear.assignment.placements
+                else ()
+            ),
         )
         written[f"ring_pair_summary_{suffix}"] = ring_pair_path
 
@@ -959,7 +980,7 @@ def write_simulation_outputs(
         written[f"field_metrics_{suffix}"] = metrics_path
 
         log_path = out_path / f"streamlit_session_log_{suffix}.jsonl"
-        write_session_log_jsonl(log_path, artifact)
+        write_session_log_jsonl(log_path, artifact, placements=placements)
         written[f"streamlit_session_log_{suffix}"] = log_path
 
     return written

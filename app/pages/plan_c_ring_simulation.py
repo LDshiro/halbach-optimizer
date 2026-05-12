@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - Streamlit may start with this page directory on sys.path.
+
 import json
 import math
-from concurrent.futures import ThreadPoolExecutor
+import sys
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, cast
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import pandas as pd
@@ -115,6 +123,7 @@ def _run_ring_simulation(
     *,
     run_path: str,
     out_dir: str,
+    engine: str,
     work_unit_mode: BuildWorkUnitMode,
     cluster_pickup_policy: ClusterPickupPolicy,
     strength_count: int,
@@ -136,7 +145,13 @@ def _run_ring_simulation(
     measurement_direction_sigma_2: float,
     magnet_surplus_fraction: float,
     trial_workers: int,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> None:
+    if engine not in ("linear_sensitivity", "sequential_self_consistent"):
+        raise ValueError(f"unsupported Plan C engine: {engine}")
+    include_self_consistent = engine == "sequential_self_consistent"
+    if progress_callback is not None:
+        progress_callback(0.0, "Loading run and preparing sensitivity data")
     run = load_run(Path(run_path))
     raw_slots = build_assembly_slots(run)
     work_units = build_work_units(raw_slots, work_unit_mode)
@@ -177,6 +192,34 @@ def _run_ring_simulation(
         if evaluation_model == "self_consistent"
         else None
     )
+    sc_config = (
+        sc_eval_config
+        if include_self_consistent and sc_eval_config is not None
+        else (
+            self_consistent_config_from_run(
+                run,
+                factor=FACTOR,
+                max_linear_candidates=8,
+                require=True,
+            )
+            if include_self_consistent
+            else None
+        )
+    )
+    trial_count = int(trials)
+    worker_count = min(max(1, int(trial_workers)), trial_count)
+    setup_units = 2
+    progress_units_per_trial = required_magnet_count if include_self_consistent else 1
+    total_progress_units = max(1, setup_units + trial_count * progress_units_per_trial)
+
+    def report_progress(done_units: int, label: str) -> None:
+        if progress_callback is None:
+            return
+        fraction = min(1.0, max(0.0, float(done_units) / float(total_progress_units)))
+        progress_callback(fraction, label)
+
+    report_progress(1, "Sensitivity data ready")
+    report_progress(2, "Starting simulation trials")
 
     def run_one_trial(trial_id: int) -> SimulationTrialArtifacts:
         trial_seed = int(seed) + trial_id
@@ -215,6 +258,18 @@ def _run_ring_simulation(
             work_units,
             sensitivity_table=None if mpc_strategy == "legacy" else sensitivity_table,
         )
+        sc_progress = None
+        if include_self_consistent and worker_count == 1:
+
+            def sc_progress(done_slots: int, total_slots: int) -> None:
+                done_units = 2 + trial_id * progress_units_per_trial + int(done_slots)
+                report_progress(
+                    done_units,
+                    (
+                        f"Trial {trial_id + 1}/{trial_count}: "
+                        f"self-consistent placement {done_slots}/{total_slots}"
+                    ),
+                )
 
         result = run_simulation_trial(
             slots,
@@ -230,9 +285,12 @@ def _run_ring_simulation(
             cluster_pickup_policy=cluster_pickup_policy,
             cluster_mpc_config=mpc_config if cluster_pickup_policy == "cluster_mpc" else None,
             quota_plans=quota_plans,
+            include_self_consistent=include_self_consistent,
+            self_consistent_config=sc_config,
             evaluation_model=evaluation_model,
             self_consistent_evaluation_config=sc_eval_config,
             factor=FACTOR,
+            self_consistent_progress_callback=sc_progress,
         )
         return SimulationTrialArtifacts(
             trial_id=trial_id,
@@ -243,13 +301,28 @@ def _run_ring_simulation(
             quota_plans=quota_plans,
         )
 
-    trial_count = int(trials)
-    worker_count = min(max(1, int(trial_workers)), trial_count)
     if worker_count == 1:
-        artifacts = [run_one_trial(trial_id) for trial_id in range(trial_count)]
+        artifacts = []
+        for trial_id in range(trial_count):
+            artifacts.append(run_one_trial(trial_id))
+            report_progress(
+                2 + (trial_id + 1) * progress_units_per_trial,
+                f"Trial {trial_id + 1}/{trial_count} completed",
+            )
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            artifacts = list(executor.map(run_one_trial, range(trial_count)))
+            futures = {
+                executor.submit(run_one_trial, trial_id): trial_id
+                for trial_id in range(trial_count)
+            }
+            artifacts = []
+            for completed_count, future in enumerate(as_completed(futures), start=1):
+                artifact = future.result()
+                artifacts.append(artifact)
+                report_progress(
+                    2 + completed_count * progress_units_per_trial,
+                    f"Completed {completed_count}/{trial_count} trials",
+                )
         artifacts.sort(key=lambda artifact: artifact.trial_id)
 
     summary = summarize_comparison_results([artifact.result for artifact in artifacts])
@@ -259,7 +332,7 @@ def _run_ring_simulation(
         slots,
         summary,
         metadata={
-            "engine": "linear_sensitivity",
+            "engine": engine,
             "evaluation_model": evaluation_model_label,
             "run_path": run_path,
             "work_unit_mode": work_unit_mode,
@@ -283,8 +356,24 @@ def _run_ring_simulation(
             "sensitivity_cache_key": sensitivity_cache.cache_key,
             "sensitivity_cache_path": str(sensitivity_cache.cache_path),
             "trial_workers": worker_count,
+            "self_consistent": (
+                None
+                if sc_config is None
+                else {
+                    "source": "run",
+                    "chi": float(sc_config.chi),
+                    "Nd": float(sc_config.Nd),
+                    "p0": float(sc_config.p0),
+                    "volume_m3": float(sc_config.volume_m3),
+                    "iters": int(sc_config.iters),
+                    "omega": float(sc_config.omega),
+                    "max_linear_candidates": int(sc_config.max_linear_candidates),
+                    "backend": sc_config.backend,
+                }
+            ),
         },
     )
+    report_progress(total_progress_units, "Simulation outputs written")
 
 
 def _trial_file_rows(out_dir: Path, trial_id: int) -> list[dict[str, object]]:
@@ -332,6 +421,11 @@ with st.sidebar:
     out_dir = st.text_input(
         "Output directory",
         value=default_plan_c_child_output_dir(run_path, "plan_c_ring"),
+    )
+    engine = st.selectbox(
+        "Plan C engine",
+        ["linear_sensitivity", "sequential_self_consistent"],
+        index=0,
     )
     work_unit_mode = cast(
         BuildWorkUnitMode,
@@ -464,11 +558,27 @@ with st.sidebar:
     run_clicked = st.button("Run Ring Simulation", type="primary")
 
 if run_clicked:
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    last_progress_percent = -1
+
+    def update_progress(fraction: float, label: str) -> None:
+        nonlocal_last = st.session_state.get("_plan_c_ring_progress_percent", -1)
+        percent = int(round(min(1.0, max(0.0, float(fraction))) * 100.0))
+        if percent == nonlocal_last and percent not in (0, 100):
+            return
+        st.session_state["_plan_c_ring_progress_percent"] = percent
+        progress_bar.progress(percent)
+        progress_text.markdown(f"**Overall progress: {percent}%**  \n{label}")
+
     try:
+        st.session_state["_plan_c_ring_progress_percent"] = last_progress_percent
+        update_progress(0.0, "Starting ring simulation")
         with st.spinner("Running Plan C ring simulation..."):
             _run_ring_simulation(
                 run_path=run_path,
                 out_dir=out_dir,
+                engine=str(engine),
                 work_unit_mode=work_unit_mode,
                 cluster_pickup_policy=cluster_pickup_policy,
                 strength_count=int(strength_count),
@@ -500,7 +610,9 @@ if run_clicked:
                 measurement_direction_sigma_2=float(measurement_direction_sigma_2),
                 magnet_surplus_fraction=float(magnet_surplus_percent) / 100.0,
                 trial_workers=int(trial_workers),
+                progress_callback=update_progress,
             )
+        update_progress(1.0, "Ring simulation completed")
         st.success("Ring simulation completed")
     except Exception as exc:  # pragma: no cover - UI safety net
         st.error(str(exc))

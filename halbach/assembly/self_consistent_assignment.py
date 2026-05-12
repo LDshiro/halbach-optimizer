@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any, Literal
@@ -864,6 +864,7 @@ def run_self_consistent_assignment(
     evaluate_completed_work_units: bool = False,
     work_unit_evaluation_stride: int = 1,
     p0_flat_override: FloatArray | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> SelfConsistentAssignmentResult:
     """Sequential Plan C assignment using self-consistent candidate re-evaluation."""
     _validate_config(config)
@@ -922,6 +923,8 @@ def run_self_consistent_assignment(
             remaining_unit_slot_ids.remove(candidate.slot_flat_id)
             decisions.append(decision)
             magnet_index += 1
+            if progress_callback is not None:
+                progress_callback(len(placements), len(slots))
         if evaluate_completed_work_units and (
             (work_unit_index + 1) % work_unit_evaluation_stride == 0
             or work_unit_index == len(ordered_work_units) - 1
@@ -981,6 +984,7 @@ def run_ring_constrained_self_consistent_assignment(
     evaluate_completed_work_units: bool = False,
     work_unit_evaluation_stride: int = 1,
     p0_flat_override: FloatArray | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> SelfConsistentAssignmentResult:
     """Sequential self-consistent assignment constrained to one work unit at a time."""
     return run_self_consistent_assignment(
@@ -997,6 +1001,7 @@ def run_ring_constrained_self_consistent_assignment(
         evaluate_completed_work_units=evaluate_completed_work_units,
         work_unit_evaluation_stride=work_unit_evaluation_stride,
         p0_flat_override=p0_flat_override,
+        progress_callback=progress_callback,
     )
 
 

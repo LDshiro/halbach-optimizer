@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -331,6 +331,7 @@ def run_self_consistent_baseline(
     work_unit_evaluation_stride: int = 1,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> SelfConsistentSimulationResult:
     """Run the Step 9 sequential self-consistent placement and evaluate it."""
     _validate_slot_table_coverage(slots, sensitivity_table)
@@ -352,6 +353,7 @@ def run_self_consistent_baseline(
         work_units=work_units,
         evaluate_completed_work_units=evaluate_completed_work_units,
         work_unit_evaluation_stride=work_unit_evaluation_stride,
+        progress_callback=progress_callback,
     )
     return SelfConsistentSimulationResult(
         placements=assignment.placements,
@@ -384,6 +386,7 @@ def run_simulation_trial(
     self_consistent_evaluation_config: SelfConsistentConfig | None = None,
     factor: float = FACTOR,
     min_B0_norm: float = 1e-18,
+    self_consistent_progress_callback: Callable[[int, int], None] | None = None,
 ) -> SimulationComparisonResult:
     """Compare random, linear sensitivity, and optional self-consistent Plan C placements."""
     random_result = run_random_baseline(
@@ -441,6 +444,7 @@ def run_simulation_trial(
             work_unit_evaluation_stride=self_consistent_work_unit_evaluation_stride,
             factor=float(factor),
             min_B0_norm=min_B0_norm,
+            progress_callback=self_consistent_progress_callback,
         )
         sc_rms = self_consistent_result.evaluation.metrics.rms_homogeneity_ppm
         sc_j = self_consistent_result.evaluation.metrics.J_vector

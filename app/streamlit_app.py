@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - Streamlit may start with app/ on sys.path; bootstrap repo root first.
+
 import importlib.util
 import json
 import re
@@ -9,6 +11,10 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import plotly.graph_objects as go
@@ -57,10 +63,6 @@ if TYPE_CHECKING:
     from halbach.run_types import RunBundle
 
 PlotlyMode = Literal["fast", "pretty", "cubes", "cubes_arrows"]
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 DEFAULT_HUMAN_OVERLAY_OBJ = "10688_GenericMale_v2.obj"
 DEFAULT_COIL_OVERLAY_DIR = "coil"

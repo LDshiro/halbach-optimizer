@@ -318,6 +318,25 @@ def test_small_generated_run_self_consistent_assignment_completes(tmp_path: Path
     assert np.isfinite(result.final_evaluation.metrics.J_vector)
 
 
+def test_self_consistent_assignment_reports_progress() -> None:
+    slots = _manual_slots(4)
+    table = _manual_table(slots)
+    magnets = _manual_magnets(len(slots))
+    progress: list[tuple[int, int]] = []
+
+    result = run_self_consistent_assignment(
+        table,
+        slots,
+        magnets,
+        _manual_points(),
+        SelfConsistentConfig(chi=0.0, max_linear_candidates=2),
+        progress_callback=lambda done, total: progress.append((done, total)),
+    )
+
+    assert len(result.placements) == len(slots)
+    assert progress == [(idx, len(slots)) for idx in range(1, len(slots) + 1)]
+
+
 def test_seed_fixed_magnets_make_assignment_reproducible() -> None:
     slots = _manual_slots(5)
     table = _manual_table(slots)

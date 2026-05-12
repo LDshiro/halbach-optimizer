@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+# ruff: noqa: E402 - Streamlit may start with this page directory on sys.path.
+
 import json
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 import streamlit as st
