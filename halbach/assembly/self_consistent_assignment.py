@@ -1,0 +1,1017 @@
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from time import perf_counter
+from typing import Any, Literal
+
+import numpy as np
+
+from halbach.angles_runtime import u_rkn_from_run
+from halbach.assembly.field_eval import (
+    compute_field_metrics,
+    evaluate_fixed_placement,
+    moment_vector_from_error,
+)
+from halbach.assembly.inventory import decrement_cluster
+from halbach.assembly.online_assignment import score_linear_candidates
+from halbach.assembly.orientations import rotate_error_for_orientation
+from halbach.assembly.types import (
+    AssemblySlot,
+    ClusterAssignment,
+    ClusterInventory,
+    FieldEvaluation,
+    FieldMetrics,
+    LinearCandidate,
+    MagnetError,
+    Placement,
+    SensitivityTable,
+    VirtualMagnet,
+    WorkUnit,
+)
+from halbach.constants import FACTOR
+from halbach.constants import m0 as nominal_moment_m0
+from halbach.constants import mu0
+from halbach.magnetization_runtime import compute_p_flat_self_consistent_from_u_jax
+from halbach.physics import compute_B_and_B0_from_m_flat
+from halbach.radial_profile import flatten_ring_active_mask, radial_profile_from_run
+from halbach.run_types import RunBundle
+from halbach.types import FloatArray, Geometry
+
+
+@dataclass(frozen=True)
+class SelfConsistentConfig:
+    """
+    Small-run sequential self-consistent candidate re-evaluation config.
+
+    volume_m3: magnet volume used by the easy-axis update, units m^3
+    max_linear_candidates: number of linear top-k candidates to re-evaluate
+    """
+
+    chi: float = 0.0
+    Nd: float = 1.0 / 3.0
+    p0: float = nominal_moment_m0
+    volume_m3: float = 1.0e-9
+    iters: int = 30
+    omega: float = 0.6
+    factor: float = FACTOR
+    max_linear_candidates: int = 8
+    min_b0_norm: float = 1.0e-18
+    backend: Literal["python", "jax"] = "python"
+    raw_sc_cfg: dict[str, Any] | None = None
+    geom: Geometry | None = None
+    dense_r0_flat: FloatArray | None = None
+    dense_u_flat: FloatArray | None = None
+    active_flat: FloatArray | None = None
+
+
+@dataclass(frozen=True)
+class SelfConsistentCandidateEvaluation:
+    """Self-consistent score for one linear-pruned candidate."""
+
+    candidate: LinearCandidate
+    metrics: FieldMetrics
+    score: float
+    linear_score: float
+    elapsed_s: float
+
+
+@dataclass(frozen=True)
+class SelfConsistentDecision:
+    """Selected candidate and all evaluated candidates for one placement step."""
+
+    selected: SelfConsistentCandidateEvaluation
+    evaluations: tuple[SelfConsistentCandidateEvaluation, ...]
+    evaluated_count: int
+    linear_best_slot_flat_id: int
+    linear_best_orientation_id: str
+
+
+@dataclass(frozen=True)
+class SelfConsistentAssignmentResult:
+    """Completed sequential self-consistent assignment."""
+
+    placements: tuple[Placement, ...]
+    decisions: tuple[SelfConsistentDecision, ...]
+    evaluated_count: int
+    final_evaluation: FieldEvaluation
+    inventory: ClusterInventory | None = None
+    work_unit_evaluations: tuple[SelfConsistentWorkUnitEvaluation, ...] = ()
+
+
+@dataclass(frozen=True)
+class SelfConsistentWorkUnitEvaluation:
+    """Optional self-consistent field evaluation at a completed work-unit boundary."""
+
+    work_unit_id: str
+    work_unit_index: int
+    completed_placement_count: int
+    evaluation: FieldEvaluation
+
+
+def _validate_config(config: SelfConsistentConfig) -> None:
+    if not math.isfinite(config.chi) or config.chi < 0.0:
+        raise ValueError("chi must be finite and >= 0")
+    if not math.isfinite(config.Nd) or config.Nd < 0.0:
+        raise ValueError("Nd must be finite and >= 0")
+    if not math.isfinite(config.p0) or config.p0 <= 0.0:
+        raise ValueError("p0 must be finite and positive")
+    if not math.isfinite(config.volume_m3) or config.volume_m3 <= 0.0:
+        raise ValueError("volume_m3 must be finite and positive")
+    if config.iters < 0:
+        raise ValueError("iters must be >= 0")
+    if not math.isfinite(config.omega) or config.omega < 0.0 or config.omega > 1.0:
+        raise ValueError("omega must be in [0, 1]")
+    if not math.isfinite(config.factor) or config.factor < 0.0:
+        raise ValueError("factor must be finite and >= 0")
+    if config.max_linear_candidates <= 0:
+        raise ValueError("max_linear_candidates must be positive")
+    if not math.isfinite(config.min_b0_norm) or config.min_b0_norm < 0.0:
+        raise ValueError("min_b0_norm must be finite and >= 0")
+    if config.backend not in ("python", "jax"):
+        raise ValueError("backend must be 'python' or 'jax'")
+    if config.backend == "jax":
+        if config.raw_sc_cfg is None:
+            raise ValueError("jax backend requires raw_sc_cfg")
+        if not isinstance(config.raw_sc_cfg, dict):
+            raise ValueError("raw_sc_cfg must be a dict")
+        if config.geom is None:
+            raise ValueError("jax backend requires geom")
+        geom = config.geom
+        expected_m = int(geom.R) * int(geom.K) * int(geom.N)
+        for label, value in (
+            ("dense_r0_flat", config.dense_r0_flat),
+            ("dense_u_flat", config.dense_u_flat),
+        ):
+            if value is None:
+                raise ValueError(f"jax backend requires {label}")
+            arr = np.asarray(value, dtype=np.float64)
+            if arr.shape != (expected_m, 3):
+                raise ValueError(f"{label} must have shape ({expected_m}, 3)")
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"{label} must contain finite values")
+        if config.active_flat is None:
+            raise ValueError("jax backend requires active_flat")
+        active = np.asarray(config.active_flat, dtype=np.float64).reshape(-1)
+        if active.shape != (expected_m,):
+            raise ValueError(f"active_flat must have shape ({expected_m},)")
+        if not np.all(np.isfinite(active)):
+            raise ValueError("active_flat must contain finite values")
+
+
+def _run_self_consistent_meta(run: RunBundle, *, require: bool) -> Mapping[str, Any] | None:
+    magnetization = run.meta.get("magnetization")
+    if not isinstance(magnetization, Mapping):
+        if require:
+            raise ValueError(
+                "run metadata does not contain magnetization.self_consistent; "
+                "use --sc-source manual or select a self-consistent optimization run"
+            )
+        return None
+    sc_raw = magnetization.get("self_consistent")
+    if not isinstance(sc_raw, Mapping):
+        if require:
+            raise ValueError(
+                "run metadata does not contain magnetization.self_consistent; "
+                "use --sc-source manual or select a self-consistent optimization run"
+            )
+        return None
+    return sc_raw
+
+
+def _float_meta(sc: Mapping[str, Any], key: str, default: float) -> float:
+    raw = sc.get(key, default)
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"magnetization.self_consistent.{key} must be finite")
+    return value
+
+
+def _int_meta(sc: Mapping[str, Any], key: str, default: int) -> int:
+    raw = sc.get(key, default)
+    value = int(raw)
+    if value != float(raw):
+        raise ValueError(f"magnetization.self_consistent.{key} must be an integer")
+    return value
+
+
+def self_consistent_config_from_run(
+    run: RunBundle,
+    *,
+    factor: float = FACTOR,
+    max_linear_candidates: int = 8,
+    fallback: SelfConsistentConfig | None = None,
+    require: bool = False,
+) -> SelfConsistentConfig:
+    """
+    Build Plan C self-consistent config from optimization run metadata.
+
+    Reads ``run.meta["magnetization"]["self_consistent"]`` and maps the
+    supported optimization parameters into the lightweight Plan C re-ranker.
+    ``max_linear_candidates`` is a Plan C pruning parameter, so it is supplied
+    by the caller rather than the optimization run.
+    """
+    base = fallback if fallback is not None else SelfConsistentConfig()
+    sc = _run_self_consistent_meta(run, require=require)
+    if sc is None:
+        config = replace(
+            base,
+            factor=float(factor),
+            max_linear_candidates=int(max_linear_candidates),
+        )
+        _validate_config(config)
+        return config
+
+    if "volume_m3" in sc:
+        volume_m3 = _float_meta(sc, "volume_m3", base.volume_m3)
+    else:
+        volume_m3 = _float_meta(sc, "volume_mm3", base.volume_m3 / 1.0e-9) * 1.0e-9
+
+    geom = run.geometry
+    R = int(geom.R)
+    K = int(geom.K)
+    N = int(geom.N)
+    r_bases = np.asarray(run.results.r_bases, dtype=np.float64).reshape(-1)
+    if r_bases.shape != (K,):
+        raise ValueError(f"r_bases shape {r_bases.shape} does not match expected {(K,)}")
+    rho = r_bases[None, :, None] + np.asarray(geom.ring_offsets, dtype=np.float64)[:, None, None]
+    x = rho * np.asarray(geom.cth, dtype=np.float64)[None, None, :]
+    y = rho * np.asarray(geom.sth, dtype=np.float64)[None, None, :]
+    z = np.broadcast_to(
+        np.asarray(geom.z_layers, dtype=np.float64)[None, :, None],
+        (R, K, N),
+    )
+    dense_r0_flat = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+    dense_u_flat = u_rkn_from_run(run).reshape(-1, 3)
+    active_flat = flatten_ring_active_mask(
+        radial_profile_from_run(run).ring_active_mask,
+        N,
+    ).astype(np.float64)
+
+    raw_sc_cfg = dict(sc)
+    raw_sc_cfg.setdefault("volume_mm3", volume_m3 / 1.0e-9)
+
+    config = replace(
+        base,
+        chi=_float_meta(sc, "chi", base.chi),
+        Nd=_float_meta(sc, "Nd", base.Nd),
+        p0=_float_meta(sc, "p0", base.p0),
+        volume_m3=volume_m3,
+        iters=_int_meta(sc, "iters", base.iters),
+        omega=_float_meta(sc, "omega", base.omega),
+        factor=float(factor),
+        max_linear_candidates=int(max_linear_candidates),
+        backend="jax",
+        raw_sc_cfg=raw_sc_cfg,
+        geom=geom,
+        dense_r0_flat=np.ascontiguousarray(dense_r0_flat, dtype=np.float64),
+        dense_u_flat=np.ascontiguousarray(dense_u_flat, dtype=np.float64),
+        active_flat=np.ascontiguousarray(active_flat, dtype=np.float64),
+    )
+    _validate_config(config)
+    return config
+
+
+def _slot_order(slots: Sequence[AssemblySlot]) -> list[AssemblySlot]:
+    if not slots:
+        raise ValueError("slots must be non-empty")
+    ids = [slot.slot_flat_id for slot in slots]
+    if len(ids) != len(set(ids)):
+        raise ValueError("slots contain duplicate slot_flat_id values")
+    return sorted(slots, key=lambda slot: slot.slot_flat_id)
+
+
+def _magnet_map(magnets: Sequence[VirtualMagnet]) -> dict[int, VirtualMagnet]:
+    by_id: dict[int, VirtualMagnet] = {}
+    for magnet in magnets:
+        if magnet.magnet_id in by_id:
+            raise ValueError(f"duplicate magnet_id: {magnet.magnet_id}")
+        by_id[magnet.magnet_id] = magnet
+    return by_id
+
+
+def _zero_error() -> MagnetError:
+    return MagnetError(
+        epsilon_parallel=0.0,
+        delta_perp_1=0.0,
+        delta_perp_2=0.0,
+    )
+
+
+def _placement_by_slot(placements: Sequence[Placement]) -> dict[int, Placement]:
+    by_slot: dict[int, Placement] = {}
+    for placement in placements:
+        if placement.slot_flat_id in by_slot:
+            raise ValueError(f"duplicate placement slot_flat_id: {placement.slot_flat_id}")
+        by_slot[placement.slot_flat_id] = placement
+    return by_slot
+
+
+def _model_arrays_for_candidate(
+    slots: Sequence[AssemblySlot],
+    placed_placements: Sequence[Placement],
+    placed_magnets: Mapping[int, VirtualMagnet],
+    current_magnet: VirtualMagnet | None,
+    candidate: LinearCandidate | None,
+    *,
+    use_measured_errors: bool,
+) -> tuple[FloatArray, FloatArray, tuple[int, ...]]:
+    ordered_slots = _slot_order(slots)
+    placed_by_slot = _placement_by_slot(placed_placements)
+    slot_ids = {slot.slot_flat_id for slot in ordered_slots}
+    unknown_slots = sorted(set(placed_by_slot) - slot_ids)
+    if unknown_slots:
+        raise ValueError(f"placements reference unknown slot ids: {unknown_slots}")
+    if candidate is not None and candidate.slot_flat_id in placed_by_slot:
+        raise ValueError("candidate slot is already occupied")
+    if candidate is not None and candidate.slot_flat_id not in slot_ids:
+        raise ValueError(f"candidate references unknown slot id: {candidate.slot_flat_id}")
+
+    r0_flat = np.empty((len(ordered_slots), 3), dtype=np.float64)
+    m_flat = np.empty((len(ordered_slots), 3), dtype=np.float64)
+    zero = _zero_error()
+    for idx, slot in enumerate(ordered_slots):
+        orientation_id = "O0"
+        error = zero
+        placement = placed_by_slot.get(slot.slot_flat_id)
+        if placement is not None:
+            if placement.magnet_id not in placed_magnets:
+                raise ValueError(f"missing placed magnet id: {placement.magnet_id}")
+            magnet = placed_magnets[placement.magnet_id]
+            error = magnet.measured_error if use_measured_errors else magnet.true_error
+            orientation_id = placement.orientation_id
+        elif candidate is not None and slot.slot_flat_id == candidate.slot_flat_id:
+            if current_magnet is None:
+                raise ValueError("current_magnet is required when candidate is provided")
+            error = (
+                current_magnet.measured_error if use_measured_errors else current_magnet.true_error
+            )
+            orientation_id = candidate.orientation_id
+
+        rotated_error = rotate_error_for_orientation(error, orientation_id)
+        r0_flat[idx, :] = np.asarray(slot.center_m, dtype=np.float64)
+        m_flat[idx, :] = moment_vector_from_error(slot, rotated_error)
+    return (
+        np.ascontiguousarray(r0_flat, dtype=np.float64),
+        np.ascontiguousarray(m_flat, dtype=np.float64),
+        tuple(slot.slot_flat_id for slot in ordered_slots),
+    )
+
+
+def _validate_p0_flat_override(
+    p0_flat_override: FloatArray | None,
+    *,
+    expected_size: int,
+) -> FloatArray | None:
+    if p0_flat_override is None:
+        return None
+    p0 = np.asarray(p0_flat_override, dtype=np.float64).reshape(-1)
+    if p0.shape != (expected_size,):
+        raise ValueError(f"p0_flat_override must have shape ({expected_size},)")
+    if not np.all(np.isfinite(p0)):
+        raise ValueError("p0_flat_override must contain finite values")
+    if np.any(p0 <= 0.0):
+        raise ValueError("p0_flat_override values must be positive")
+    return np.ascontiguousarray(p0, dtype=np.float64)
+
+
+def _solve_easy_axis_p_full(
+    r0_flat: FloatArray,
+    u_flat: FloatArray,
+    p0_flat: FloatArray,
+    config: SelfConsistentConfig,
+) -> FloatArray:
+    if config.chi == 0.0 or config.iters == 0:
+        return np.ascontiguousarray(p0_flat, dtype=np.float64)
+
+    p = np.asarray(p0_flat, dtype=np.float64).copy()
+    denom = 1.0 + float(config.chi) * float(config.Nd)
+    h_factor = float(config.factor) / float(mu0)
+    for _ in range(int(config.iters)):
+        h_axis = np.zeros_like(p)
+        m_flat = p[:, None] * u_flat
+        for i in range(p.size):
+            ui = u_flat[i]
+            ri = r0_flat[i]
+            total = 0.0
+            for j in range(p.size):
+                if i == j:
+                    continue
+                d = ri - r0_flat[j]
+                r2 = float(np.dot(d, d))
+                if r2 <= 0.0:
+                    continue
+                rmag = math.sqrt(r2)
+                rhat = d / rmag
+                mj = m_flat[j]
+                invr3 = 1.0 / (rmag * r2)
+                field = h_factor * (3.0 * float(np.dot(mj, rhat)) * rhat - mj) * invr3
+                total += float(np.dot(field, ui))
+            h_axis[i] = total
+        p_new = (p0_flat + float(config.chi) * float(config.volume_m3) * h_axis) / denom
+        p = (1.0 - float(config.omega)) * p + float(config.omega) * p_new
+    return np.ascontiguousarray(p, dtype=np.float64)
+
+
+def _evaluate_self_consistent_arrays_jax(
+    r0_flat: FloatArray,
+    m_fixed: FloatArray,
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    slot_flat_ids: Sequence[int],
+    p0_flat_override: FloatArray | None,
+) -> FieldEvaluation:
+    if config.geom is None:
+        raise ValueError("jax backend requires geom")
+    if config.raw_sc_cfg is None:
+        raise ValueError("jax backend requires raw_sc_cfg")
+    if config.dense_r0_flat is None or config.dense_u_flat is None or config.active_flat is None:
+        raise ValueError("jax backend requires dense arrays")
+
+    slot_ids = np.asarray(slot_flat_ids, dtype=np.int64).reshape(-1)
+    if slot_ids.shape != (r0_flat.shape[0],):
+        raise ValueError("slot_flat_ids length must match r0_flat rows")
+    if len(set(int(item) for item in slot_ids.tolist())) != slot_ids.size:
+        raise ValueError("slot_flat_ids contain duplicates")
+    dense_r0 = np.asarray(config.dense_r0_flat, dtype=np.float64)
+    dense_u = np.asarray(config.dense_u_flat, dtype=np.float64).copy()
+    dense_p0 = np.full((dense_r0.shape[0],), float(config.p0), dtype=np.float64)
+    active_flat = np.asarray(config.active_flat, dtype=np.float64).reshape(-1)
+    if np.any(slot_ids < 0) or np.any(slot_ids >= dense_r0.shape[0]):
+        raise ValueError("slot_flat_ids contain out-of-range values")
+    if np.any(active_flat[slot_ids] <= 0.0):
+        raise ValueError("slot_flat_ids include inactive optimization slots")
+    if not np.allclose(dense_r0[slot_ids], r0_flat, rtol=0.0, atol=1e-12):
+        raise ValueError("slot center positions do not match run geometry")
+
+    base_p0 = np.linalg.norm(m_fixed, axis=1)
+    if np.any(base_p0 <= 0.0):
+        raise ValueError("all fixed moment vectors must be non-zero")
+    u_active = np.ascontiguousarray(m_fixed / base_p0[:, None], dtype=np.float64)
+    p0_scale = float(config.p0) / float(nominal_moment_m0)
+    p0_active = (
+        np.asarray(p0_flat_override, dtype=np.float64).reshape(-1)
+        if p0_flat_override is not None
+        else np.ascontiguousarray(base_p0 * p0_scale, dtype=np.float64)
+    )
+    if p0_active.shape != (slot_ids.size,):
+        raise ValueError(f"p0_flat_override must have shape ({slot_ids.size},)")
+    if not np.all(np.isfinite(p0_active)) or np.any(p0_active <= 0.0):
+        raise ValueError("p0 values must be finite and positive")
+
+    dense_u[slot_ids, :] = u_active
+    dense_p0[slot_ids] = p0_active
+    p = compute_p_flat_self_consistent_from_u_jax(
+        np.ascontiguousarray(dense_u, dtype=np.float64),
+        np.ascontiguousarray(dense_r0, dtype=np.float64),
+        np.ascontiguousarray(dense_p0, dtype=np.float64),
+        config.geom,
+        config.raw_sc_cfg,
+        active_flat=np.ascontiguousarray(active_flat, dtype=np.float64),
+    )
+    m_sc = np.ascontiguousarray(p[:, None] * dense_u, dtype=np.float64)
+    origin = np.zeros(3, dtype=np.float64)
+    B, B0 = compute_B_and_B0_from_m_flat(
+        np.ascontiguousarray(pts, dtype=np.float64),
+        np.ascontiguousarray(dense_r0, dtype=np.float64),
+        m_sc,
+        float(config.factor),
+        origin,
+    )
+    B_arr = np.ascontiguousarray(B, dtype=np.float64)
+    B0_arr = np.ascontiguousarray(B0, dtype=np.float64)
+    metrics = compute_field_metrics(B_arr, B0_arr, min_B0_norm=config.min_b0_norm)
+    return FieldEvaluation(
+        pts=np.ascontiguousarray(pts, dtype=np.float64),
+        B=B_arr,
+        B0=B0_arr,
+        metrics=metrics,
+    )
+
+
+def evaluate_self_consistent_arrays(
+    r0_flat: FloatArray,
+    m_fixed: FloatArray,
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    p0_flat_override: FloatArray | None = None,
+    slot_flat_ids: Sequence[int] | None = None,
+) -> FieldEvaluation:
+    """Evaluate a fixed-axis self-consistent model from full candidate arrays."""
+    _validate_config(config)
+    r0 = np.asarray(r0_flat, dtype=np.float64)
+    m0 = np.asarray(m_fixed, dtype=np.float64)
+    points = np.asarray(pts, dtype=np.float64)
+    if r0.ndim != 2 or r0.shape[1] != 3:
+        raise ValueError("r0_flat must have shape (M, 3)")
+    if m0.shape != r0.shape:
+        raise ValueError("m_fixed must have the same shape as r0_flat")
+    if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] == 0:
+        raise ValueError("pts must have shape (P, 3) with P >= 1")
+
+    if config.backend == "jax":
+        ids: Sequence[int]
+        if slot_flat_ids is None:
+            if config.dense_r0_flat is None:
+                raise ValueError("slot_flat_ids are required for jax backend")
+            if r0.shape[0] != np.asarray(config.dense_r0_flat).shape[0]:
+                raise ValueError("slot_flat_ids are required for active-slot jax evaluation")
+            ids = tuple(range(r0.shape[0]))
+        else:
+            ids = slot_flat_ids
+        override = _validate_p0_flat_override(p0_flat_override, expected_size=r0.shape[0])
+        return _evaluate_self_consistent_arrays_jax(
+            np.ascontiguousarray(r0, dtype=np.float64),
+            np.ascontiguousarray(m0, dtype=np.float64),
+            np.ascontiguousarray(points, dtype=np.float64),
+            config,
+            slot_flat_ids=ids,
+            p0_flat_override=override,
+        )
+
+    base_p0 = np.linalg.norm(m0, axis=1)
+    if np.any(base_p0 <= 0.0):
+        raise ValueError("all fixed moment vectors must be non-zero")
+    override = _validate_p0_flat_override(p0_flat_override, expected_size=r0.shape[0])
+    p0_scale = float(config.p0) / float(nominal_moment_m0)
+    p0 = (
+        override
+        if override is not None
+        else np.ascontiguousarray(base_p0 * p0_scale, dtype=np.float64)
+    )
+    if np.any(p0 <= 0.0):
+        raise ValueError("all p0 values must be positive")
+    u = np.ascontiguousarray(m0 / base_p0[:, None], dtype=np.float64)
+    p = _solve_easy_axis_p_full(r0, u, np.ascontiguousarray(p0, dtype=np.float64), config)
+    m_sc = np.ascontiguousarray(p[:, None] * u, dtype=np.float64)
+    origin = np.zeros(3, dtype=np.float64)
+    B, B0 = compute_B_and_B0_from_m_flat(
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(r0, dtype=np.float64),
+        m_sc,
+        float(config.factor),
+        origin,
+    )
+    B_arr = np.ascontiguousarray(B, dtype=np.float64)
+    B0_arr = np.ascontiguousarray(B0, dtype=np.float64)
+    metrics = compute_field_metrics(B_arr, B0_arr, min_B0_norm=config.min_b0_norm)
+    return FieldEvaluation(
+        pts=np.ascontiguousarray(points, dtype=np.float64),
+        B=B_arr,
+        B0=B0_arr,
+        metrics=metrics,
+    )
+
+
+def evaluate_self_consistent_placement(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    use_measured_errors: bool = False,
+    p0_flat_override: FloatArray | None = None,
+) -> FieldEvaluation:
+    """Evaluate a complete placement with fixed-axis self-consistent moments."""
+    slot_ids = {slot.slot_flat_id for slot in slots}
+    placement_slot_ids = [placement.slot_flat_id for placement in placements]
+    if len(placement_slot_ids) != len(slot_ids):
+        raise ValueError("placements must contain exactly one assignment for every slot")
+    if len(placement_slot_ids) != len(set(placement_slot_ids)):
+        raise ValueError("placements contain duplicate slot_flat_id values")
+    unknown_slots = sorted(set(placement_slot_ids) - slot_ids)
+    missing_slots = sorted(slot_ids - set(placement_slot_ids))
+    if unknown_slots or missing_slots:
+        raise ValueError(
+            f"placement slot coverage mismatch; unknown={unknown_slots}, missing={missing_slots}"
+        )
+    if (
+        config.backend == "python"
+        and config.chi == 0.0
+        and config.p0 == float(nominal_moment_m0)
+        and p0_flat_override is None
+        and not use_measured_errors
+    ):
+        return evaluate_fixed_placement(
+            slots,
+            magnets,
+            placements,
+            pts,
+            factor=config.factor,
+            min_B0_norm=config.min_b0_norm,
+        )
+    magnet_by_id = _magnet_map(magnets)
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
+        slots,
+        placements,
+        magnet_by_id,
+        None,
+        None,
+        use_measured_errors=use_measured_errors,
+    )
+    return evaluate_self_consistent_arrays(
+        r0_flat,
+        m_flat,
+        pts,
+        config,
+        p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
+    )
+
+
+def evaluate_self_consistent_partial_placement(
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    placements: Sequence[Placement],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    use_measured_errors: bool = False,
+    p0_flat_override: FloatArray | None = None,
+) -> FieldEvaluation:
+    """Evaluate a partial placement with all unfilled slots kept at nominal error."""
+    magnet_by_id = _magnet_map(magnets)
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
+        slots,
+        placements,
+        magnet_by_id,
+        None,
+        None,
+        use_measured_errors=use_measured_errors,
+    )
+    return evaluate_self_consistent_arrays(
+        r0_flat,
+        m_flat,
+        pts,
+        config,
+        p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
+    )
+
+
+def evaluate_self_consistent_candidate(
+    slots: Sequence[AssemblySlot],
+    placed_placements: Sequence[Placement],
+    placed_magnets: Mapping[int, VirtualMagnet],
+    current_magnet: VirtualMagnet,
+    candidate: LinearCandidate,
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    p0_flat_override: FloatArray | None = None,
+) -> FieldEvaluation:
+    """Evaluate a provisional placement with unfilled slots kept nominal."""
+    r0_flat, m_flat, slot_flat_ids = _model_arrays_for_candidate(
+        slots,
+        placed_placements,
+        placed_magnets,
+        current_magnet,
+        candidate,
+        use_measured_errors=True,
+    )
+    return evaluate_self_consistent_arrays(
+        r0_flat,
+        m_flat,
+        pts,
+        config,
+        p0_flat_override=p0_flat_override,
+        slot_flat_ids=slot_flat_ids,
+    )
+
+
+def choose_self_consistent_candidate(
+    table: SensitivityTable,
+    slots: Sequence[AssemblySlot],
+    placed_placements: Sequence[Placement],
+    placed_magnets: Mapping[int, VirtualMagnet],
+    current_magnet: VirtualMagnet,
+    pts: FloatArray,
+    remaining_slot_flat_ids: Sequence[int],
+    config: SelfConsistentConfig,
+    *,
+    residual: FloatArray | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    p0_flat_override: FloatArray | None = None,
+) -> SelfConsistentDecision:
+    """Prune with linear sensitivity, then re-rank by self-consistent field metrics."""
+    _validate_config(config)
+    residual_arr = (
+        np.zeros(table.C.shape[2], dtype=np.float64)
+        if residual is None
+        else np.asarray(residual, dtype=np.float64)
+    )
+    if residual_arr.shape != (table.C.shape[2],):
+        raise ValueError(f"residual must have shape ({table.C.shape[2]},)")
+    if not np.all(np.isfinite(residual_arr)):
+        raise ValueError("residual must contain finite values")
+    linear_candidates = score_linear_candidates(
+        table,
+        np.ascontiguousarray(residual_arr, dtype=np.float64),
+        remaining_slot_flat_ids,
+        current_magnet.measured_error,
+        allowed_orientation_ids=allowed_orientation_ids,
+    )
+    if not linear_candidates:
+        raise ValueError("linear pruning produced no candidates")
+    selected_linear = linear_candidates[: int(config.max_linear_candidates)]
+    evaluations: list[SelfConsistentCandidateEvaluation] = []
+    for candidate in selected_linear:
+        t0 = perf_counter()
+        evaluation = evaluate_self_consistent_candidate(
+            slots,
+            placed_placements,
+            placed_magnets,
+            current_magnet,
+            candidate,
+            pts,
+            config,
+            p0_flat_override=p0_flat_override,
+        )
+        elapsed_s = perf_counter() - t0
+        evaluations.append(
+            SelfConsistentCandidateEvaluation(
+                candidate=candidate,
+                metrics=evaluation.metrics,
+                score=evaluation.metrics.J_vector,
+                linear_score=candidate.score,
+                elapsed_s=elapsed_s,
+            )
+        )
+    evaluations.sort(
+        key=lambda item: (
+            item.score,
+            item.linear_score,
+            item.candidate.slot_flat_id,
+            table.orientation_id.index(item.candidate.orientation_id),
+        )
+    )
+    best_linear = linear_candidates[0]
+    return SelfConsistentDecision(
+        selected=evaluations[0],
+        evaluations=tuple(evaluations),
+        evaluated_count=len(evaluations),
+        linear_best_slot_flat_id=best_linear.slot_flat_id,
+        linear_best_orientation_id=best_linear.orientation_id,
+    )
+
+
+def _validate_slot_table_coverage(
+    slots: Sequence[AssemblySlot],
+    table: SensitivityTable,
+) -> None:
+    slot_ids = {slot.slot_flat_id for slot in slots}
+    table_slot_ids = {int(slot_id) for slot_id in table.slot_flat_id.tolist()}
+    if slot_ids != table_slot_ids:
+        missing_in_table = sorted(slot_ids - table_slot_ids)
+        missing_in_slots = sorted(table_slot_ids - slot_ids)
+        raise ValueError(
+            "slot/table coverage mismatch; "
+            f"missing_in_table={missing_in_table}, missing_in_slots={missing_in_slots}"
+        )
+
+
+def _cluster_by_magnet(
+    assignments: Sequence[ClusterAssignment] | None,
+    magnets: Sequence[VirtualMagnet],
+) -> dict[int, str | None]:
+    if assignments is None:
+        return {magnet.magnet_id: None for magnet in magnets}
+    if len(assignments) != len(magnets):
+        raise ValueError("assignments length must match magnets length")
+    magnet_ids = {magnet.magnet_id for magnet in magnets}
+    seen: set[int] = set()
+    cluster_by_magnet: dict[int, str | None] = {}
+    for assignment in assignments:
+        if assignment.magnet_id in seen:
+            raise ValueError("assignments contain duplicate magnet_id values")
+        seen.add(assignment.magnet_id)
+        if assignment.magnet_id not in magnet_ids:
+            raise ValueError(f"assignment references unknown magnet_id: {assignment.magnet_id}")
+        if assignment.quarantine_id is not None:
+            raise ValueError("quarantined magnets are not supported by self-consistent assignment")
+        if assignment.cluster_id is None:
+            raise ValueError("normal assignment must include cluster_id")
+        cluster_by_magnet[assignment.magnet_id] = assignment.cluster_id
+    missing = sorted(magnet_ids - seen)
+    if missing:
+        raise ValueError(f"assignments missing magnet ids: {missing}")
+    return cluster_by_magnet
+
+
+def _ordered_work_unit_slot_ids(
+    table: SensitivityTable,
+    work_units: Sequence[WorkUnit] | None,
+) -> tuple[tuple[str, tuple[int, ...]], ...]:
+    table_slot_ids = tuple(int(slot_id) for slot_id in table.slot_flat_id.tolist())
+    if work_units is None:
+        return (("W_ALL", table_slot_ids),)
+    if not work_units:
+        raise ValueError("work_units must be non-empty")
+    table_slot_set = set(table_slot_ids)
+    seen: set[int] = set()
+    ordered: list[tuple[str, tuple[int, ...]]] = []
+    for unit in work_units:
+        if not unit.slot_flat_ids:
+            raise ValueError(f"work unit {unit.work_unit_id} has no slots")
+        unit_slots = tuple(int(slot_id) for slot_id in unit.slot_flat_ids)
+        for slot_id in unit_slots:
+            if slot_id in seen:
+                raise ValueError(f"slot_flat_id {slot_id} appears in multiple work units")
+            if slot_id not in table_slot_set:
+                raise ValueError(f"work unit references unknown slot_flat_id: {slot_id}")
+            seen.add(slot_id)
+        ordered.append((unit.work_unit_id, unit_slots))
+    if seen != table_slot_set:
+        missing = sorted(table_slot_set - seen)
+        extra = sorted(seen - table_slot_set)
+        raise ValueError(f"work unit slot coverage mismatch; missing={missing}, extra={extra}")
+    return tuple(ordered)
+
+
+def _ordered_magnets(
+    magnets: Sequence[VirtualMagnet],
+    magnet_by_id: Mapping[int, VirtualMagnet],
+    magnet_order: Sequence[int] | None,
+) -> list[VirtualMagnet]:
+    if magnet_order is None:
+        return list(magnets)
+    if len(magnet_order) != len(magnets):
+        raise ValueError("magnet_order length must match magnets length")
+    if len(set(int(item) for item in magnet_order)) != len(magnet_order):
+        raise ValueError("magnet_order contains duplicate magnet ids")
+    unknown = sorted(set(int(item) for item in magnet_order) - set(magnet_by_id))
+    if unknown:
+        raise ValueError(f"magnet_order references unknown magnet ids: {unknown}")
+    return [magnet_by_id[int(magnet_id)] for magnet_id in magnet_order]
+
+
+def run_self_consistent_assignment(
+    table: SensitivityTable,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    *,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+    work_units: Sequence[WorkUnit] | None = None,
+    evaluate_completed_work_units: bool = False,
+    work_unit_evaluation_stride: int = 1,
+    p0_flat_override: FloatArray | None = None,
+) -> SelfConsistentAssignmentResult:
+    """Sequential Plan C assignment using self-consistent candidate re-evaluation."""
+    _validate_config(config)
+    _validate_slot_table_coverage(slots, table)
+    if len(magnets) != len(slots):
+        raise ValueError("magnets count must match slot count")
+    if work_unit_evaluation_stride <= 0:
+        raise ValueError("work_unit_evaluation_stride must be positive")
+    magnet_by_id = _magnet_map(magnets)
+    ordered_magnets = _ordered_magnets(magnets, magnet_by_id, magnet_order)
+    ordered_work_units = _ordered_work_unit_slot_ids(table, work_units)
+    placed_magnets: dict[int, VirtualMagnet] = {}
+    placements: list[Placement] = []
+    decisions: list[SelfConsistentDecision] = []
+    work_unit_evaluations: list[SelfConsistentWorkUnitEvaluation] = []
+    current_inventory = inventory
+    clusters = _cluster_by_magnet(assignments, magnets)
+    residual = np.zeros(table.C.shape[2], dtype=np.float64)
+    magnet_index = 0
+
+    for work_unit_index, (work_unit_id, unit_slot_ids) in enumerate(ordered_work_units):
+        remaining_unit_slot_ids = list(unit_slot_ids)
+        while remaining_unit_slot_ids:
+            magnet = ordered_magnets[magnet_index]
+            decision = choose_self_consistent_candidate(
+                table,
+                slots,
+                placements,
+                placed_magnets,
+                magnet,
+                pts,
+                remaining_unit_slot_ids,
+                config,
+                residual=residual,
+                allowed_orientation_ids=allowed_orientation_ids,
+                p0_flat_override=p0_flat_override,
+            )
+            cluster_id = clusters.get(magnet.magnet_id)
+            if current_inventory is not None and cluster_id is not None:
+                current_inventory = decrement_cluster(current_inventory, cluster_id)
+            candidate = decision.selected.candidate
+            placement = Placement(
+                slot_flat_id=candidate.slot_flat_id,
+                magnet_id=magnet.magnet_id,
+                orientation_id=candidate.orientation_id,
+                cluster_requested=cluster_id,
+                insert_order=len(placements),
+                decision_engine="sequential_self_consistent",
+            )
+            placements.append(placement)
+            placed_magnets[magnet.magnet_id] = magnet
+            residual = np.ascontiguousarray(
+                residual + candidate.contribution,
+                dtype=np.float64,
+            )
+            remaining_unit_slot_ids.remove(candidate.slot_flat_id)
+            decisions.append(decision)
+            magnet_index += 1
+        if evaluate_completed_work_units and (
+            (work_unit_index + 1) % work_unit_evaluation_stride == 0
+            or work_unit_index == len(ordered_work_units) - 1
+        ):
+            work_unit_evaluations.append(
+                SelfConsistentWorkUnitEvaluation(
+                    work_unit_id=work_unit_id,
+                    work_unit_index=work_unit_index,
+                    completed_placement_count=len(placements),
+                    evaluation=evaluate_self_consistent_partial_placement(
+                        slots,
+                        magnets,
+                        placements,
+                        pts,
+                        config,
+                        p0_flat_override=p0_flat_override,
+                    ),
+                )
+            )
+
+    if magnet_index != len(ordered_magnets):
+        raise ValueError(
+            "self-consistent assignment consumed an unexpected number of magnets; "
+            f"used={magnet_index}, total={len(ordered_magnets)}"
+        )
+
+    final_evaluation = evaluate_self_consistent_placement(
+        slots,
+        magnets,
+        placements,
+        pts,
+        config,
+        p0_flat_override=p0_flat_override,
+    )
+    return SelfConsistentAssignmentResult(
+        placements=tuple(placements),
+        decisions=tuple(decisions),
+        evaluated_count=sum(decision.evaluated_count for decision in decisions),
+        final_evaluation=final_evaluation,
+        inventory=current_inventory,
+        work_unit_evaluations=tuple(work_unit_evaluations),
+    )
+
+
+def run_ring_constrained_self_consistent_assignment(
+    table: SensitivityTable,
+    slots: Sequence[AssemblySlot],
+    magnets: Sequence[VirtualMagnet],
+    pts: FloatArray,
+    config: SelfConsistentConfig,
+    work_units: Sequence[WorkUnit],
+    *,
+    assignments: Sequence[ClusterAssignment] | None = None,
+    inventory: ClusterInventory | None = None,
+    allowed_orientation_ids: Sequence[str] | None = None,
+    magnet_order: Sequence[int] | None = None,
+    evaluate_completed_work_units: bool = False,
+    work_unit_evaluation_stride: int = 1,
+    p0_flat_override: FloatArray | None = None,
+) -> SelfConsistentAssignmentResult:
+    """Sequential self-consistent assignment constrained to one work unit at a time."""
+    return run_self_consistent_assignment(
+        table,
+        slots,
+        magnets,
+        pts,
+        config,
+        assignments=assignments,
+        inventory=inventory,
+        allowed_orientation_ids=allowed_orientation_ids,
+        magnet_order=magnet_order,
+        work_units=work_units,
+        evaluate_completed_work_units=evaluate_completed_work_units,
+        work_unit_evaluation_stride=work_unit_evaluation_stride,
+        p0_flat_override=p0_flat_override,
+    )
+
+
+__all__ = [
+    "SelfConsistentAssignmentResult",
+    "SelfConsistentCandidateEvaluation",
+    "SelfConsistentConfig",
+    "SelfConsistentDecision",
+    "SelfConsistentWorkUnitEvaluation",
+    "choose_self_consistent_candidate",
+    "evaluate_self_consistent_arrays",
+    "evaluate_self_consistent_candidate",
+    "evaluate_self_consistent_partial_placement",
+    "evaluate_self_consistent_placement",
+    "run_ring_constrained_self_consistent_assignment",
+    "run_self_consistent_assignment",
+    "self_consistent_config_from_run",
+]
